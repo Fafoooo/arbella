@@ -3,6 +3,7 @@ src/
 test/
 docs/
 templates/
+assets/
 .github/
 .vscode/
 .idea/
