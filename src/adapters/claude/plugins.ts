@@ -49,10 +49,19 @@ function splitPluginId(id: string): { name: string; marketplace?: string } {
  * PluginEntry per record so user-scope and project-scope installs are both
  * represented; restore only auto-reinstalls scope:"user" entries.
  *
+ * `foldPath` templates the machine-specific `projectPath` (a project-scope
+ * install's absolute path) into {{HOME}}-style placeholders BEFORE it reaches
+ * the manifest — otherwise the raw `/Users/<you>/...` path would be committed to
+ * the repo (a portability + privacy leak). Capture passes the live templater;
+ * the default is identity so callers/tests that don't care keep the raw value.
+ *
  * Malformed records are skipped (graceful absence rule). Returns [] for any
  * non-conforming top-level shape.
  */
-export function parseInstalledPlugins(json: unknown): PluginEntry[] {
+export function parseInstalledPlugins(
+  json: unknown,
+  foldPath: (p: string) => string = (p) => p,
+): PluginEntry[] {
   if (!isRecord(json)) return [];
   const plugins = json.plugins;
   if (!isRecord(plugins)) return [];
@@ -69,7 +78,7 @@ export function parseInstalledPlugins(json: unknown): PluginEntry[] {
       const version =
         typeof rec.version === "string" ? rec.version : undefined;
       const projectPath =
-        typeof rec.projectPath === "string" ? rec.projectPath : undefined;
+        typeof rec.projectPath === "string" ? foldPath(rec.projectPath) : undefined;
 
       const entry: PluginEntry = {
         id,

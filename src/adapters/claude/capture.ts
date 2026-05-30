@@ -303,7 +303,11 @@ export async function capture(
   const marketplacesJson = await readJson(ctx, p.knownMarketplaces, warnings, "known_marketplaces.json");
   const settingsJson = await readJson(ctx, p.settings, warnings, "settings.json");
 
-  const plugins = parseInstalledPlugins(installedJson);
+  // Fold project-scope plugin paths (projectPath) to {{HOME}}-style placeholders,
+  // exactly like file contents — otherwise the raw machine path leaks into the repo.
+  const plugins = parseInstalledPlugins(installedJson, (p) =>
+    ctx.templater.toTemplate(p, ctx.vars),
+  );
   const marketplaces = parseKnownMarketplaces(marketplacesJson);
   const enabledPlugins = extractEnabledPlugins(settingsJson);
 

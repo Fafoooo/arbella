@@ -207,6 +207,35 @@ async function writeCapturedFile(
 }
 
 /**
+ * Split user-scope plugins into those installable via the `codex` CLI now and
+ * those that must be DEFERRED to Codex's own config.toml re-sync.
+ *
+ * A plugin keyed `name@marketplace` can only be `codex plugin install`-ed if its
+ * marketplace was captured (and thus `codex plugin marketplace add`-ed first).
+ * Plugins referencing a marketplace we did NOT capture — e.g. a Codex BUILT-IN
+ * curated marketplace like `openai-curated`, which has no addable source — can't
+ * be resolved by the CLI, so the install would fail every time. Those are left to
+ * the restored config.toml (which still carries their `[plugins."…"]` table) for
+ * Codex to re-sync on next launch. Plugins with no marketplace are installable.
+ */
+export function partitionPluginsForRestore(
+  marketplaces: MarketplaceEntry[],
+  userPlugins: PluginEntry[],
+): { installable: PluginEntry[]; deferred: PluginEntry[] } {
+  const known = new Set(marketplaces.map((m) => m.id));
+  const installable: PluginEntry[] = [];
+  const deferred: PluginEntry[] = [];
+  for (const p of userPlugins) {
+    if (p.marketplace !== undefined && !known.has(p.marketplace)) {
+      deferred.push(p);
+    } else {
+      installable.push(p);
+    }
+  }
+  return { installable, deferred };
+}
+
+/**
  * Best-effort marketplace + plugin reinstall via the `codex` CLI. Failures are
  * logged, never thrown: the written config.toml already carries the tables so
  * Codex can re-sync on next launch.
@@ -238,7 +267,20 @@ async function reinstallPluginsAndMarketplaces(
     }
   }
 
-  for (const plugin of userPlugins) {
+  const { installable, deferred } = partitionPluginsForRestore(marketplaces, userPlugins);
+
+  // Plugins on a built-in / uncaptured marketplace can't be CLI-installed (no
+  // marketplace to resolve them against); the placed config.toml carries them and
+  // Codex re-syncs on next launch. Note it calmly instead of attempting a doomed
+  // install and warning.
+  for (const plugin of deferred) {
+    ctx.log.step(
+      `codex: ${plugin.id} uses a built-in marketplace (${plugin.marketplace}); ` +
+        "left to config.toml for Codex to re-sync.",
+    );
+  }
+
+  for (const plugin of installable) {
     const args = pluginInstallArgs(plugin);
     try {
       await execa("codex", args, { stdout: "ignore", stderr: "ignore", stdin: "ignore" });
