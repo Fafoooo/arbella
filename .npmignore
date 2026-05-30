@@ -1,0 +1,21 @@
+# Source and tooling are not shipped; only dist + README + LICENSE go to npm.
+src/
+test/
+docs/
+templates/
+.github/
+.vscode/
+.idea/
+
+tsconfig.json
+tsup.config.ts
+vitest.config.ts
+BUILD_CONTRACT.md
+STRUCTURE.md
+
+*.log
+.DS_Store
+coverage/
+.vitest/
+.env
+.env.local
