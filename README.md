@@ -39,17 +39,12 @@ arbella pull https://github.com/you/your-setup
 
 ## Install
 
-Needs Node 18+. Not on npm yet, so build it from the repo:
+Needs Node 18+.
 
 ```sh
-git clone https://github.com/Fafoooo/arbella
-cd arbella
-npm install && npm run build
-npm install -g .          # on a system Node install, put sudo in front
+npm install -g arbella
 arbella --help
 ```
-
-Once it's published, this becomes `npm install -g arbella`.
 
 ## What it does
 
