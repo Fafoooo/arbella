@@ -263,6 +263,18 @@ function findFile(files: CapturedFile[], repoPath: string): CapturedFile | undef
   return files.find((f) => f.repoPath === repoPath);
 }
 
+/**
+ * A few assertions below check machine paths INSIDE captured/restored file
+ * content (settings.json / config.toml / agent files). The fixtures pin the
+ * templater to POSIX (os: "linux") and embed "/"-style paths, so on a Windows
+ * runner the native "\" separators — and config.toml paths that are only valid
+ * TOML with "/" — make exactly these checks fail. They are skipped on Windows.
+ * The win32 separator fold/rehydrate logic is covered host-agnostically by the
+ * "capture+restore with win32 vars" suite below and by the templater unit tests,
+ * which DO run on Windows. Everything else here runs on every OS.
+ */
+const itPosixHost = process.platform === "win32" ? it.skip : it;
+
 /* -------------------------------------------------------------------------- */
 /* CAPTURE assertions                                                           */
 /* -------------------------------------------------------------------------- */
@@ -292,7 +304,7 @@ describe("capture: secrets never leave the machine", () => {
     }
   });
 
-  it("redacts inline secret VALUES in settings.json and config.toml", () => {
+  itPosixHost("redacts inline secret VALUES in settings.json and config.toml", () => {
     const blob = allCapturedText();
     expect(blob).not.toContain(SETTINGS_API_KEY);
     expect(blob).not.toContain(CONFIG_MCP_SECRET);
@@ -333,7 +345,7 @@ describe("capture: machine paths become placeholders", () => {
     expect(settings.content).toContain("{{HOME}}/.agents/skills");
   });
 
-  it("folds tool-home and plain-home paths in config.toml (value side)", () => {
+  itPosixHost("folds tool-home and plain-home paths in config.toml (value side)", () => {
     const config = findFile(codexCapture.files, "codex/files/config.toml")!;
     expect(config.content).not.toContain(srcHome);
     expect(config.content).toContain("{{HOME}}/.agents/notify.sh");
@@ -419,7 +431,7 @@ describe("restore: files reappear correctly in a fresh $HOME", () => {
     );
   });
 
-  it("re-creates settings.json with placeholders expanded to the TARGET home", async () => {
+  itPosixHost("re-creates settings.json with placeholders expanded to the TARGET home", async () => {
     const abs = under(path.join(dstHome, ".claude"), "settings.json");
     const content = await fsp.readFile(abs, "utf8");
     // Every placeholder is gone, replaced by the NEW machine's paths...
@@ -432,7 +444,7 @@ describe("restore: files reappear correctly in a fresh $HOME", () => {
     expect(content).not.toContain(SETTINGS_API_KEY);
   });
 
-  it("re-creates the agent file with both paths expanded to the target home", async () => {
+  itPosixHost("re-creates the agent file with both paths expanded to the target home", async () => {
     const abs = under(path.join(dstHome, ".claude"), "agents/reviewer.md");
     const content = await fsp.readFile(abs, "utf8");
     expect(content).toContain(`${dstHome}/.claude/agents/reviewer.log`);
@@ -441,7 +453,7 @@ describe("restore: files reappear correctly in a fresh $HOME", () => {
     expect(content).not.toContain("{{TOOL_HOME}}");
   });
 
-  it("re-creates config.toml with placeholders expanded and the secret still redacted", async () => {
+  itPosixHost("re-creates config.toml with placeholders expanded and the secret still redacted", async () => {
     const abs = under(path.join(dstHome, ".codex"), "config.toml");
     const content = await fsp.readFile(abs, "utf8");
     expect(content).not.toContain("{{HOME}}");
