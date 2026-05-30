@@ -14,7 +14,7 @@
  *      the help footer, sourced from the adapter registry so it never drifts).
  *   2. Declares the single global option `--verbose`, applied via a preAction
  *      hook so debug logging is enabled BEFORE any subcommand action runs.
- *   3. Registers init / backup / restore / status / secrets.
+ *   3. Registers setup / init / push / pull / status / auth / secrets.
  *   4. Parses argv and funnels any thrown error into a single, friendly
  *      top-level handler (log.error + exit 1) so stack traces never leak to the
  *      user. Commander's own --help / --version exits are passed through.
@@ -23,6 +23,10 @@
  * explicitly prefers this over a JSON import, because rootDir:"src" puts
  * package.json outside the compile root and would otherwise fight tsup/NodeNext.
  */
+
+import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 import { Command } from "commander";
 import pc from "picocolors";
@@ -89,7 +93,19 @@ export async function main(argv: string[] = process.argv): Promise<void> {
   await program.parseAsync(argv);
 }
 
-main().catch((err: unknown) => {
+function isDirectRun(): boolean {
+  const entry = process.argv[1];
+  if (!entry) return false;
+
+  const modulePath = fileURLToPath(import.meta.url);
+  try {
+    return fs.realpathSync(entry) === fs.realpathSync(modulePath);
+  } catch {
+    return path.resolve(entry) === modulePath;
+  }
+}
+
+function handleTopLevelError(err: unknown): never {
   // Commander throws a CommanderError for normal control-flow exits (--help,
   // --version, "unknown command"); it has already written its own output and
   // carries the intended exit code. Honor that code without double-printing.
@@ -104,4 +120,8 @@ main().catch((err: unknown) => {
     log.debug(pc.dim(err.stack));
   }
   process.exit(1);
-});
+}
+
+if (isDirectRun()) {
+  main().catch(handleTopLevelError);
+}

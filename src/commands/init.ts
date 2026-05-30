@@ -4,14 +4,14 @@
  * Flow:
  *   1. Detect which tools are installed on this machine (tool-home presence).
  *   2. Prompt (clack) for provider + repo name + tools + sourceOfTruth +
- *      autoBackup + includeSecrets + includeMemories — unless supplied via flags
+ *      auto-push + includeSecrets + includeMemories — unless supplied via flags
  *      or `--yes` (which accepts defaults non-interactively).
  *   3. Create the PRIVATE backup repo if it is missing (core/repo provider) and
  *      resolve its clone URL (`ensureRemoteRepo`).
  *   4. Clone it locally (`ensureLocalClone`).
  *   5. Persist the arbella config (`saveConfig`).
- *   6. Install/remove the throttled auto-backup hook (`setAutoBackup`).
- *   7. Offer to run the first backup right away.
+ *   6. Install/remove the throttled auto-push hook (`setAutoBackup`).
+ *   7. Offer to run the first push right away.
  *
  * SECURITY: this command never prints, logs, or echoes tokens. Provider CLIs
  * (gh/glab) own their own auth; we only ever surface the provider id + repo name
@@ -34,7 +34,7 @@ import {
   select,
   text,
 } from "@clack/prompts";
-import type { Command } from "commander";
+import { Option, type Command } from "commander";
 
 import type {
   AutoBackupMode,
@@ -84,6 +84,7 @@ export interface InitOptions {
   /** Comma-separated tool ids, e.g. "claude,codex". */
   tools?: string;
   sourceOfTruth?: SourceOfTruth;
+  autoPush?: AutoBackupMode;
   autoBackup?: AutoBackupMode;
   /** Accept defaults for anything not supplied via flags (no prompting). */
   yes?: boolean;
@@ -91,7 +92,9 @@ export interface InitOptions {
   includeSecrets?: boolean;
   /** Include memories/ in backups (default false; see R13). */
   includeMemories?: boolean;
-  /** Offer to run the first backup after setup. Commander's --no-backup => false. */
+  /** Offer to run the first push after setup. Commander's --no-push => false. */
+  push?: boolean;
+  /** Legacy alias for --no-push. */
   backup?: boolean;
 }
 
@@ -120,13 +123,16 @@ export function register(program: Command): void {
       "--source-of-truth <which>",
       "conflict winner: local | repo",
     )
-    .option(
-      "--auto-backup <mode>",
-      "auto-backup cadence: off | session-start | daily",
+    .addOption(
+      new Option("--auto-push <mode>", "auto-push cadence: off | session-start | daily"),
+    )
+    .addOption(
+      new Option("--auto-backup <mode>", "legacy alias for --auto-push").hideHelp(),
     )
     .option("--include-secrets", "allow secrets into the private repo (default: off)")
-    .option("--include-memories", "include memories/ in backups (default: off)")
-    .option("--no-backup", "do not offer to run the first backup")
+    .option("--include-memories", "include memories/ in pushes (default: off)")
+    .option("--no-push", "do not offer to run the first push")
+    .addOption(new Option("--no-backup", "legacy alias for --no-push").hideHelp())
     .option("-y, --yes", "accept defaults for anything not provided (no prompts)")
     .action(async (opts: InitOptions) => {
       await run(opts);
@@ -267,21 +273,21 @@ export async function run(opts: InitOptions): Promise<void> {
     return;
   }
 
-  // 11. Install (or remove) the throttled auto-backup hook for the chosen cadence.
+  // 11. Install (or remove) the throttled auto-push hook for the chosen cadence.
   try {
     await setAutoBackup(autoBackup);
     if (autoBackup === "off") {
-      log.step("Auto-backup is off (no session hook installed).");
+      log.step("Auto-push is off (no session hook installed).");
     } else {
-      log.success(`Auto-backup enabled (${autoBackup}).`);
+      log.success(`Auto-push enabled (${autoBackup}).`);
     }
   } catch (err) {
     // Non-fatal: the rest of setup succeeded; the user can re-run later.
-    log.warn(`Could not configure the auto-backup hook: ${errMessage(err)}`);
+    log.warn(`Could not configure the auto-push hook: ${errMessage(err)}`);
   }
 
-  // 12. Offer to run the first backup now.
-  await maybeRunFirstBackup(opts);
+  // 12. Offer to run the first push now.
+  await maybeRunFirstPush(opts);
 
   outro("arbella is configured. Run `arbella push` any time to snapshot your setup.");
 }
@@ -517,26 +523,28 @@ async function resolveSourceOfTruth(
   return picked;
 }
 
-/** Resolve the auto-backup cadence. */
+/** Resolve the auto-push cadence. */
 async function resolveAutoBackup(
   opts: InitOptions,
   fallback: AutoBackupMode,
 ): Promise<AutoBackupMode | undefined> {
-  if (opts.autoBackup) {
-    if (!isAutoBackupMode(opts.autoBackup)) {
+  const requested = opts.autoPush ?? opts.autoBackup;
+  if (requested) {
+    if (!isAutoBackupMode(requested)) {
+      const flag = opts.autoPush ? "--auto-push" : "--auto-backup";
       throw new Error(
-        `Invalid --auto-backup "${opts.autoBackup}". Use off | session-start | daily.`,
+        `Invalid ${flag} "${requested}". Use off | session-start | daily.`,
       );
     }
-    return opts.autoBackup;
+    return requested;
   }
   if (opts.yes) return fallback;
 
   const picked = await select({
-    message: "Auto-backup cadence?",
+    message: "Auto-push cadence?",
     initialValue: fallback,
     options: [
-      { value: "off" as AutoBackupMode, label: "Off", hint: "manual backups only" },
+      { value: "off" as AutoBackupMode, label: "Off", hint: "manual pushes only" },
       {
         value: "session-start" as AutoBackupMode,
         label: "On session start",
@@ -581,34 +589,34 @@ async function resolveBooleanOption(args: {
 }
 
 /* -------------------------------------------------------------------------- */
-/* First backup                                                                */
+/* First push                                                                  */
 /* -------------------------------------------------------------------------- */
 
 /**
- * Offer to run the first backup. Suppressed by `--no-backup`. The backup command
+ * Offer to run the first push. Suppressed by `--no-push`. The push command
  * is dynamically imported so init stays decoupled from it at compile time and
  * never hard-fails if it is unavailable.
  */
-async function maybeRunFirstBackup(opts: InitOptions): Promise<void> {
-  if (opts.backup === false) return;
+async function maybeRunFirstPush(opts: InitOptions): Promise<void> {
+  if (opts.push === false || opts.backup === false) return;
 
   let go: boolean;
   if (opts.yes) {
     go = true;
   } else {
     const answer = await confirm({
-      message: "Run the first backup now?",
+      message: "Run the first push now?",
       initialValue: true,
     });
     if (isCancel(answer)) {
-      // Treat a cancel here as "skip the backup" — setup itself already succeeded.
-      log.step("Skipped the first backup. Run `arbella push` when ready.");
+      // Treat a cancel here as "skip the push" — setup itself already succeeded.
+      log.step("Skipped the first push. Run `arbella push` when ready.");
       return;
     }
     go = answer;
   }
   if (!go) {
-    log.step("Skipped the first backup. Run `arbella push` when ready.");
+    log.step("Skipped the first push. Run `arbella push` when ready.");
     return;
   }
 
@@ -617,14 +625,14 @@ async function maybeRunFirstBackup(opts: InitOptions): Promise<void> {
       run?: (o: { dryRun?: boolean; auto?: boolean; message?: string }) => Promise<void>;
     };
     if (typeof mod.run !== "function") {
-      log.warn("Backup command unavailable; run `arbella push` manually.");
+      log.warn("Push command unavailable; run `arbella push` manually.");
       return;
     }
-    log.step("Running first backup…");
+    log.step("Running first push...");
     await mod.run({});
   } catch (err) {
     log.warn(
-      `First backup did not complete: ${errMessage(err)}. ` +
+      `First push did not complete: ${errMessage(err)}. ` +
         "You can run `arbella push` later.",
     );
   }

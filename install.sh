@@ -3,7 +3,7 @@
 # arbella installer — wraps `npm install -g arbella`.
 #
 # Usage:
-#   curl -fsSL https://raw.githubusercontent.com/fabioschmickl/arbella/main/install.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/Fafoooo/arbella/main/install.sh | sh
 #
 # This is an OPTIONAL convenience. It is exactly equivalent to running
 # `npm install -g arbella` yourself; it only adds a friendly prerequisite check

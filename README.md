@@ -101,7 +101,7 @@ The one-time wiring. Pick a host (GitHub, GitLab, or a plain Git URL); if the re
 
 ```sh
 arbella init
-arbella init --provider github --repo you/your-setup --auto-backup daily -y
+arbella init --provider github --repo you/your-setup --auto-push daily -y
 ```
 
 Saves your preferences:
