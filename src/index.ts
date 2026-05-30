@@ -1,5 +1,5 @@
 /**
- * arbella — CLI entry point (BUILD_CONTRACT §5.19).
+ * arbella — CLI entry point.
  *
  * NOTE: do NOT add a `#!/usr/bin/env node` shebang here — tsup injects it via
  * `banner.js` in tsup.config.ts, and a second one in the source would land on

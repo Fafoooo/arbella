@@ -7,7 +7,7 @@
  * never hardcoded) and is keyed by HOST (e.g. "github.com"), so a machine that
  * pushes to several hosts keeps a token for each.
  *
- * HARD SECURITY RULES (BUILD_CONTRACT §0.6 + the auth task):
+ * HARD SECURITY RULES:
  *   - This file is the ONLY place a token is written at rest, and it lives ONLY
  *     in arbella's own data dir — NEVER in the backup repo, a manifest, the
  *     README, git history, or arbella's machine config.
@@ -17,7 +17,7 @@
  *   - Token VALUES are never logged or returned in error messages. Listing /
  *     status surfaces metadata only (host, provider, createdAt, a masked hint).
  *
- * LIBRARY PURITY (BUILD_CONTRACT §0.5): no system clock is read here. When a
+ * LIBRARY PURITY: no system clock is read here. When a
  * caller saves a token it passes the `createdAt` ISO string (the command layer
  * owns the clock); the store just records it.
  *

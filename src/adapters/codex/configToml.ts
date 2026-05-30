@@ -1,7 +1,7 @@
 /**
  * config.toml processing for the Codex adapter — the trickiest piece.
  *
- * Responsibility (BUILD_CONTRACT §4 + §5.12):
+ * Responsibility:
  *   - parse `config.toml` with smol-toml;
  *   - REDACT secret VALUES under [mcp_servers.*] (env maps, headers, tokens) and
  *     [shell_environment_policy.set] using the sanitizer's key-name + value

@@ -5,7 +5,7 @@
  * commits, never installs anything. It answers one question: "if I ran
  * `arbella push` right now, what would change in the backup repo?"
  *
- * Strategy (BUILD_CONTRACT §5.17 status):
+ * Strategy:
  *   1. loadConfig() to learn the repo location, the in-scope tools, and options.
  *   2. ensureLocalClone() so there is a working copy to diff against (clone-only;
  *      it does not pull/commit). If the repo has never been backed up, every

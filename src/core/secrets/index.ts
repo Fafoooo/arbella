@@ -8,7 +8,7 @@
  * band (USB stick, password manager, secure channel), and runs `arbella
  * secrets import` on the new machine.
  *
- * Crypto (normative, per BUILD_CONTRACT §5.5):
+ * Crypto (normative):
  *   - key derivation: scryptSync(passphrase, salt(16), 32, SCRYPT_PARAMS)
  *   - cipher:         aes-256-gcm, random iv(12)
  *   - wire format:    base64( MAGIC(4) | salt(16) | iv(12) | authTag(16) | ciphertext )
@@ -207,8 +207,8 @@ export function decryptBundle(blob: string, passphrase: string): SecretBundle {
 
 /**
  * Known secret FILES per tool, relative to that tool's home dir. These are the
- * `kind:"file"` denylisted artifacts verified to exist on real machines
- * (BUILD_CONTRACT §4). Kept here as the self-contained source of truth for
+ * `kind:"file"` denylisted artifacts verified to exist on real machines.
+ * Kept here as the self-contained source of truth for
  * secret-file discovery so this module never depends on the sanitizer module's
  * full denylist (which also lists non-secret junk like caches/sqlite).
  *

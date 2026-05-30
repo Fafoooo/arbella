@@ -1,10 +1,18 @@
 {
   "name": "arbella",
   "version": "0.1.0",
-  "description": "Carry your complete AI dev setup on your back — back up and migrate Claude Code + Codex (+ Cursor) across Linux, macOS, and Windows.",
+  "description": "Set up your AI coding tools once, then rebuild that setup on any machine. Claude Code, Codex & Cursor — Linux, macOS, Windows.",
   "type": "module",
   "license": "MIT",
   "author": "Fafoooo",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Fafoooo/arbella.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Fafoooo/arbella/issues"
+  },
+  "homepage": "https://github.com/Fafoooo/arbella#readme",
   "keywords": [
     "claude-code",
     "codex",
@@ -31,7 +39,9 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
-    "dev": "tsx src/index.ts"
+    "dev": "tsx src/index.ts",
+    "prepack": "npm run build",
+    "prepublishOnly": "npm run typecheck && npm run test"
   },
   "dependencies": {
     "@clack/prompts": "^0.7.0",

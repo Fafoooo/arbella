@@ -7,7 +7,7 @@
  * src/core/manifest/schema.ts. Also builds the argv arrays for the `claude`
  * CLI used on restore.
  *
- * Real on-disk shapes (verified on this machine, see BUILD_CONTRACT §4):
+ * Real on-disk shapes (verified on this machine):
  *
  *   installed_plugins.json:
  *     { "version": 2, "plugins": {

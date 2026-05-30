@@ -10,7 +10,7 @@
  * correct on win32 as well. The `repoPath` prefix, by contrast, is a POSIX-only
  * string used inside the backup repo and is intentionally a literal.
  *
- * Verified against the live ~/.codex (BUILD_CONTRACT §4): config.toml, AGENTS.md,
+ * Verified against the live ~/.codex: config.toml, AGENTS.md,
  * agents/*.toml, hooks/ (+ hooks.json), rules/, prompts/, skills/, vendor_imports/,
  * and memories/ (gated by includeMemories).
  */

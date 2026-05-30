@@ -3,7 +3,7 @@
  * backup repo (R3). Also the entry point the autobackup SessionStart hook calls
  * with `--auto` (R4), and supports `--dry-run` (R14) to preview without writing.
  *
- * Responsibilities (BUILD_CONTRACT §5.17 "backup"):
+ * Responsibilities:
  *   1. Load + validate the local config.
  *   2. When `--auto`, gate the whole run through the throttle (quiet no-op when
  *      it is not yet time to back up).
@@ -33,7 +33,7 @@
  * each adapter's capture(). The generated .gitignore is an additional belt-and-
  * braces guard so a stray secret file can never be committed by accident.
  *
- * CLOCK: per BUILD_CONTRACT §0.5 only the command layer touches the clock. This
+ * CLOCK: only the command layer touches the clock. This
  * module reads `new Date().toISOString()` once and threads it inward (throttle,
  * meta.createdAt, default commit message).
  *
@@ -208,7 +208,7 @@ function buildCaptureContext(
 export async function run(opts: BackupOptions = {}): Promise<void> {
   const dryRun = opts.dryRun === true;
   const auto = opts.auto === true;
-  // Single clock read at the boundary (BUILD_CONTRACT §0.5); threaded inward.
+  // Single clock read at the boundary; threaded inward.
   const nowIso = new Date().toISOString();
 
   const config = await loadConfig();
@@ -233,7 +233,7 @@ export async function run(opts: BackupOptions = {}): Promise<void> {
   }
 
   // Detect which requested tools are actually present on this machine. Absent
-  // tools are skipped with a note (graceful absence, BUILD_CONTRACT §0.8) and
+  // tools are skipped with a note (graceful absence) and
   // their existing repo subtree is left untouched (it may have been captured on
   // another machine).
   const present: ToolId[] = [];
@@ -422,7 +422,7 @@ async function replaceToolFiles(repoRoot: string, result: CaptureResult): Promis
 
   for (const link of result.symlinks) {
     const linkPath = repoJoin(repoRoot, link.repoPath);
-    // Preserve the link target verbatim (BUILD_CONTRACT §3): restore reads it
+    // Preserve the link target verbatim: restore reads it
     // back exactly. fs.symlink removes any pre-existing entry first.
     await fs.symlink(link.target, linkPath);
   }

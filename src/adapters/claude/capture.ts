@@ -2,7 +2,7 @@
  * Capture for the Claude adapter: turn the live ~/.claude tree into a
  * CaptureResult (frozen files + symlinks + reinstall manifest + secret refs).
  *
- * Strategy (BUILD_CONTRACT §5.10):
+ * Strategy:
  *   - Walk FROZEN_PATHS. For each existing path, recurse into files.
  *   - Compute `rel` (POSIX, relative to tool home). Skip if it matches the
  *     Claude denylist (secrets / caches / session noise never leave the box).

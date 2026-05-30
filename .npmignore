@@ -11,8 +11,6 @@ assets/
 tsconfig.json
 tsup.config.ts
 vitest.config.ts
-BUILD_CONTRACT.md
-STRUCTURE.md
 
 *.log
 .DS_Store

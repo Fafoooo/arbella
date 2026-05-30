@@ -10,7 +10,7 @@
  *       stored once under shared/instructions.md, and where that single file is
  *       deployed on restore.
  *
- * LIBRARY PURITY (per BUILD_CONTRACT §0.5): nothing here reads the system clock.
+ * LIBRARY PURITY: nothing here reads the system clock.
  * `createdAt` is supplied by the caller as an ISO string. The R9 helpers are pure
  * and synchronous (no fs) — callers do the reading and pass content in.
  *
@@ -252,7 +252,7 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
 /**
  * Repo path where the single shared instructions file is stored when CLAUDE.md
  * and AGENTS.md are byte-identical. POSIX separators (it is a CapturedFile
- * repoPath, see BUILD_CONTRACT §3).
+ * repoPath).
  */
 export const SHARED_INSTRUCTIONS_REPO_PATH = "shared/instructions.md";
 

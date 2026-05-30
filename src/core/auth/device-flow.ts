@@ -32,7 +32,7 @@
  * requests send `Accept: application/json` so GitHub returns JSON rather than
  * its default form-encoded body.
  *
- * LIBRARY PURITY (BUILD_CONTRACT §0.5): no system clock and no real timers are
+ * LIBRARY PURITY: no system clock and no real timers are
  * read directly in a non-injectable way — the deadline is computed from an
  * injectable `now()` and the wait between polls goes through an injectable
  * `sleep()`, both defaulting to the real implementations. This keeps the poll

@@ -8,7 +8,7 @@
  *   - `arbella secrets import`  : read a blob + passphrase and write the secret
  *     files back onto this machine's tool homes.
  *
- * HARD security rules honored here (BUILD_CONTRACT §0.6 / §5.23):
+ * HARD security rules honored here:
  *   - This flow NEVER touches git. It is completely separate from backup/restore.
  *   - Secret VALUES are never printed, logged, or echoed. The passphrase prompt
  *     uses a masked input; on import we only report file paths, never contents.
@@ -16,7 +16,7 @@
  *     only thing written on import is plaintext onto the user's own tool homes
  *     (with restrictive modes, handled by core/secrets).
  *
- * Clock rule (BUILD_CONTRACT §0.5): the command layer owns the clock. We mint the
+ * Clock rule: the command layer owns the clock. We mint the
  * `createdAt` ISO string here and pass it inward; core/secrets stays clock-free.
  *
  * The actual crypto + file IO lives in core/secrets; this module is a thin,

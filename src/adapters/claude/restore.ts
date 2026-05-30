@@ -4,7 +4,7 @@
  * via the `claude` CLI, re-enable plugins by merging enabledPlugins into the
  * restored settings.json, and reinstall skills.sh skills via `npx skills add`.
  *
- * Placement (BUILD_CONTRACT §5.10):
+ * Placement:
  *   - For each CapturedFile, strip the "claude/files/" prefix from repoPath and
  *     join onto ctx.toolHome. Run templater.fromTemplate FIRST so {{HOME}}/
  *     {{USER}}/... become this machine's real values, then write (restoring the

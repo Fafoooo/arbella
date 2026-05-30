@@ -10,7 +10,7 @@
  * correct on win32 as well. The `repoPath` prefix, by contrast, is a POSIX-only
  * string used inside the backup repo and is intentionally a literal.
  *
- * Cursor reality (BUILD_CONTRACT §4 / §5.14): Cursor is a desktop app and may be
+ * Cursor reality: Cursor is a desktop app and may be
  * entirely absent (no CLI on Linux). The only globally-portable artifact is
  * `~/.cursor/mcp.json` (`{ "mcpServers": { ... } }`). Project-level
  * `.cursor/rules` are repo-specific and out of scope for the global backup; on

@@ -3,8 +3,8 @@
  *
  * This is the FIRST line of defense: any captured path matching the denylist is
  * excluded *wholesale* (the file is never read into the repo at all). Per-tool
- * lists encode the verified reality of ~/.claude and ~/.codex (see BUILD_CONTRACT
- * §4). The matcher is deliberately tiny and dependency-free — no external glob
+ * lists encode the verified reality of ~/.claude and ~/.codex. The matcher is
+ * deliberately tiny and dependency-free — no external glob
  * library — so its behavior is deterministic and auditable.
  *
  * Matching model (POSIX paths, relative to a tool home):

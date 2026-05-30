@@ -1,7 +1,7 @@
 /**
  * `arbella init` — interactive first-run setup (R11, R12, R4-config).
  *
- * Flow (BUILD_CONTRACT §5.17):
+ * Flow:
  *   1. Detect which tools are installed on this machine (tool-home presence).
  *   2. Prompt (clack) for provider + repo name + tools + sourceOfTruth +
  *      autoBackup + includeSecrets + includeMemories — unless supplied via flags
@@ -73,8 +73,8 @@ import { log } from "../utils/log.js";
 /* -------------------------------------------------------------------------- */
 
 /**
- * Flags accepted by `arbella init`. The first six fields are the normative set
- * from BUILD_CONTRACT §5.17; the rest are convenience flags so a fully
+ * Flags accepted by `arbella init`. The first six fields are the normative set;
+ * the rest are convenience flags so a fully
  * non-interactive run is possible (each maps 1:1 onto a config field).
  */
 export interface InitOptions {

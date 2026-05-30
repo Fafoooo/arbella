@@ -7,12 +7,12 @@
  * (`fs`, `log`, `sanitizer`, `templater`) together with the per-machine
  * variable map + detected OS, so every command builds contexts identically.
  *
- * Per BUILD_CONTRACT §5.17 the agreed shape is `buildCoreServices(toolHome)`;
+ * The agreed shape is `buildCoreServices(toolHome)`;
  * we also provide `buildCaptureContext` / `buildRestoreContext` so the
  * backup/restore/status commands don't each hand-roll the extra fields.
  *
  * No system clock here — timestamps are owned by the command entrypoints and
- * passed inward (BUILD_CONTRACT §0.5). This file is pure wiring.
+ * passed inward. This file is pure wiring.
  */
 
 import { confirm, isCancel, password } from "@clack/prompts";

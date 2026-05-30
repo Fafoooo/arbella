@@ -5,7 +5,7 @@
  * We always pass args as an array to `execa("git", [...], { cwd })` — never a
  * shell string — so there is no shell interpolation / injection surface.
  *
- * Error policy (per BUILD_CONTRACT §5.4): a non-zero git exit THROWS, EXCEPT for
+ * Error policy: a non-zero git exit THROWS, EXCEPT for
  * the functions documented to return a boolean (`isGitRepo`, `commit`,
  * `hasRemote`), where a clean boolean is the contract. Those use `reject:false`
  * and inspect the exit code instead of throwing.

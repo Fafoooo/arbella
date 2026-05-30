@@ -9,7 +9,7 @@
  * apt-dnf-pacman + sudo). This module only renders the choices, drives the
  * @clack multiselect, and reports per-dependency results.
  *
- * Interactive flow (BUILD_CONTRACT §5.17 setup):
+ * Interactive flow:
  *   1. Probe every dependency on PATH (concurrently) via `checkInstalled`.
  *   2. Render a @clack multiselect of all dependencies, each labelled with its
  *      rationale + current "installed / not installed" state, PRE-CHECKING the
@@ -39,7 +39,7 @@
  * `core/auth` (which this module deliberately does NOT import). The only output
  * is dependency labels and install progress.
  *
- * No system clock is used here (BUILD_CONTRACT §0.5): setup performs no
+ * No system clock is used here: setup performs no
  * time-stamped library decision; it only detects + installs.
  */
 

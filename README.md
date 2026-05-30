@@ -201,7 +201,7 @@ The Arbella was the flagship of the 1630 Winthrop Fleet — a few hundred settle
 
 ## Status
 
-v0.1. Builds clean, full test suite green, used daily by at least one stubborn person. Issues and pull requests welcome.
+v0.1 — early, but it builds clean, the full test suite passes, and I use it daily. Issues and pull requests welcome.
 
 ## License
 

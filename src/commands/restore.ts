@@ -2,7 +2,7 @@
  * `arbella pull [repoUrl]` — rebuild this machine's AI dev setup from the
  * private repo (R6, R8, R9, R12, R14).
  *
- * High-level flow (BUILD_CONTRACT §5.17 restore):
+ * High-level flow:
  *   1. Resolve the repo: the positional `[repoUrl]` arg wins; otherwise fall back
  *      to `config.repo`. Clone it if it is not already present locally, else pull
  *      so the working copy is fresh (R12).
@@ -35,7 +35,7 @@
  * templater rehydrates {{HOME}}/{{USER}}/{{TOOL_HOME}} placeholders to THIS
  * machine's values inside each adapter. No machine path is ever hardcoded.
  *
- * The command is thin (BUILD_CONTRACT §5.17): it owns flag parsing + the clock
+ * The command is thin: it owns flag parsing + the clock
  * (timestamps are passed inward), assembles CoreServices/RestoreContext, and
  * delegates the real work to the adapters + core modules.
  */
@@ -124,7 +124,7 @@ export interface RestoreOptions {
 /**
  * Per-tool adapter + its (optional) standalone planActions exporter. The Adapter
  * interface itself only exposes restore(); planActions lives as a sibling module
- * export for claude/codex (BUILD_CONTRACT §5.10/§5.13). Cursor has no separate
+ * export for claude/codex. Cursor has no separate
  * planner — its dry-run plan is derived by running restore() with dryRun=true,
  * which logs the intended writes (see cursor/index.ts). We model that uniformly.
  */

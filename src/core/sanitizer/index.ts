@@ -2,7 +2,7 @@
  * The SanitizerService implementation: secret detection & removal so that
  * secrets NEVER leave the machine.
  *
- * Two layers (see BUILD_CONTRACT §5.1, §6):
+ * Two layers:
  *   1. DENYLIST (whole-file exclusion). `isDenied(rel)` answers "is this path
  *      universally junk/secret?" using COMMON_DENY ONLY. The per-tool secret
  *      files (auth.json, .credentials.json, *.sqlite, history.jsonl, ...) live in

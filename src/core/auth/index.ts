@@ -39,7 +39,7 @@
  *
  * NETWORK: device flow uses the Node 18+ global `fetch` (no node-fetch).
  * USER OUTPUT: all human-facing lines go through src/utils/log.ts.
- * CLOCK (BUILD_CONTRACT §0.5): no clock here — callers may pass `createdAt`;
+ * CLOCK: no clock here — callers may pass `createdAt`;
  * when omitted we still store a token but with an epoch timestamp, leaving the
  * authoritative "now" to the command layer (which supplies it).
  */
