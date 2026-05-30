@@ -1,5 +1,5 @@
 /**
- * `arbella backup` — capture the local AI dev setup and push it to the private
+ * `arbella sync` — capture the local AI dev setup and push it to the private
  * backup repo (R3). Also the entry point the autobackup SessionStart hook calls
  * with `--auto` (R4), and supports `--dry-run` (R14) to preview without writing.
  *
@@ -96,7 +96,7 @@ const ARBELLA_VERSION = "0.1.0";
 /* Options + CLI registration                                                  */
 /* -------------------------------------------------------------------------- */
 
-/** Flags accepted by `arbella backup`. */
+/** Flags accepted by `arbella sync`. */
 export interface BackupOptions {
   /** Preview only: compute + print the plan, write/commit/push nothing (R14). */
   dryRun?: boolean;
@@ -112,14 +112,17 @@ export interface BackupOptions {
  */
 export function register(program: Command): void {
   program
-    .command("backup")
-    .description("Capture your AI dev setup and push it to your backup repo")
-    .option("--dry-run", "show what would be backed up without writing or pushing")
+    .command("sync")
+    .alias("backup") // kept so existing `arbella sync` auto-hooks keep working
+    .description(
+      "Synchronize your AI dev setup to your private repo (snapshot local changes, then commit + push).",
+    )
+    .option("--dry-run", "show what would change without writing or pushing")
     .option(
       "--auto",
-      "internal: run from the autobackup hook (throttled, quiet when skipped)",
+      "internal: run from the auto-sync hook (throttled, quiet when skipped)",
     )
-    .option("-m, --message <message>", "commit message for this backup")
+    .option("-m, --message <message>", "commit message for this sync")
     .action(async (opts: BackupOptions) => {
       await run(opts);
     });

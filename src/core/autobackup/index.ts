@@ -12,7 +12,7 @@
  *                                 side-effect, so it stays decoupled from the
  *                                 config module.
  *
- *   - maybeRunBackup(mode, now):  the gate used by `arbella backup --auto`. Returns
+ *   - maybeRunBackup(mode, now):  the gate used by `arbella sync --auto`. Returns
  *                                 true when the throttle says it is time to run, and
  *                                 records `now` as the last-run time when it does so
  *                                 (so the NEXT invocation is correctly throttled).
@@ -44,7 +44,7 @@ export async function setAutoBackup(mode: AutoBackupMode): Promise<void> {
 }
 
 /**
- * Decide whether `arbella backup --auto` should proceed right now.
+ * Decide whether `arbella sync --auto` should proceed right now.
  *
  * Reads the persisted last-run stamp, asks the pure `shouldRun` decision, and —
  * only when the answer is "go" — writes the new stamp so subsequent session-start

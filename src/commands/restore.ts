@@ -71,7 +71,12 @@ import {
   detectOS,
   toolHomeDir,
 } from "../platform/os.js";
-import { ensureCli, which, npmInstallGlobal } from "../platform/install.js";
+import {
+  ensureCli,
+  which,
+  npmInstallGlobal,
+  isForeignPlatformPackage,
+} from "../platform/install.js";
 import { createSanitizer } from "../core/sanitizer/index.js";
 import { createTemplater } from "../core/templater/index.js";
 import { buildVariables } from "../core/templater/variables.js";
@@ -497,7 +502,11 @@ function dedupeNpmGlobals(prepared: PreparedTool[]): string[] {
   const seen = new Set<string>();
   for (const tool of prepared) {
     for (const g of tool.data.manifest.npmGlobals) {
-      if (g.package) seen.add(g.package);
+      if (!g.package) continue;
+      // Never reinstall arbella itself, and skip platform-specific native builds
+      // that only install on their own OS (e.g. *-darwin-arm64 on Linux).
+      if (g.package === "arbella" || isForeignPlatformPackage(g.package)) continue;
+      seen.add(g.package);
     }
   }
   return [...seen].sort((a, b) => a.localeCompare(b));

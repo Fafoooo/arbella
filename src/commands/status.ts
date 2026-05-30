@@ -3,7 +3,7 @@
  *
  * Read-only. Never writes to the tool homes or the repo working tree, never
  * commits, never installs anything. It answers one question: "if I ran
- * `arbella backup` right now, what would change in the backup repo?"
+ * `arbella sync` right now, what would change in the backup repo?"
  *
  * Strategy (BUILD_CONTRACT §5.17 status):
  *   1. loadConfig() to learn the repo location, the in-scope tools, and options.
@@ -737,7 +737,7 @@ function printHuman(report: StatusReport): void {
   log.info(`Backup repo: ${report.repoPath}`);
   if (!report.repoInitialized) {
     log.warn(
-      "Backup repo has no prior backup yet — everything below would be added by the first `arbella backup`.",
+      "Backup repo has no prior backup yet — everything below would be added by the first `arbella sync`.",
     );
   }
   log.step(

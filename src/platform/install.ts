@@ -16,6 +16,9 @@
  *    install path on Linux).
  */
 
+import { promises as fsp, constants as fsConstants } from "node:fs";
+import path from "node:path";
+
 import { execa } from "execa";
 
 import type { OS, ToolId } from "../types.js";
@@ -84,6 +87,114 @@ function managerHint(cmd: string): string {
   return PKG_MANAGER_HINTS[cmd] ?? `\`${cmd}\` (required to install this tool).`;
 }
 
+/* -- global-npm permission handling (so installs work on system Node too) -- */
+
+/** Cached writability of the global npm install dir (constant within a run). */
+let cachedGlobalNpmWritable: boolean | undefined;
+
+/** Walk up to the nearest existing directory and test W_OK. Never throws. */
+async function isPathWritable(target: string): Promise<boolean> {
+  let p = target;
+  for (;;) {
+    try {
+      await fsp.access(p, fsConstants.W_OK);
+      return true;
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code === "ENOENT") {
+        const parent = path.dirname(p);
+        if (parent === p) return false;
+        p = parent;
+        continue;
+      }
+      return false; // EACCES / EPERM / anything else -> not writable
+    }
+  }
+}
+
+/**
+ * True when the npm GLOBAL install dir is writable by the current user — what
+ * decides whether `npm install -g` needs `sudo`:
+ *  - nvm / Homebrew / a user `prefix` / Windows     -> writable -> plain npm.
+ *  - system Node (apt's /usr/lib/node_modules etc.) -> NOT writable -> needs root.
+ * Probes `<npm prefix -g>/lib/node_modules` (Windows: `<prefix>`), climbing to the
+ * nearest existing ancestor. Never throws; unknown -> not writable (prefer sudo,
+ * the safe default for the EACCES case). Cached for the run.
+ */
+async function isGlobalNpmWritable(): Promise<boolean> {
+  if (cachedGlobalNpmWritable !== undefined) return cachedGlobalNpmWritable;
+  let dir: string | null = null;
+  try {
+    const res = await execa("npm", ["prefix", "-g"], {
+      reject: false,
+      stdio: "pipe",
+      timeout: 10_000,
+    });
+    const prefix = (res.stdout ?? "").trim();
+    if (prefix) {
+      dir =
+        detectOS() === "win32" ? prefix : path.join(prefix, "lib", "node_modules");
+    }
+  } catch {
+    // unknown prefix -> treated as not writable below.
+  }
+  cachedGlobalNpmWritable = dir ? await isPathWritable(dir) : false;
+  return cachedGlobalNpmWritable;
+}
+
+/**
+ * Given an install command, add `sudo` IFF it is a global `npm install -g` that
+ * needs root on this machine — and only when sudo is possible. This single choke
+ * point makes EVERY path (restore's CLI installs, the captured-globals reinstall,
+ * and setup) elevate correctly, while user-owned Node (nvm/brew/Windows) is never
+ * needlessly sudo'd. Returns the (possibly elevated) command + a one-line note
+ * when sudo was added.
+ */
+async function elevateForNpmGlobal(
+  cmd: InstallCommand,
+): Promise<{ command: InstallCommand; note?: string }> {
+  if (cmd.cmd !== "npm") return { command: cmd };
+  const a = cmd.args;
+  const installs = a.includes("install") || a.includes("i") || a.includes("add");
+  const global = a.includes("-g") || a.includes("--global");
+  if (!installs || !global) return { command: cmd };
+  if (detectOS() === "win32" || isRoot() || (await isGlobalNpmWritable())) {
+    return { command: cmd };
+  }
+  if (await which("sudo")) {
+    return {
+      command: { cmd: "sudo", args: ["npm", ...a] },
+      note:
+        "The global npm folder needs root here — using sudo for this install. " +
+        "You may be prompted for your password.",
+    };
+  }
+  return { command: cmd };
+}
+
+/**
+ * True for a package whose NAME encodes a platform/arch that is NOT this machine
+ * (e.g. `@scope/tui-darwin-arm64` on Linux). Such native builds only install on
+ * their own OS, so reinstalling them elsewhere just fails noisily — restore skips
+ * them. Conservative: only the unambiguous os tokens darwin/win32/linux as
+ * delimited segments count, so ordinary names (winston, macaron) are safe.
+ */
+export function isForeignPlatformPackage(
+  name: string,
+  os: OS = detectOS(),
+): boolean {
+  const lower = name.toLowerCase();
+  const tokenFor: Record<OS, RegExp> = {
+    darwin: /(^|[-_/@])darwin([-_/]|$)/,
+    win32: /(^|[-_/@])win32([-_/]|$)/,
+    linux: /(^|[-_/@])linux([-_/]|$)/,
+  };
+  for (const other of ["darwin", "win32", "linux"] as OS[]) {
+    if (other !== os && tokenFor[other].test(lower)) return true;
+  }
+  return false;
+}
+
 /**
  * Execute an `InstallCommand` produced by `installCommandFor`.
  *
@@ -102,7 +213,11 @@ export async function runInstall(cmd: InstallCommand | null): Promise<void> {
     return;
   }
 
-  const { cmd: program, args } = cmd;
+  // Elevate a global `npm install -g` with sudo when the global folder is
+  // root-owned (system Node); a no-op for user-owned Node, Windows, and non-npm.
+  const elevated = await elevateForNpmGlobal(cmd);
+  if (elevated.note) log.info(elevated.note);
+  const { cmd: program, args } = elevated.command;
 
   // Fail fast with a useful message if the package manager itself is absent.
   const hasManager = await which(program);
@@ -190,7 +305,7 @@ interface NpmLsJson {
  * Packages that are part of the Node/npm toolchain itself, never user setup, and
  * which we must not try to "reinstall" on another machine.
  */
-const NPM_GLOBAL_IGNORE = new Set<string>(["npm", "corepack", "lib"]);
+const NPM_GLOBAL_IGNORE = new Set<string>(["npm", "corepack", "lib", "arbella"]);
 
 /**
  * List installed global npm packages as `[{ package, version? }]`.
