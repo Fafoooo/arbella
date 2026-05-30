@@ -226,7 +226,7 @@ export async function restore(ctx: RestoreContext, data: RestoreData): Promise<v
   if (!hasClaude) {
     ctx.log.warn(
       "claude CLI not found on PATH; skipping marketplace/plugin reinstall. " +
-        "Install Claude Code and re-run `arbella restore`.",
+        "Install Claude Code and re-run `arbella pull`.",
     );
   } else {
     for (const m of data.manifest.marketplaces) {

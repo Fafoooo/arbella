@@ -26,16 +26,15 @@ You've spent months tuning Claude Code or Codex — custom skills, a stack of su
 
 Arbella saves that whole setup into a private Git repo and puts it back on another machine with one command. Linux, macOS, Windows.
 
-
 ## Quick start
 
 ```sh
 arbella setup       # install what arbella leans on (git, gh, the tool CLIs)
 arbella init        # point it at a private repo, pick your options
-arbella sync        # snapshot your setup and push it
+arbella push        # snapshot your setup and push it
 
 # later, on another machine:
-arbella restore https://github.com/you/your-setup
+arbella pull https://github.com/you/your-setup
 ```
 
 ## Install
@@ -55,15 +54,15 @@ Once it's published, this becomes `npm install -g arbella`.
 ## What it does
 
 ```text
-  sync      ~/.claude · ~/.codex   ──▶   strip · template   ──▶   push
-  restore   your private repo      ──▶   install · place    ──▶   wired up
+  push   ~/.claude · ~/.codex   ──▶   strip · template   ──▶   private repo
+  pull   private repo           ──▶   install · place    ──▶   ~/.claude · ~/.codex
 ```
 
-`sync` reads the parts of your setup that matter, strips anything secret, swaps machine-specific paths for placeholders, and pushes the result to your repo. `restore` does the reverse: installs the CLIs you don't have, drops files back with this machine's paths, reinstalls plugins and skills, and wires your shared instructions into both Claude and Codex.
+`push` reads the parts of your setup that matter, strips anything secret, swaps machine-specific paths for placeholders, and pushes the result to your repo. `pull` does the reverse: installs the CLIs you don't have, drops files back with this machine's paths, reinstalls plugins and skills, and wires your shared instructions into both Claude and Codex.
 
 Two things it deliberately won't do:
 
-- **Never commits secrets.** API keys, OAuth tokens, `auth.json`, `.credentials.json` — all excluded, no exceptions. You sign back in after a restore, or carry them yourself with [`arbella secrets`](#arbella-secrets).
+- **Never commits secrets.** API keys, OAuth tokens, `auth.json`, `.credentials.json` — all excluded, no exceptions. You sign back in after a pull, or carry them yourself with [`arbella secrets`](#arbella-secrets).
 - **Doesn't copy what it can reinstall.** Plugins and registry skills are saved as a list and pulled fresh, so the repo stays small and never goes stale.
 
 Supported today: **Claude Code** and **Codex**, plus a **Cursor** adapter that quietly does nothing when Cursor isn't installed.
@@ -74,9 +73,9 @@ Supported today: **Claude Code** and **Codex**, plus a **Cursor** adapter that q
 | --- | --- |
 | [`arbella setup`](#arbella-setup) | Install git, the provider CLIs, and the AI tool CLIs |
 | [`arbella init`](#arbella-init) | One-time wiring: pick a repo and your options |
-| [`arbella sync`](#arbella-sync) | Snapshot your setup and push it — the everyday one |
-| [`arbella restore <url>`](#arbella-restore) | Rebuild your setup on a fresh machine |
-| [`arbella status`](#arbella-status) | Show what a sync would change — read-only |
+| [`arbella push`](#arbella-push) | Snapshot your setup and push it — the everyday one |
+| [`arbella pull <url>`](#arbella-pull) | Rebuild your setup on a fresh machine |
+| [`arbella status`](#arbella-status) | Show what a push would change — read-only |
 | [`arbella auth`](#arbella-auth) | Sign in to your repo host |
 | [`arbella secrets`](#arbella-secrets) | Move credentials between machines, off Git |
 
@@ -94,7 +93,7 @@ arbella setup --deps git,gh -y  # just these
 
 - Covers **git** (required), **gh** / **glab** (handle sign-in for you), and the AI CLIs (**claude**, **codex**, **cursor**).
 - Installs through your system's package manager: apt, dnf, or pacman on Linux, Homebrew on macOS, winget on Windows.
-- `init` and `restore` also install on demand — if something's missing when you run them, Arbella stops and asks first.
+- `init` and `pull` also install on demand — if something's missing when you run them, Arbella stops and asks first.
 
 ### `arbella init`
 
@@ -109,30 +108,30 @@ Saves your preferences:
 
 - which tools Arbella should manage
 - who wins a conflict — your machine or the repo
-- auto-sync cadence — off, once per session, or daily
+- auto-push cadence — off, once per session, or daily
 - whether secrets are allowed into the repo (off by default), and whether to include memories (also off)
 
-### `arbella sync`
+### `arbella push`
 
-The one you'll run most. Captures your current setup, sanitizes it, commits, and pushes. Run it whenever you've changed something worth keeping, or let the auto-sync hook do it in the background.
+The one you'll run most. Captures your current setup, sanitizes it, commits, and pushes. Run it whenever you've changed something worth keeping, or let the auto-push hook do it in the background.
 
 ```sh
-arbella sync
-arbella sync --dry-run   # show exactly what goes in (and what's skipped), write nothing
+arbella push
+arbella push --dry-run   # show exactly what goes in (and what's skipped), write nothing
 ```
 
-Worth a `--dry-run` before your first real push, so there are no surprises. (This used to be `backup`; `arbella backup` still works as an alias so older auto-hooks don't break.)
+Worth a `--dry-run` before your first real push, so there are no surprises.
 
-### `arbella restore`
+### `arbella pull`
 
 The reason the whole thing exists.
 
 ```sh
-arbella restore https://github.com/you/your-setup
-arbella restore <url> --dry-run
+arbella pull https://github.com/you/your-setup
+arbella pull <url> --dry-run
 ```
 
-- First copies your current `~/.claude` and `~/.codex` to a timestamped safety folder, so a restore can't quietly wreck what's already there.
+- First copies your current `~/.claude` and `~/.codex` to a timestamped safety folder, so a pull can't quietly wreck what's already there.
 - Installs any missing CLIs — reaching for `sudo` only when the global npm folder actually needs root.
 - Writes files with this machine's paths, then reinstalls your plugins and skills from the manifest.
 - Deploys your shared instructions to `CLAUDE.md` and `AGENTS.md`.
@@ -140,7 +139,7 @@ arbella restore <url> --dry-run
 
 ### `arbella status`
 
-Read-only. It answers one question: if you ran `sync` right now, what would change?
+Read-only. It answers one question: if you ran `push` right now, what would change?
 
 ```sh
 arbella status
@@ -151,7 +150,7 @@ New and modified files, plugin drift, the secrets it would skip. Writes nothing,
 
 ### `arbella auth`
 
-Handles sign-in to your repo host. You rarely call it yourself — `sync` and `restore` sign in on their own when they hit a private repo. It's here for when you'd rather log in ahead of time, or check where you stand.
+Handles sign-in to your repo host. You rarely call it yourself — `push` and `pull` sign in on their own when they hit a private repo. It's here for when you'd rather log in ahead of time, or check where you stand.
 
 ```sh
 arbella auth login
@@ -188,7 +187,7 @@ This is the part I most wanted to get right.
 - Whole credential files (`auth.json`, `.credentials.json`, and the like) sit on a hard denylist and are never read into the repo.
 - Everything that *does* get committed runs through a sanitizer that redacts token-shaped values.
 - Any token Arbella holds for itself lives in one local file with `0600` permissions — not in the repo, not in a logged command, not baked into a Git remote.
-- A test fails the build if a credential can reach the backup. This isn't on the honor system.
+- A test fails the build if a credential can reach the repo. This isn't on the honor system.
 
 Putting secrets in the repo is opt-in, and the default is off. It's your private repo and your call — but I'd leave it there.
 

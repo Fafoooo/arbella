@@ -2,7 +2,7 @@
  * Auto-backup SessionStart hook installer (R4).
  *
  * Writes a throttled `SessionStart` hook into both supported tools so that opening
- * a session triggers `arbella sync --auto` in the background. The `--auto` path
+ * a session triggers `arbella push --auto` in the background. The `--auto` path
  * is itself throttled (see throttle.ts), so the hook firing on every session start
  * is cheap and safe — the actual backup only happens when the cadence allows.
  *
@@ -50,12 +50,12 @@ const EVENT = "SessionStart";
 /* -------------------------------------------------------------------------- */
 
 /**
- * The command the hook runs. It launches `arbella sync --auto` detached so the
+ * The command the hook runs. It launches `arbella push --auto` detached so the
  * session start is never blocked, discards output, and appends a `# HOOK_TAG`
  * comment so the entry is recognizable for surgical uninstall.
  *
- *   POSIX:  arbella sync --auto >/dev/null 2>&1 & # arbella-autobackup
- *   win32:  start /b "" arbella sync --auto >NUL 2>&1 :: arbella-autobackup
+ *   POSIX:  arbella push --auto >/dev/null 2>&1 & # arbella-autobackup
+ *   win32:  start /b "" arbella push --auto >NUL 2>&1 :: arbella-autobackup
  *
  * `arbella` is invoked by bare name (it is the installed bin on PATH), so no
  * machine-specific path is baked into the hook — it stays portable across restore.
@@ -63,10 +63,10 @@ const EVENT = "SessionStart";
 export function hookCommand(): string {
   if (detectOS() === "win32") {
     // `::` is a batch comment; `start /b` runs detached without a new window.
-    return `start /b "" arbella sync --auto >NUL 2>&1 :: ${HOOK_TAG}`;
+    return `start /b "" arbella push --auto >NUL 2>&1 :: ${HOOK_TAG}`;
   }
   // POSIX: trailing `&` backgrounds it; the `#` comment carries the tag.
-  return `arbella sync --auto >/dev/null 2>&1 & # ${HOOK_TAG}`;
+  return `arbella push --auto >/dev/null 2>&1 & # ${HOOK_TAG}`;
 }
 
 /* -------------------------------------------------------------------------- */

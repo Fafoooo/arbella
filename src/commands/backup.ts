@@ -1,5 +1,5 @@
 /**
- * `arbella sync` — capture the local AI dev setup and push it to the private
+ * `arbella push` — capture the local AI dev setup and push it to the private
  * backup repo (R3). Also the entry point the autobackup SessionStart hook calls
  * with `--auto` (R4), and supports `--dry-run` (R14) to preview without writing.
  *
@@ -96,36 +96,44 @@ const ARBELLA_VERSION = "0.1.0";
 /* Options + CLI registration                                                  */
 /* -------------------------------------------------------------------------- */
 
-/** Flags accepted by `arbella sync`. */
+/** Flags accepted by `arbella push`. */
 export interface BackupOptions {
   /** Preview only: compute + print the plan, write/commit/push nothing (R14). */
   dryRun?: boolean;
   /** Invoked by the autobackup hook: gate through the throttle, stay quiet (R4). */
   auto?: boolean;
-  /** Custom commit message (defaults to "arbella backup <iso>"). */
+  /** Custom commit message (defaults to "arbella push <iso>"). */
   message?: string;
 }
 
 /**
- * Attach the `backup` subcommand to the root program. Thin: it only parses
+ * Attach the `push` subcommand to the root program. Thin: it only parses
  * flags and delegates to {@link run} so the logic stays directly testable.
+ *
+ * Legacy aliases: `sync` and `backup` are also registered, hidden from `--help`,
+ * so auto-hooks installed under the old command names (`arbella sync --auto`,
+ * `arbella backup --auto`) keep working until the user re-runs `arbella init`,
+ * which rewrites the hook to `arbella push --auto`.
  */
 export function register(program: Command): void {
-  program
-    .command("sync")
-    .alias("backup") // kept so existing `arbella sync` auto-hooks keep working
-    .description(
-      "Synchronize your AI dev setup to your private repo (snapshot local changes, then commit + push).",
-    )
-    .option("--dry-run", "show what would change without writing or pushing")
-    .option(
-      "--auto",
-      "internal: run from the auto-sync hook (throttled, quiet when skipped)",
-    )
-    .option("-m, --message <message>", "commit message for this sync")
-    .action(async (opts: BackupOptions) => {
-      await run(opts);
-    });
+  const configure = (cmd: Command): Command =>
+    cmd
+      .description(
+        "Push your AI dev setup to your private repo (snapshot local changes, then commit + push).",
+      )
+      .option("--dry-run", "show what would change without writing or pushing")
+      .option(
+        "--auto",
+        "internal: run from the auto hook (throttled, quiet when skipped)",
+      )
+      .option("-m, --message <message>", "commit message for this push")
+      .action(async (opts: BackupOptions) => {
+        await run(opts);
+      });
+
+  configure(program.command("push"));
+  configure(program.command("sync", { hidden: true }));
+  configure(program.command("backup", { hidden: true }));
 }
 
 /* -------------------------------------------------------------------------- */
@@ -336,8 +344,8 @@ export async function run(opts: BackupOptions = {}): Promise<void> {
   await fs.write(repoJoin(repoRoot, ".gitignore"), renderRepoGitignore(capturedTools));
 
   // --- Commit + push (auth-aware: sign in on a private-repo push failure) --
-  const message = opts.message ?? `arbella backup ${nowIso}`;
-  log.info("Committing + pushing backup…");
+  const message = opts.message ?? `arbella push ${nowIso}`;
+  log.info("Committing + pushing setup…");
   const changed = await commitAndPush(repoRoot, message, {
     url: config.repo.url,
     auth: authHooks,
@@ -505,11 +513,11 @@ Each tool lives under \`<tool>/\`:
 options that were active, and when this backup was made.
 
 ${sharedLine}
-## Restore on a new machine
+## Set up on a new machine
 
 \`\`\`sh
 npm install -g arbella
-arbella restore <this-repo-url>
+arbella pull <this-repo-url>
 \`\`\`
 
 arbella will (R6/R14) take a timestamped safety copy of any existing tool homes,

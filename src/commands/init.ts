@@ -261,7 +261,7 @@ export async function run(opts: InitOptions): Promise<void> {
     log.error(`Could not clone the backup repo: ${errMessage(err)}`);
     log.warn(
       "Config was saved, but the local clone failed. Fix access (auth/network) " +
-        "then re-run `arbella init` or `arbella sync`.",
+        "then re-run `arbella init` or `arbella push`.",
     );
     cancel("Setup partially complete.");
     return;
@@ -283,7 +283,7 @@ export async function run(opts: InitOptions): Promise<void> {
   // 12. Offer to run the first backup now.
   await maybeRunFirstBackup(opts);
 
-  outro("arbella is configured. Run `arbella sync` any time to snapshot your setup.");
+  outro("arbella is configured. Run `arbella push` any time to snapshot your setup.");
 }
 
 /* -------------------------------------------------------------------------- */
@@ -602,13 +602,13 @@ async function maybeRunFirstBackup(opts: InitOptions): Promise<void> {
     });
     if (isCancel(answer)) {
       // Treat a cancel here as "skip the backup" — setup itself already succeeded.
-      log.step("Skipped the first backup. Run `arbella sync` when ready.");
+      log.step("Skipped the first backup. Run `arbella push` when ready.");
       return;
     }
     go = answer;
   }
   if (!go) {
-    log.step("Skipped the first backup. Run `arbella sync` when ready.");
+    log.step("Skipped the first backup. Run `arbella push` when ready.");
     return;
   }
 
@@ -617,7 +617,7 @@ async function maybeRunFirstBackup(opts: InitOptions): Promise<void> {
       run?: (o: { dryRun?: boolean; auto?: boolean; message?: string }) => Promise<void>;
     };
     if (typeof mod.run !== "function") {
-      log.warn("Backup command unavailable; run `arbella sync` manually.");
+      log.warn("Backup command unavailable; run `arbella push` manually.");
       return;
     }
     log.step("Running first backup…");
@@ -625,7 +625,7 @@ async function maybeRunFirstBackup(opts: InitOptions): Promise<void> {
   } catch (err) {
     log.warn(
       `First backup did not complete: ${errMessage(err)}. ` +
-        "You can run `arbella sync` later.",
+        "You can run `arbella push` later.",
     );
   }
 }

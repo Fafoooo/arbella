@@ -1,6 +1,6 @@
 /**
- * `arbella restore [repoUrl]` — rebuild this machine's AI dev setup from a
- * backup repo (R6, R8, R9, R12, R14).
+ * `arbella pull [repoUrl]` — rebuild this machine's AI dev setup from the
+ * private repo (R6, R8, R9, R12, R14).
  *
  * High-level flow (BUILD_CONTRACT §5.17 restore):
  *   1. Resolve the repo: the positional `[repoUrl]` arg wins; otherwise fall back
@@ -105,7 +105,7 @@ import { planActions as codexPlanActions } from "../adapters/codex/restore.js";
 /* Options                                                                     */
 /* -------------------------------------------------------------------------- */
 
-/** CLI options for `arbella restore` (commander fills these from flags). */
+/** CLI options for `arbella pull` (commander fills these from flags). */
 export interface RestoreOptions {
   /** Plan + report only; perform no filesystem or install actions (R14). */
   dryRun?: boolean;
@@ -801,8 +801,8 @@ async function resolveRepo(
   // No explicit URL — fall back to the configured repo.
   if (!config.repo.url || config.repo.url.trim() === "") {
     throw new Error(
-      "No repo to restore from. Pass a repo URL " +
-        "(`arbella restore <repo-url>`) or run `arbella init` first.",
+      "No repo to pull from. Pass a repo URL " +
+        "(`arbella pull <repo-url>`) or run `arbella init` first.",
     );
   }
   const localPath =
@@ -1007,37 +1007,47 @@ export async function run(
 /* -------------------------------------------------------------------------- */
 
 /**
- * Attach the `restore` subcommand to the program. The command is intentionally
+ * Attach the `pull` subcommand to the program. The command is intentionally
  * thin: it parses flags, then delegates to {@link run}. The top-level error
  * handler in src/index.ts turns a thrown error into a non-zero exit.
+ *
+ * Legacy alias: `restore` is also registered, hidden from `--help`, so old
+ * habits, scripts, and previously generated repo READMEs (`arbella restore <url>`)
+ * keep working. `pull` is "clone if needed, then apply" — not a bare `git pull`.
  */
 export function register(program: Command): void {
-  program
-    .command("restore")
-    .description(
-      "Restore your AI dev setup from a backup repo (installs missing CLIs, " +
-        "places files, reinstalls plugins/skills, deploys shared instructions).",
-    )
-    .argument(
-      "[repo-url]",
-      "Backup repo URL to restore from (defaults to the configured repo).",
-    )
-    .option("--dry-run", "Show what would be restored without changing anything.")
-    .option(
-      "--repo <url>",
-      "Backup repo URL (alternative to the positional argument).",
-    )
-    .option(
-      "--tools <list>",
-      "Comma-separated subset of tools to restore (e.g. claude,codex).",
-    )
-    .option(
-      "--force",
-      "Overwrite existing local files even when local is the source of truth.",
-    )
-    .action(async (repoArg: string | undefined, opts: RestoreOptions) => {
-      await run(repoArg, opts);
-    });
+  const configure = (cmd: Command): Command =>
+    cmd
+      .description(
+        "Pull your AI dev setup from your private repo (installs missing CLIs, " +
+          "places files, reinstalls plugins/skills, deploys shared instructions).",
+      )
+      .argument(
+        "[repo-url]",
+        "Repo URL to pull from (defaults to the configured repo).",
+      )
+      .option(
+        "--dry-run",
+        "Preview the pull: show what would change without writing anything.",
+      )
+      .option(
+        "--repo <url>",
+        "Repo URL (alternative to the positional argument).",
+      )
+      .option(
+        "--tools <list>",
+        "Comma-separated subset of tools to pull (e.g. claude,codex).",
+      )
+      .option(
+        "--force",
+        "Overwrite existing local files even when local is the source of truth.",
+      )
+      .action(async (repoArg: string | undefined, opts: RestoreOptions) => {
+        await run(repoArg, opts);
+      });
+
+  configure(program.command("pull"));
+  configure(program.command("restore", { hidden: true }));
 }
 
 /* -------------------------------------------------------------------------- */
