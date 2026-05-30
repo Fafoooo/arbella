@@ -26,7 +26,6 @@ You've spent months tuning Claude Code or Codex — custom skills, a stack of su
 
 Arbella saves that whole setup into a private Git repo and puts it back on another machine with one command. Linux, macOS, Windows.
 
-The everyday command is `sync`, not `backup`, on purpose: the repo is your source of truth, and you keep it current as your setup changes.
 
 ## Quick start
 
