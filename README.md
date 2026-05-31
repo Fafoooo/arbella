@@ -9,7 +9,7 @@
 Backup and migration for your Claude Code and Codex setup — skills, subagents,
 plugins, hooks, settings, memories — into a private Git repo you own.
 
-[![License](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
+[![License](https://img.shields.io/badge/license-AGPL--3.0--only-blue.svg)](./LICENSE)
 &nbsp;![Node](https://img.shields.io/badge/node-%E2%89%A518-43853d?logo=node.js&logoColor=white)
 &nbsp;![Platforms](https://img.shields.io/badge/platform-Linux%20%C2%B7%20macOS%20%C2%B7%20Windows-555)
 &nbsp;![Status](https://img.shields.io/badge/status-v0.1-orange)
@@ -200,4 +200,6 @@ v0.1 — early, but it builds clean, the full test suite passes, and I use it da
 
 ## License
 
-MIT — see [LICENSE](./LICENSE).
+Copyright (c) 2026 Fafoooo.
+
+Arbella is licensed under the GNU Affero General Public License v3.0 only (AGPL-3.0-only). See [LICENSE](./LICENSE).
