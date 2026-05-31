@@ -287,9 +287,8 @@ export function buildSharedInstructionsFile(content: string): CapturedFile {
 /**
  * The destinations the single shared instructions file deploys to on restore,
  * expressed relative to each tool's home dir. Claude reads CLAUDE.md; Codex reads
- * AGENTS.md. (Cursor rule deployment is handled by the cursor adapter, which
- * reads shared/instructions.md from the repo root directly — it is intentionally
- * not listed here because its destination is not a fixed tool-home-relative path.)
+ * AGENTS.md. Cursor User Rules live in Cursor settings, so Arbella does not
+ * synthesize a global Cursor rule from this file.
  */
 export function sharedInstructionsTargets(): Array<{ tool: ToolId; relPath: string }> {
   return [

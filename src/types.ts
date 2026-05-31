@@ -30,6 +30,9 @@ export const TOOL_IDS: readonly ToolId[] = ["claude", "codex", "cursor"] as cons
 /** node:os style platform identifiers arbella supports. */
 export type OS = "darwin" | "linux" | "win32";
 
+/** Environment variables visible to command/adapters. Injected for testability. */
+export type EnvVars = Readonly<Record<string, string | undefined>>;
+
 /* -------------------------------------------------------------------------- */
 /* Captured files (the "frozen" half of hybrid capture)                        */
 /* -------------------------------------------------------------------------- */

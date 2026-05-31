@@ -141,11 +141,11 @@ export function createSanitizer(): SanitizerService {
    * they reach the repo — the gap that sanitizeText (value-patterns only) leaves
    * open. Behavior:
    *
-   *   - If `source` looks like JSON (".json" basename) AND JSON.parse succeeds:
-   *       run sanitizeJson on the parsed object, then re-serialize with the file's
-   *       detected indentation. Returns changed=true iff the serialized output
-   *       differs from the input (so callers/reporting see a real redaction).
-   *   - Otherwise (non-JSON, or JSON that fails to parse): fall back to the
+   *   - If `source` looks like JSON (".json" basename) AND JSON/JSONC parsing
+   *       succeeds: run sanitizeJson on the parsed object, then re-serialize with
+   *       the file's detected indentation. Comments/trailing commas are not
+   *       preserved, but opaque secrets under secret key names are redacted.
+   *   - Otherwise (non-JSON, or JSON/JSONC parsing fails): fall back to the
    *       pattern-based sanitizeText (which still catches known token shapes and
    *       the key-name-aware env-assignment pattern in free text / hook scripts).
    *
@@ -154,14 +154,12 @@ export function createSanitizer(): SanitizerService {
    */
   function sanitizeFile(content: string, tool: ToolId, source: string): SanitizeResult {
     if (looksLikeJsonSource(source)) {
-      let parsed: unknown;
-      try {
-        parsed = JSON.parse(content);
-      } catch {
+      const parsed = parseJsonOrJsonc(content);
+      if (!parsed.ok) {
         // Not valid JSON despite the extension — fall back to the text pass.
         return sanitizeText(content, tool, source);
       }
-      const { value, found } = sanitizeJson(parsed, tool, source);
+      const { value, found } = sanitizeJson(parsed.value, tool, source);
       const indent = detectJsonIndent(content);
       const serialized = JSON.stringify(value, null, indent);
       return { content: serialized, found, changed: serialized !== content };
@@ -180,6 +178,111 @@ export function createSanitizer(): SanitizerService {
 function looksLikeJsonSource(source: string): boolean {
   const base = source.replace(/\\/g, "/").split("/").pop() ?? source;
   return /\.json$/i.test(base);
+}
+
+function parseJsonOrJsonc(content: string): { ok: true; value: unknown } | { ok: false } {
+  try {
+    return { ok: true, value: JSON.parse(content) };
+  } catch {
+    // Cursor and VS Code-style settings files are commonly JSONC.
+  }
+
+  try {
+    return { ok: true, value: JSON.parse(stripJsonc(content)) };
+  } catch {
+    return { ok: false };
+  }
+}
+
+function stripJsonc(content: string): string {
+  return removeTrailingCommas(removeJsonComments(content));
+}
+
+function removeJsonComments(content: string): string {
+  let out = "";
+  let inString = false;
+  let escaped = false;
+
+  for (let i = 0; i < content.length; i++) {
+    const ch = content[i]!;
+    const next = content[i + 1];
+
+    if (inString) {
+      out += ch;
+      if (escaped) {
+        escaped = false;
+      } else if (ch === "\\") {
+        escaped = true;
+      } else if (ch === "\"") {
+        inString = false;
+      }
+      continue;
+    }
+
+    if (ch === "\"") {
+      inString = true;
+      out += ch;
+      continue;
+    }
+
+    if (ch === "/" && next === "/") {
+      while (i < content.length && content[i] !== "\n") i++;
+      if (i < content.length) out += "\n";
+      continue;
+    }
+
+    if (ch === "/" && next === "*") {
+      i += 2;
+      while (i < content.length && !(content[i] === "*" && content[i + 1] === "/")) {
+        if (content[i] === "\n") out += "\n";
+        i++;
+      }
+      i++;
+      continue;
+    }
+
+    out += ch;
+  }
+
+  return out;
+}
+
+function removeTrailingCommas(content: string): string {
+  let out = "";
+  let inString = false;
+  let escaped = false;
+
+  for (let i = 0; i < content.length; i++) {
+    const ch = content[i]!;
+
+    if (inString) {
+      out += ch;
+      if (escaped) {
+        escaped = false;
+      } else if (ch === "\\") {
+        escaped = true;
+      } else if (ch === "\"") {
+        inString = false;
+      }
+      continue;
+    }
+
+    if (ch === "\"") {
+      inString = true;
+      out += ch;
+      continue;
+    }
+
+    if (ch === ",") {
+      let j = i + 1;
+      while (j < content.length && /\s/.test(content[j]!)) j++;
+      if (content[j] === "}" || content[j] === "]") continue;
+    }
+
+    out += ch;
+  }
+
+  return out;
 }
 
 /**

@@ -1,8 +1,20 @@
+import fs from "node:fs";
+
 import { describe, expect, it } from "vitest";
 
 import { buildProgram } from "../../src/index.js";
+import { getPackageVersion } from "../../src/core/version.js";
 
 describe("CLI help", () => {
+  it("uses the package.json version", () => {
+    const packageJson = JSON.parse(
+      fs.readFileSync(new URL("../../package.json", import.meta.url), "utf8"),
+    ) as { version: string };
+
+    expect(getPackageVersion()).toBe(packageJson.version);
+    expect(buildProgram().version()).toBe(packageJson.version);
+  });
+
   it("shows auto-push as the public init cadence flag and keeps auto-backup hidden", () => {
     const program = buildProgram();
     const init = program.commands.find((command) => command.name() === "init");

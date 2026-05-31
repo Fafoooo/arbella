@@ -30,6 +30,7 @@
  */
 
 import path from "node:path";
+import process from "node:process";
 
 import type { Command } from "commander";
 
@@ -325,6 +326,7 @@ function buildCaptureContext(
     templater,
     vars: buildVariables(toolHome),
     os: detectOS(),
+    env: process.env,
     toolHome,
     includeSecrets,
     includeMemories,

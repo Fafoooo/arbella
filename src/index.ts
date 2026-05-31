@@ -19,9 +19,8 @@
  *      top-level handler (log.error + exit 1) so stack traces never leak to the
  *      user. Commander's own --help / --version exits are passed through.
  *
- * VERSION: hard-coded here and kept in sync with package.json. The contract
- * explicitly prefers this over a JSON import, because rootDir:"src" puts
- * package.json outside the compile root and would otherwise fight tsup/NodeNext.
+ * VERSION: read from package.json via core/version.ts so release bumps do not
+ * drift between the published package and `arbella --version`.
  */
 
 import fs from "node:fs";
@@ -33,6 +32,7 @@ import pc from "picocolors";
 
 import { log, setVerbose } from "./utils/log.js";
 import { listAdapters } from "./adapters/registry.js";
+import { getPackageVersion } from "./core/version.js";
 
 import { register as registerInit } from "./commands/init.js";
 import { register as registerSetup } from "./commands/setup.js";
@@ -42,8 +42,8 @@ import { register as registerRestore } from "./commands/restore.js";
 import { register as registerStatus } from "./commands/status.js";
 import { register as registerSecrets } from "./commands/secrets.js";
 
-/** arbella version, kept in sync with package.json "version". */
-const VERSION = "0.1.0";
+/** arbella version, sourced from package.json. */
+const VERSION = getPackageVersion();
 
 /** Build the configured root program (no parsing yet — easy to unit-test). */
 export function buildProgram(): Command {
