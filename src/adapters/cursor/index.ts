@@ -27,6 +27,7 @@
  */
 
 import path from "node:path";
+import process from "node:process";
 
 import { execa } from "execa";
 
@@ -91,7 +92,8 @@ function targetFromRepoPath(repoPath: string): CursorTarget | undefined {
 
 /** Resolve a CursorTarget onto the target machine. */
 function targetAbsFor(ctx: RestoreContext, target: CursorTarget): string {
-  const root = target.root === "home" ? ctx.toolHome : cursorUserPaths(ctx.toolHome, ctx.os).userDir;
+  const root =
+    target.root === "home" ? ctx.toolHome : cursorUserPaths(ctx.toolHome, ctx.os, ctx.env).userDir;
   return path.join(root, ...target.rel.split("/").filter(Boolean));
 }
 
@@ -450,7 +452,7 @@ export async function capture(
   const manifest = emptyCursorManifest();
 
   const p = paths(ctx.toolHome);
-  const userPaths = cursorUserPaths(p.home, ctx.os);
+  const userPaths = cursorUserPaths(p.home, ctx.os, ctx.env);
   const deny = denylistFor("cursor");
 
   // Graceful absence: Cursor may not be installed at all. Never block the rest
@@ -661,7 +663,10 @@ export async function restore(ctx: RestoreContext, data: RestoreData): Promise<v
 /** True if ~/.cursor or Cursor's application User data exists. */
 async function detect(): Promise<boolean> {
   const p = paths();
-  return (await fsExistsDir(p.home)) || (await fsExistsDir(cursorUserPaths(p.home, detectOS()).userDir));
+  return (
+    (await fsExistsDir(p.home)) ||
+    (await fsExistsDir(cursorUserPaths(p.home, detectOS(), process.env).userDir))
+  );
 }
 
 /** Local lstat-free existence-as-dir probe via the default fs service. */

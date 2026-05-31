@@ -8,7 +8,7 @@ import os from "node:os";
 import path from "node:path";
 import process from "node:process";
 
-import type { OS, ToolId } from "../types.js";
+import type { EnvVars, OS, ToolId } from "../types.js";
 
 /** Detect the current platform, narrowed to the OSes arbella supports. */
 export function detectOS(): OS {
@@ -72,6 +72,20 @@ export function toolHomeDir(tool: ToolId): string {
     case "cursor":
       return path.join(homeDir(), ".cursor");
   }
+}
+
+/**
+ * Root directory used by Electron/VS Code-style desktop apps for user config.
+ * Cursor's User data lives below this root.
+ */
+export function appUserConfigRoot(targetOS: OS, userHome: string, env: EnvVars = {}): string {
+  if (targetOS === "darwin") {
+    return path.join(userHome, "Library", "Application Support");
+  }
+  if (targetOS === "win32") {
+    return env.APPDATA ?? path.join(userHome, "AppData", "Roaming");
+  }
+  return env.XDG_CONFIG_HOME ?? path.join(userHome, ".config");
 }
 
 /* -------------------------------------------------------------------------- */

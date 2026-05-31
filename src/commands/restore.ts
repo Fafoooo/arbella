@@ -39,6 +39,7 @@
  */
 
 import path from "node:path";
+import process from "node:process";
 
 import type { Command } from "commander";
 
@@ -166,6 +167,7 @@ function buildCoreServices(toolHome: string, os: OS): CoreServices {
     templater: createTemplater(),
     vars: buildVariables(toolHome),
     os,
+    env: process.env,
   };
 }
 
@@ -455,7 +457,7 @@ function safetySourcesForTool(
   if (tool === "cursor") {
     sources.push({
       label: "cursor User data",
-      source: cursorUserPaths(toolHome, os).userDir,
+      source: cursorUserPaths(toolHome, os, process.env).userDir,
       dest: path.join(backupsRoot, `cursor-user-${stamp}`),
     });
   }

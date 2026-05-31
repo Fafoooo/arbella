@@ -24,6 +24,7 @@ import type {
   TemplaterService,
   TemplateVariables,
   SourceOfTruth,
+  EnvVars,
 } from "../types.js";
 
 /* Re-export ToolManifest so consumers can import it from the interface module
@@ -47,6 +48,8 @@ export interface CoreServices {
   vars: TemplateVariables;
   /** Current OS (from platform/os.ts). */
   os: OS;
+  /** Process environment, injected so path logic can respect platform env vars in tests. */
+  env: EnvVars;
 }
 
 /* -------------------------------------------------------------------------- */

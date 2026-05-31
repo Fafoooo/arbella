@@ -16,6 +16,7 @@
  */
 
 import { confirm, isCancel, password } from "@clack/prompts";
+import process from "node:process";
 
 import type {
   CaptureContext,
@@ -53,6 +54,7 @@ export function buildCoreServices(toolHome: string): CoreServices {
     templater,
     vars: buildVariables(toolHome),
     os: detectOS(),
+    env: process.env,
   };
 }
 

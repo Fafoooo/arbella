@@ -19,8 +19,8 @@
 
 import path from "node:path";
 
-import type { OS } from "../../types.js";
-import { toolHomeDir } from "../../platform/os.js";
+import type { EnvVars, OS } from "../../types.js";
+import { appUserConfigRoot, toolHomeDir } from "../../platform/os.js";
 
 /** Absolute path to ~/.cursor on this machine. */
 export function home(): string {
@@ -79,14 +79,9 @@ export function paths(overrideHome?: string): CursorPaths {
  * Build Cursor's platform-specific app User data paths from the tool home. The
  * tests pass a fixture tool home; live code passes the real ~/.cursor.
  */
-export function cursorUserPaths(toolHome: string, os: OS): CursorUserPaths {
+export function cursorUserPaths(toolHome: string, os: OS, env: EnvVars = {}): CursorUserPaths {
   const userHome = path.dirname(toolHome);
-  const userDir =
-    os === "darwin"
-      ? path.join(userHome, "Library", "Application Support", "Cursor", "User")
-      : os === "win32"
-        ? path.join(userHome, "AppData", "Roaming", "Cursor", "User")
-        : path.join(userHome, ".config", "Cursor", "User");
+  const userDir = path.join(appUserConfigRoot(os, userHome, env), "Cursor", "User");
 
   return {
     userDir,

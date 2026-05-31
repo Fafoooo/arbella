@@ -43,6 +43,7 @@
  */
 
 import path from "node:path";
+import process from "node:process";
 
 import type { Command } from "commander";
 
@@ -179,6 +180,7 @@ function buildCoreServices(toolHome: string): CoreServices {
     templater,
     vars: buildVariables(toolHome),
     os: detectOS(),
+    env: process.env,
   };
 }
 

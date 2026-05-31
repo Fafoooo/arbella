@@ -58,6 +58,7 @@ import {
 import type {
   CaptureResult,
   CapturedFile,
+  EnvVars,
   TemplateVariables,
 } from "../../src/types.js";
 import type {
@@ -99,7 +100,7 @@ const silentLog = {
 const sanitizer = createSanitizer();
 const templater = createTemplater();
 
-function makeCaptureCtx(toolHome: string, vars: TemplateVariables): CaptureContext {
+function makeCaptureCtx(toolHome: string, vars: TemplateVariables, env: EnvVars = {}): CaptureContext {
   return {
     fs: realFs,
     log: silentLog,
@@ -107,6 +108,7 @@ function makeCaptureCtx(toolHome: string, vars: TemplateVariables): CaptureConte
     templater,
     vars,
     os: "linux",
+    env,
     toolHome,
     includeSecrets: false,
     includeMemories: false,
@@ -119,6 +121,7 @@ function makeRestoreCtx(
   repoToolDir: string,
   repoRoot: string,
   vars: TemplateVariables,
+  env: EnvVars = {},
 ): RestoreContext {
   return {
     fs: realFs,
@@ -127,6 +130,7 @@ function makeRestoreCtx(
     templater,
     vars,
     os: "linux",
+    env,
     toolHome,
     repoToolDir,
     repoRoot,
