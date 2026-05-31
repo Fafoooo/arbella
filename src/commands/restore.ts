@@ -20,10 +20,9 @@
  *      and run each adapter's restore() (which places files, recreates symlinks,
  *      reinstalls plugins/marketplaces/skills, re-enables plugins, installs npm
  *      globals — all guarded + best-effort per adapter).
- *   7. Deploy the shared instructions (R9) to BOTH tools when meta.sharedInstructions
+ *   7. Deploy the shared instructions (R9) to Claude + Codex when meta.sharedInstructions
  *      is set: write shared/instructions.md to each sharedInstructionsTargets()
- *      destination; the cursor adapter additionally writes a Cursor rule from the
- *      same source inside its own restore().
+ *      destination.
  *   8. Print a re-auth reminder: secret files (.credentials.json / auth.json) were
  *      NEVER carried, so the user must re-login. Never prints any secret value.
  *
@@ -98,6 +97,7 @@ import {
 import { claudeAdapter } from "../adapters/claude/index.js";
 import { codexAdapter } from "../adapters/codex/index.js";
 import { cursorAdapter, planActions as cursorPlanActions } from "../adapters/cursor/index.js";
+import { cursorUserPaths } from "../adapters/cursor/paths.js";
 import { planActions as claudePlanActions } from "../adapters/claude/restore.js";
 import { planActions as codexPlanActions } from "../adapters/codex/restore.js";
 
@@ -208,10 +208,10 @@ function looksBinary(buf: Buffer): boolean {
 }
 
 /**
- * Recursively walk `<tool>/files` inside the cloned repo and reconstruct the
+ * Recursively walk frozen roots inside the cloned repo and reconstruct the
  * CapturedFile[] / CapturedSymlink[] the adapter expects. `repoPath` is rebuilt
- * with the canonical "<tool>/files/<relPosix>" prefix (POSIX separators) so the
- * adapter's stripPrefix() maps it back onto the target tool home.
+ * with the root's canonical prefix (POSIX separators), e.g. "claude/files/..."
+ * or "cursor/user/...".
  *
  * Symlinks captured under skills/ are preserved verbatim (their target is the
  * data). Regular files are classified binary vs. text on read. Missing dirs are
@@ -221,17 +221,12 @@ async function readToolFrozen(
   repoToolDir: string,
   tool: ToolId,
 ): Promise<{ files: CapturedFile[]; symlinks: CapturedSymlink[] }> {
-  const filesRoot = path.join(repoToolDir, "files");
   const files: CapturedFile[] = [];
   const symlinks: CapturedSymlink[] = [];
+  const roots = frozenRootsForTool(repoToolDir, tool);
 
-  // Nothing frozen for this tool (e.g. cursor absent at capture) -> empty.
-  if ((await fs.statKind(filesRoot)) !== "dir") {
-    return { files, symlinks };
-  }
-
-  /** relParts: POSIX path segments under filesRoot accumulated so far. */
-  async function walk(absDir: string, relParts: string[]): Promise<void> {
+  /** relParts: POSIX path segments under the frozen root accumulated so far. */
+  async function walk(absDir: string, relParts: string[], repoPrefix: string): Promise<void> {
     const entries = await fs.list(absDir);
     // Stable order so dry-run output and writes are deterministic.
     entries.sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
@@ -240,7 +235,7 @@ async function readToolFrozen(
       const abs = path.join(absDir, name);
       const nextRel = [...relParts, name];
       const relPosix = nextRel.join("/");
-      const repoPath = `${tool}/files/${relPosix}`;
+      const repoPath = `${repoPrefix}/${relPosix}`;
       const kind = await fs.statKind(abs);
 
       if (kind === "symlink") {
@@ -258,7 +253,7 @@ async function readToolFrozen(
       }
 
       if (kind === "dir") {
-        await walk(abs, nextRel);
+        await walk(abs, nextRel, repoPrefix);
         continue;
       }
 
@@ -293,8 +288,24 @@ async function readToolFrozen(
     }
   }
 
-  await walk(filesRoot, []);
+  for (const root of roots) {
+    if ((await fs.statKind(root.absRoot)) !== "dir") continue;
+    await walk(root.absRoot, [], root.repoPrefix);
+  }
   return { files, symlinks };
+}
+
+function frozenRootsForTool(
+  repoToolDir: string,
+  tool: ToolId,
+): Array<{ absRoot: string; repoPrefix: string }> {
+  const roots = [
+    { absRoot: path.join(repoToolDir, "files"), repoPrefix: `${tool}/files` },
+  ];
+  if (tool === "cursor") {
+    roots.push({ absRoot: path.join(repoToolDir, "user"), repoPrefix: "cursor/user" });
+  }
+  return roots;
 }
 
 /**
@@ -327,7 +338,7 @@ async function readToolManifest(
 }
 
 /** Assemble the full RestoreData (manifest + frozen files/symlinks) for a tool. */
-async function loadRestoreData(
+export async function loadRestoreData(
   repoRoot: string,
   tool: ToolId,
 ): Promise<RestoreData> {
@@ -391,7 +402,7 @@ interface SafetyBackup {
 }
 
 /**
- * Make a timestamped safety copy of each existing target tool home BEFORE any
+ * Make a timestamped safety copy of each existing restore target BEFORE any
  * restore mutation (R14). Destinations live under dataDir()/safety-backups so
  * they never pollute a tool home. Only existing homes are copied; absent ones
  * are skipped. `iso` is supplied by the caller (commands own the clock).
@@ -401,31 +412,57 @@ interface SafetyBackup {
 async function safetyBackup(
   tools: ToolId[],
   iso: string,
+  os: OS,
 ): Promise<SafetyBackup[]> {
   const stamp = iso.replace(/[:.]/g, "-");
-  const backupsRoot = path.join(dataDir(), "safety-backups");
   const made: SafetyBackup[] = [];
 
   for (const tool of tools) {
-    const source = toolHomeDir(tool);
-    if (!(await fs.exists(source))) {
-      log.debug(`restore: no existing ${tool} home to back up (${source}).`);
-      continue;
-    }
-    const dest = path.join(backupsRoot, `${tool}-${stamp}`);
-    try {
-      await fs.copy(source, dest);
-      made.push({ tool, source, dest });
-      log.step(`Safety backup: ${source} -> ${dest}`);
-    } catch (err) {
-      // A failed safety copy is serious: warn loudly but do not abort the whole
-      // restore over a single tool's snapshot (the others still get protected).
-      log.warn(
-        `restore: failed to safety-backup ${tool} (${source}): ${errMsg(err)}`,
-      );
+    for (const entry of safetySourcesForTool(tool, os, stamp)) {
+      if (!(await fs.exists(entry.source))) {
+        log.debug(`restore: no existing ${entry.label} to back up (${entry.source}).`);
+        continue;
+      }
+      try {
+        await fs.copy(entry.source, entry.dest);
+        made.push({ tool, source: entry.source, dest: entry.dest });
+        log.step(`Safety backup: ${entry.source} -> ${entry.dest}`);
+      } catch (err) {
+        // A failed safety copy is serious: warn loudly but do not abort the whole
+        // restore over a single target's snapshot (the others still get protected).
+        log.warn(
+          `restore: failed to safety-backup ${entry.label} (${entry.source}): ${errMsg(err)}`,
+        );
+      }
     }
   }
   return made;
+}
+
+function safetySourcesForTool(
+  tool: ToolId,
+  os: OS,
+  stamp: string,
+): Array<{ label: string; source: string; dest: string }> {
+  const backupsRoot = path.join(dataDir(), "safety-backups");
+  const toolHome = toolHomeDir(tool);
+  const sources = [
+    {
+      label: `${tool} home`,
+      source: toolHome,
+      dest: path.join(backupsRoot, `${tool}-${stamp}`),
+    },
+  ];
+
+  if (tool === "cursor") {
+    sources.push({
+      label: "cursor User data",
+      source: cursorUserPaths(toolHome, os).userDir,
+      dest: path.join(backupsRoot, `cursor-user-${stamp}`),
+    });
+  }
+
+  return sources;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -435,9 +472,9 @@ async function safetyBackup(
 /**
  * When the repo stored a single shared instructions file (CLAUDE.md == AGENTS.md
  * at capture, R9), deploy it to BOTH tool targets: ~/.claude/CLAUDE.md and
- * ~/.codex/AGENTS.md (from sharedInstructionsTargets()). The cursor adapter
- * deploys its own Cursor rule from the same source inside its restore(), so it
- * is intentionally not handled here.
+ * ~/.codex/AGENTS.md (from sharedInstructionsTargets()). Cursor User Rules are
+ * stored in Cursor settings, not as global `.mdc` files, so restore does not
+ * synthesize a Cursor rule here.
  *
  * Respects `dryRun` (reports only). Best-effort + graceful: a missing shared
  * file is logged, not fatal. Only deploys to a target whose tool is in scope.
@@ -683,7 +720,7 @@ function printPlan(
     `Tools: ${plan.tools.length > 0 ? plan.tools.join(", ") : "(none)"}`,
   );
   l.step(
-    `A timestamped safety backup of existing tool homes WILL be taken first (R14).`,
+    `A timestamped safety backup of existing restore targets WILL be taken first (R14).`,
   );
   if (plan.missingClis.length > 0) {
     l.step(`CLIs to auto-install: ${plan.missingClis.join(", ")}`);
@@ -937,7 +974,7 @@ export async function run(
   // ---- 6. R14 safety backup BEFORE any overwrite --------------------------
   const iso = new Date().toISOString();
   log.info("Creating safety backups of existing tool homes (R14)…");
-  const backups = await safetyBackup(tools, iso);
+  const backups = await safetyBackup(tools, iso, os);
   if (backups.length === 0) {
     log.debug("restore: no existing tool homes needed backing up.");
   }

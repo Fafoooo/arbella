@@ -53,7 +53,7 @@ arbella --help
   pull   private repo                  ──▶   install · place    ──▶   tools + Cursor User data
 ```
 
-`push` reads the parts of your setup that matter, strips anything secret, swaps machine-specific paths for placeholders, and pushes the result to your repo. `pull` does the reverse: installs the CLIs you don't have, drops files back with this machine's paths, reinstalls plugins and skills, and wires your shared instructions into the restored tools.
+`push` reads the parts of your setup that matter, strips anything secret, swaps machine-specific paths for placeholders, and pushes the result to your repo. `pull` does the reverse: installs the CLIs you don't have, drops files back with this machine's paths, reinstalls plugins and skills, and wires shared Claude/Codex instructions back into `CLAUDE.md` and `AGENTS.md`.
 
 Two things it deliberately won't do:
 

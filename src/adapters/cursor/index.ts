@@ -19,8 +19,7 @@
  *   - restore(ctx,d):  writes those files back onto ~/.cursor or Cursor's User
  *                      data dir, rehydrating {{TOKENS}} to this machine's paths.
  *                      It also recreates skill symlinks, best-effort installs
- *                      extensions via `cursor --install-extension`, and deploys the
- *                      shared instructions rule when present.
+ *                      extensions via `cursor --install-extension`.
  *
  * All fs work goes through the injected CoreServices on the context objects, so
  * the adapter is unit-testable against a fixture dir. No direct node:fs, no clock.
@@ -51,11 +50,9 @@ import { runInstall, which } from "../../platform/install.js";
 import {
   FROZEN_PATHS,
   REPO_PREFIX,
-  SHARED_INSTRUCTIONS_REPO_PATH,
   USER_REPO_PREFIX,
   cursorUserPaths,
   paths,
-  sharedRulePath,
 } from "./paths.js";
 
 /* -------------------------------------------------------------------------- */
@@ -217,7 +214,12 @@ async function captureFile(args: {
     }
   }
 
-  const content = ctx.includeSecrets ? raw : ctx.sanitizer.sanitizeFile(raw, "cursor", rel).content;
+  let content = raw;
+  if (!ctx.includeSecrets) {
+    const sanitized = ctx.sanitizer.sanitizeFile(raw, "cursor", rel);
+    content = sanitized.content;
+    secrets.push(...sanitized.found);
+  }
   const templated = ctx.templater.toTemplate(content, ctx.vars);
   const file: CapturedFile = { repoPath, content: templated };
   if (mode !== undefined) file.mode = mode;
@@ -474,7 +476,7 @@ export async function capture(
   if (hasUserDir) {
     const userItems = [userPaths.settingsJson, userPaths.keybindingsJson, userPaths.snippetsDir] as const;
     for (const abs of userItems) {
-      await walkFrozen(ctx, userPaths.userDir, abs, [], userRepoPathFor, files, symlinks, secrets, warnings);
+      await walkFrozen(ctx, userPaths.userDir, abs, deny, userRepoPathFor, files, symlinks, secrets, warnings);
     }
   }
 
@@ -532,26 +534,6 @@ async function writeRestoredSymlink(ctx: RestoreContext, link: CapturedSymlink):
   }
 
   await ctx.fs.symlink(link.target, dest);
-}
-
-/**
- * Deploy the shared-instructions (R9) content as a Cursor user rule. Reads
- * <repoRoot>/shared/instructions.md (if present) and writes it under the Cursor
- * rules dir. Best-effort: absence of the shared file is not an error.
- */
-async function deploySharedRule(ctx: RestoreContext): Promise<void> {
-  const sharedAbs = path.join(ctx.repoRoot, ...SHARED_INSTRUCTIONS_REPO_PATH.split("/"));
-  if (!(await ctx.fs.exists(sharedAbs))) {
-    ctx.log.debug("cursor: no shared/instructions.md to deploy as a Cursor rule.");
-    return;
-  }
-  const body = await ctx.fs.read(sharedAbs);
-  // Cursor `.mdc` rules support frontmatter; `alwaysApply: true` makes the rule
-  // global. The instructions content is plain markdown and needs no templating.
-  const rule = `---\ndescription: Shared agent instructions (managed by arbella)\nalwaysApply: true\n---\n\n${body}`;
-  const dest = sharedRulePath(ctx.toolHome);
-  await ctx.fs.write(dest, rule);
-  ctx.log.debug(`cursor: wrote shared-instructions rule -> ${dest}`);
 }
 
 /** Best-effort Cursor extension reinstall via the `cursor` CLI. */
@@ -637,25 +619,13 @@ export async function planActions(
     });
   }
 
-  const sharedAbs = path.join(ctx.repoRoot, ...SHARED_INSTRUCTIONS_REPO_PATH.split("/"));
-  if (await ctx.fs.exists(sharedAbs)) {
-    const targetPath = sharedRulePath(ctx.toolHome);
-    actions.push({
-      type: "write-file",
-      tool: "cursor",
-      targetPath,
-      description: "Write shared Cursor rule",
-      overwrites: await ctx.fs.exists(targetPath),
-    });
-  }
-
   return actions;
 }
 
 /**
- * Restore Cursor: place frozen files back, then (if the repo carried shared
- * instructions) materialize the Cursor user rule. Honors ctx.dryRun (plan only).
- * Exported for direct use by the restore command + the Adapter wrapper below.
+ * Restore Cursor: place frozen files/User data back, recreate symlinks, and
+ * best-effort install extensions. Honors ctx.dryRun (plan only). Exported for
+ * direct use by the restore command + the Adapter wrapper below.
  */
 export async function restore(ctx: RestoreContext, data: RestoreData): Promise<void> {
   if (ctx.dryRun) {
@@ -678,13 +648,6 @@ export async function restore(ctx: RestoreContext, data: RestoreData): Promise<v
     } catch (err) {
       ctx.log.warn(`cursor: failed to create symlink ${link.repoPath}: ${(err as Error).message}`);
     }
-  }
-
-  // R9: deploy the shared CLAUDE.md == AGENTS.md content as a Cursor rule.
-  try {
-    await deploySharedRule(ctx);
-  } catch (err) {
-    ctx.log.warn(`cursor: failed to deploy shared-instructions rule: ${(err as Error).message}`);
   }
 
   await reinstallExtensions(ctx, data.manifest.plugins);

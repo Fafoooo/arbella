@@ -405,16 +405,18 @@ function toolFilesPrefix(tool: ToolId): string {
 
 /**
  * Replace a captured tool's frozen subtree wholesale, then write its fresh files
- * + symlinks + manifest. Removing `<tool>/files` first makes the backup a true
- * mirror: files deleted locally disappear from the repo on the next backup.
+ * + symlinks + manifest. Removing each owned repo data root first makes the
+ * backup a true mirror: files deleted locally disappear from the repo on the next
+ * backup. Cursor owns an extra `cursor/user` root for application User data.
  *
  * NOTE: memories (when included) are emitted by the codex adapter under
  * `codex/files/memories/...`, so they live inside the same subtree and are
  * covered by this replace.
  */
 async function replaceToolFiles(repoRoot: string, result: CaptureResult): Promise<void> {
-  const filesDir = repoJoin(repoRoot, toolFilesPrefix(result.tool));
-  await fs.rmrf(filesDir);
+  for (const root of toolRepoDataRoots(result.tool)) {
+    await fs.rmrf(repoJoin(repoRoot, root));
+  }
 
   for (const file of result.files) {
     await writeCapturedFile(repoRoot, file);
@@ -430,6 +432,12 @@ async function replaceToolFiles(repoRoot: string, result: CaptureResult): Promis
   // Per-tool reinstall manifest at `<tool>/manifest.json`.
   const manifestPath = repoJoin(repoRoot, `${result.tool}/manifest.json`);
   await fs.write(manifestPath, serialize(result.manifest));
+}
+
+function toolRepoDataRoots(tool: ToolId): string[] {
+  const roots = [toolFilesPrefix(tool)];
+  if (tool === "cursor") roots.push("cursor/user");
+  return roots;
 }
 
 /**
@@ -482,9 +490,13 @@ function renderRepoReadme(
   generatedAtIso: string,
 ): string {
   const toolList = meta.tools.map((t) => `- ${toolLabel(t)} (\`${t}\`)`).join("\n");
+  const cursorUserLine = meta.tools.includes("cursor")
+    ? "- `cursor/user/…` — Cursor application User data such as settings,\n" +
+      "  keybindings, and snippets.\n"
+    : "";
   const sharedLine = meta.sharedInstructions
     ? "Your `CLAUDE.md` and `AGENTS.md` were identical and are stored once in " +
-      "[`shared/instructions.md`](shared/instructions.md); restore deploys it to both tools.\n"
+      "[`shared/instructions.md`](shared/instructions.md); restore deploys it to Claude Code and Codex.\n"
     : "";
 
   return `# arbella backup
@@ -506,6 +518,7 @@ Each tool lives under \`<tool>/\`:
 
 - \`<tool>/files/…\` — frozen config files (paths replaced with \`{{HOME}}\`-style
   placeholders, secret values redacted).
+${cursorUserLine}
 - \`<tool>/manifest.json\` — what to reinstall (plugins, marketplaces, skills,
   npm globals) and which plugins to re-enable.
 
@@ -520,7 +533,7 @@ npm install -g arbella
 arbella pull <this-repo-url>
 \`\`\`
 
-arbella will (R6/R14) take a timestamped safety copy of any existing tool homes,
+arbella will (R6/R14) take a timestamped safety copy of any existing restore targets,
 auto-install missing CLIs, write the frozen files back (re-expanding placeholders
 to this machine's paths), reinstall plugins/marketplaces/skills, and re-enable
 plugins.
@@ -587,19 +600,21 @@ function renderRepoGitignore(tools: ToolId[]): string {
   ];
   for (const name of secretBasenames) lines.push(name);
 
-  // Scope each tool's denylist directory patterns under <tool>/files/ so noise
-  // dirs (sessions/, cache/, …) cannot sneak in if someone copies a raw home in.
-  lines.push("", "# Per-tool excluded directories (scoped under <tool>/files/)");
+  // Scope each tool's denylist directory patterns under owned data roots so noise
+  // dirs (sessions/, cache/, …) cannot sneak in if someone copies raw data in.
+  lines.push("", "# Per-tool excluded directories (scoped under owned data roots)");
   const seen = new Set<string>();
   for (const tool of tools) {
     for (const pattern of denylistFor(tool)) {
       // Only directory patterns are useful to scope here; loose globs are already
       // covered by the universal rules above.
       if (!pattern.endsWith("/")) continue;
-      const scoped = `${tool}/files/${pattern}`;
-      if (seen.has(scoped)) continue;
-      seen.add(scoped);
-      lines.push(scoped);
+      for (const root of toolRepoDataRoots(tool)) {
+        const scoped = `${root}/${pattern}`;
+        if (seen.has(scoped)) continue;
+        seen.add(scoped);
+        lines.push(scoped);
+      }
     }
   }
 

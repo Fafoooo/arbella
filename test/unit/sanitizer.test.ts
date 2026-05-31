@@ -172,7 +172,7 @@ describe("sanitizer: sanitizeFile is the key-name-aware production path (§0.6)"
     expect(textOnly.content).toContain("corp-gateway-OPAQUE-7766aabb");
   });
 
-  it("redacts an opaque api_token / apiKeyHelper value in a JSON config", () => {
+	  it("redacts an opaque api_token / apiKeyHelper value in a JSON config", () => {
     const blob = JSON.stringify(
       { api_token: "plain-opaque-no-prefix-001122", apiKeyHelper: "echo my-opaque-zzz999" },
       null,
@@ -181,9 +181,30 @@ describe("sanitizer: sanitizeFile is the key-name-aware production path (§0.6)"
     const res = sanitizer.sanitizeFile(blob, "cursor", "mcp.json");
     expect(res.content).not.toContain("plain-opaque-no-prefix-001122");
     expect(res.content).not.toContain("my-opaque-zzz999");
-  });
+	  });
 
-  it("falls back to the text pass for non-JSON content (hook scripts)", () => {
+	  it("redacts opaque secret-key values in JSONC Cursor settings", () => {
+	    const jsonc = [
+	      "{",
+	      "  // Cursor settings allow comments",
+	      "  \"mcpServers\": {",
+	      "    \"internal\": {",
+	      "      \"env\": {",
+	      "        \"ANTHROPIC_AUTH_TOKEN\": \"plain-opaque-jsonc-secret\"",
+	      "      },",
+	      "    },",
+	      "  },",
+	      "}",
+	    ].join("\n");
+
+	    const res = sanitizer.sanitizeFile(jsonc, "cursor", "settings.json");
+	    expect(res.changed).toBe(true);
+	    expect(res.content).not.toContain("plain-opaque-jsonc-secret");
+	    expect(res.content).toContain(REDACTED);
+	    expect(res.found.some((ref) => ref.source.includes("ANTHROPIC_AUTH_TOKEN"))).toBe(true);
+	  });
+
+	  it("falls back to the text pass for non-JSON content (hook scripts)", () => {
     const hook = 'export ANTHROPIC_API_KEY="sk-ant-api03-AAAAAAAAAAAAAAAAAAAAAAAAAAAA"';
     const res = sanitizer.sanitizeFile(hook, "claude", "hooks/run.sh");
     expect(res.content).toContain(REDACTED);

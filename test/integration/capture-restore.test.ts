@@ -49,6 +49,7 @@ import { fs as realFs } from "../../src/utils/fs.js";
 import { createSanitizer } from "../../src/core/sanitizer/index.js";
 import { createTemplater } from "../../src/core/templater/index.js";
 import { makeVariables } from "../../src/core/templater/variables.js";
+import { loadRestoreData } from "../../src/commands/restore.js";
 import {
   shouldShareInstructions,
   buildSharedInstructionsFile,
@@ -282,6 +283,7 @@ beforeAll(async () => {
 	    "snippets/typescript.json",
 	    JSON.stringify({ log: { prefix: "cl", body: [`console.log('${srcHome}')`] } }, null, 2),
 	  );
+	  await writeFile(cursorUserDir, "snippets/cache.sqlite", "sqlite cache should be ignored\n");
 
   // ---- Capture orchestration (mirrors the backup command's R9 wiring) ----
 	  const claudeVars = makeVariables(srcHome, "fab", "linux", claudeSrc);
@@ -449,6 +451,7 @@ describe("capture: machine paths become placeholders", () => {
 	    expect(findFile(cursorCapture.files, "cursor/user/settings.json")).toBeDefined();
 	    expect(findFile(cursorCapture.files, "cursor/user/keybindings.json")).toBeDefined();
 	    expect(findFile(cursorCapture.files, "cursor/user/snippets/typescript.json")).toBeDefined();
+	    expect(findFile(cursorCapture.files, "cursor/user/snippets/cache.sqlite")).toBeUndefined();
 	    expect(findFile(cursorCapture.files, "cursor/files/skills/local/SKILL.md")).toBeDefined();
 
 	    expect(cursorCapture.symlinks).toContainEqual({
@@ -495,14 +498,19 @@ describe("restore: files reappear correctly in a fresh $HOME", () => {
   beforeAll(async () => {
     // Materialize the captured repo tree on disk under repoRoot.
 	    for (const f of [...claudeCapture.files, ...codexCapture.files, ...cursorCapture.files]) {
-      const abs = path.join(repoRoot, ...f.repoPath.split("/"));
-      await fsp.mkdir(path.dirname(abs), { recursive: true });
-      if (f.binary) {
-        await fsp.writeFile(abs, Buffer.from(f.content, "base64"));
-      } else {
-        await fsp.writeFile(abs, f.content);
-      }
-    }
+	      const abs = path.join(repoRoot, ...f.repoPath.split("/"));
+	      await fsp.mkdir(path.dirname(abs), { recursive: true });
+	      if (f.binary) {
+	        await fsp.writeFile(abs, Buffer.from(f.content, "base64"));
+	      } else {
+	        await fsp.writeFile(abs, f.content);
+	      }
+	    }
+	    for (const link of [...claudeCapture.symlinks, ...codexCapture.symlinks, ...cursorCapture.symlinks]) {
+	      const abs = path.join(repoRoot, ...link.repoPath.split("/"));
+	      await fsp.mkdir(path.dirname(abs), { recursive: true });
+	      await fsp.symlink(link.target, abs);
+	    }
     // Write the single shared instructions file into the repo.
     const sharedAbs = path.join(repoRoot, ...sharedFile.repoPath.split("/"));
     await fsp.mkdir(path.dirname(sharedAbs), { recursive: true });
@@ -545,11 +553,7 @@ describe("restore: files reappear correctly in a fresh $HOME", () => {
 	      codexData,
 	    );
 
-	    const cursorData: RestoreData = {
-	      manifest: cursorCapture.manifest,
-	      files: cursorCapture.files,
-	      symlinks: cursorCapture.symlinks,
-	    };
+	    const cursorData = await loadRestoreData(repoRoot, "cursor");
 	    await restoreCursor(
 	      makeRestoreCtx(cursorDst, path.join(repoRoot, "cursor"), repoRoot, cursorVars),
 	      cursorData,
@@ -630,12 +634,10 @@ describe("restore: files reappear correctly in a fresh $HOME", () => {
 	    const linkTarget = await fsp.readlink(under(path.join(dstHome, ".cursor"), "skills/humanizer"));
 	    expect(linkTarget).toBe("../../.agents/skills/humanizer");
 
-	    const sharedRule = await fsp.readFile(
+	    const sharedRuleExists = await realFs.exists(
 	      under(path.join(dstHome, ".cursor"), "rules/arbella-shared-instructions.mdc"),
-	      "utf8",
 	    );
-	    expect(sharedRule).toContain("alwaysApply: true");
-	    expect(sharedRule).toContain(SHARED_MD);
+	    expect(sharedRuleExists).toBe(false);
 	  });
 
   it("does NOT recreate any secret file in the fresh home", async () => {

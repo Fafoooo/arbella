@@ -47,8 +47,6 @@ export interface CursorPaths {
   mcpJson: string;
   /** ~/.cursor/skills */
   skillsDir: string;
-  /** ~/.cursor/rules (global user rules; may not exist) */
-  rulesDir: string;
 }
 
 /** Fully-resolved Cursor application User data paths, all absolute. */
@@ -74,7 +72,6 @@ export function paths(overrideHome?: string): CursorPaths {
     home: base,
     mcpJson: path.join(base, "mcp.json"),
     skillsDir: path.join(base, "skills"),
-    rulesDir: path.join(base, "rules"),
   };
 }
 
@@ -109,22 +106,3 @@ export function cursorUserPaths(toolHome: string, os: OS): CursorUserPaths {
  * its presence here.
  */
 export const FROZEN_PATHS: readonly string[] = ["mcp.json", "skills"] as const;
-
-/**
- * Repo path (POSIX) of the shared-instructions file the backup command writes at
- * the repo root when R9 is active. The Cursor adapter reads this on restore to
- * materialize a Cursor user rule.
- */
-export const SHARED_INSTRUCTIONS_REPO_PATH = "shared/instructions.md";
-
-/**
- * Basename of the Cursor user-rule file the adapter writes (under the rules dir)
- * to carry the shared CLAUDE.md/AGENTS.md instructions across to Cursor (R9).
- * `.mdc` is Cursor's rule file extension.
- */
-export const SHARED_RULE_FILENAME = "arbella-shared-instructions.mdc";
-
-/** Absolute path to the Cursor user rule deployed on restore for R9. */
-export function sharedRulePath(overrideHome?: string): string {
-  return path.join(paths(overrideHome).rulesDir, SHARED_RULE_FILENAME);
-}
