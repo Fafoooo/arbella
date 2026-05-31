@@ -88,9 +88,10 @@ import { capture as captureCodex } from "../adapters/codex/capture.js";
 import { capture as captureCursor } from "../adapters/cursor/index.js";
 
 import type { Adapter } from "../adapters/adapter.interface.js";
+import { getPackageVersion } from "../core/version.js";
 
-/** arbella version stamped into arbella.json (kept in sync with package.json). */
-const ARBELLA_VERSION = "0.1.1";
+/** arbella version stamped into arbella.json. */
+const ARBELLA_VERSION = getPackageVersion();
 
 /* -------------------------------------------------------------------------- */
 /* Options + CLI registration                                                  */
