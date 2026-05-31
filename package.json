@@ -1,6 +1,6 @@
 {
   "name": "arbella",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Set up your AI coding tools once, then rebuild that setup on any machine. Claude Code, Codex & Cursor — Linux, macOS, Windows.",
   "type": "module",
   "license": "MIT",
