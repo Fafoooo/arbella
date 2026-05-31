@@ -5,7 +5,7 @@
  * Strategy for plugins/marketplaces (documented choice):
  *   The Codex CLI's plugin surface is `codex plugin ...`. We attempt, in order:
  *     codex plugin marketplace add <source>
- *     codex plugin install <name@marketplace>
+ *     codex plugin add <name@marketplace>
  *   guarded by `which("codex")`. If the CLI is missing OR a command exits
  *   non-zero (the subcommand may differ across Codex versions), we DO NOT fail
  *   the restore: the sanitized config.toml we just wrote already retains the
@@ -101,8 +101,11 @@ export async function planActions(
       description: `Register marketplace ${m.id} (${m.source})`,
     });
   }
-  for (const plugin of data.manifest.plugins) {
-    if (plugin.scope !== "user") continue;
+  const { installable } = partitionPluginsForRestore(
+    data.manifest.marketplaces,
+    data.manifest.plugins.filter((p) => p.scope === "user"),
+  );
+  for (const plugin of installable) {
     actions.push({
       type: "install-plugin",
       tool: "codex",
@@ -210,7 +213,7 @@ async function writeCapturedFile(
  * Split user-scope plugins into those installable via the `codex` CLI now and
  * those that must be DEFERRED to Codex's own config.toml re-sync.
  *
- * A plugin keyed `name@marketplace` can only be `codex plugin install`-ed if its
+ * A plugin keyed `name@marketplace` can only be `codex plugin add`-ed if its
  * marketplace was captured (and thus `codex plugin marketplace add`-ed first).
  * Plugins referencing a marketplace we did NOT capture — e.g. a Codex BUILT-IN
  * curated marketplace like `openai-curated`, which has no addable source — can't
@@ -326,5 +329,5 @@ export function marketplaceAddArgs(m: MarketplaceEntry): string[] {
 
 /** argv for installing a Codex plugin from a PluginEntry. */
 export function pluginInstallArgs(p: PluginEntry): string[] {
-  return ["plugin", "install", p.id];
+  return ["plugin", "add", p.id];
 }
