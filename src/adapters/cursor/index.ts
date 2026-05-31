@@ -46,6 +46,7 @@ import type {
 import { denylistFor, matchesDeny } from "../../core/sanitizer/denylist.js";
 import { cliBinaryName, detectOS, installCommandFor } from "../../platform/os.js";
 import { runInstall, which } from "../../platform/install.js";
+import { normalizeCapturedSymlinkTarget } from "../../utils/symlink.js";
 
 import {
   FROZEN_PATHS,
@@ -248,7 +249,7 @@ async function walkFrozen(
   }
 
   if (kind === "symlink") {
-    const target = await ctx.fs.readLink(abs);
+    const target = normalizeCapturedSymlinkTarget(await ctx.fs.readLink(abs));
     symlinks.push({ repoPath: repoPathBuilder(rel), target });
     ctx.log.debug(`cursor: symlink ${rel} -> ${target}`);
     return;
@@ -299,7 +300,7 @@ async function captureSkills(
 
     const kind = await ctx.fs.statKind(abs);
     if (kind === "symlink") {
-      const target = await ctx.fs.readLink(abs);
+      const target = normalizeCapturedSymlinkTarget(await ctx.fs.readLink(abs));
       symlinks.push({ repoPath: repoPathFor(rel), target });
       skills.push({
         name,

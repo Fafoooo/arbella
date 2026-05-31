@@ -32,6 +32,7 @@ import type {
 } from "../../types.js";
 import { denylistFor, matchesDeny } from "../../core/sanitizer/denylist.js";
 import { listNpmGlobals } from "../../platform/install.js";
+import { normalizeCapturedSymlinkTarget } from "../../utils/symlink.js";
 import {
   CONFIG_FILE,
   FROZEN_PATHS,
@@ -173,7 +174,7 @@ async function captureSymlink(
 ): Promise<void> {
   let target: string;
   try {
-    target = await ctx.fs.readLink(absPath);
+    target = normalizeCapturedSymlinkTarget(await ctx.fs.readLink(absPath));
   } catch {
     out.warnings.push(`codex: could not read symlink ${rel}; skipped`);
     return;

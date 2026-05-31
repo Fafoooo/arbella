@@ -44,6 +44,7 @@ import {
   denylistFor,
   matchesDeny,
 } from "../../core/sanitizer/denylist.js";
+import { normalizeCapturedSymlinkTarget } from "../../utils/symlink.js";
 import { listNpmGlobals } from "../../platform/install.js";
 
 import { REPO_PREFIX, FROZEN_PATHS, INSTRUCTIONS_FILE, paths } from "./paths.js";
@@ -111,7 +112,7 @@ async function walk(
   if (kind === "symlink") {
     // A symlink anywhere in the frozen tree is preserved as a link. (Skill
     // symlinks are special-cased by the caller before recursing into skills/.)
-    const target = await ctx.fs.readLink(abs);
+    const target = normalizeCapturedSymlinkTarget(await ctx.fs.readLink(abs));
     symlinks.push({ repoPath: repoPathFor(rel), target });
     ctx.log.debug(`claude: symlink ${rel} -> ${target}`);
     return;
@@ -225,7 +226,7 @@ async function captureSkills(
     const kind = await ctx.fs.statKind(abs);
     if (kind === "symlink") {
       // skills.sh: ~/.claude/skills/<name> -> ../../.agents/skills/<name>
-      const target = await ctx.fs.readLink(abs);
+      const target = normalizeCapturedSymlinkTarget(await ctx.fs.readLink(abs));
       symlinks.push({ repoPath: repoPathFor(rel), target });
       skills.push({
         name,
