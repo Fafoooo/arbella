@@ -49,18 +49,18 @@ arbella --help
 ## What it does
 
 ```text
-  push   ~/.claude · ~/.codex   ──▶   strip · template   ──▶   private repo
-  pull   private repo           ──▶   install · place    ──▶   ~/.claude · ~/.codex
+  push   ~/.claude · ~/.codex · Cursor   ──▶   strip · template   ──▶   private repo
+  pull   private repo                  ──▶   install · place    ──▶   tools + Cursor User data
 ```
 
-`push` reads the parts of your setup that matter, strips anything secret, swaps machine-specific paths for placeholders, and pushes the result to your repo. `pull` does the reverse: installs the CLIs you don't have, drops files back with this machine's paths, reinstalls plugins and skills, and wires your shared instructions into both Claude and Codex.
+`push` reads the parts of your setup that matter, strips anything secret, swaps machine-specific paths for placeholders, and pushes the result to your repo. `pull` does the reverse: installs the CLIs you don't have, drops files back with this machine's paths, reinstalls plugins and skills, and wires your shared instructions into the restored tools.
 
 Two things it deliberately won't do:
 
 - **Never commits secrets.** API keys, OAuth tokens, `auth.json`, `.credentials.json` — all excluded, no exceptions. You sign back in after a pull, or carry them yourself with [`arbella secrets`](#arbella-secrets).
 - **Doesn't copy what it can reinstall.** Plugins and registry skills are saved as a list and pulled fresh, so the repo stays small and never goes stale.
 
-Supported today: **Claude Code** and **Codex**, plus a **Cursor** adapter that quietly does nothing when Cursor isn't installed.
+Supported today: **Claude Code**, **Codex**, and **Cursor**. Cursor support covers global MCP config, user settings, keybindings, snippets, local skills, skills.sh symlinks, and extension IDs; runtime state and credentials stay out.
 
 ## Commands
 

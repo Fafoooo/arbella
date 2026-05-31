@@ -39,6 +39,11 @@ import { capture as captureClaude } from "../../src/adapters/claude/capture.js";
 import { restore as restoreClaude } from "../../src/adapters/claude/restore.js";
 import { capture as captureCodex } from "../../src/adapters/codex/capture.js";
 import { restore as restoreCodex } from "../../src/adapters/codex/restore.js";
+import {
+  capture as captureCursor,
+  restore as restoreCursor,
+  planActions as planCursorActions,
+} from "../../src/adapters/cursor/index.js";
 
 import { fs as realFs } from "../../src/utils/fs.js";
 import { createSanitizer } from "../../src/core/sanitizer/index.js";
@@ -68,6 +73,7 @@ const CLAUDE_CRED_SECRET = "sk-ant-cred-DO-NOT-LEAK-AAAAAAAAAAAAAAAAAAAAAA";
 const CODEX_AUTH_SECRET = "OPENAI_AUTH_TOKEN_DO_NOT_LEAK_BBBBBBBBBBBBBBB";
 const SETTINGS_API_KEY = "sk-ant-api03-INLINE-KEY-CCCCCCCCCCCCCCCCCCCCCCCC";
 const CONFIG_MCP_SECRET = "glpat-CONFIG-MCP-SECRET-DDDDDDDDDDDDD";
+const CURSOR_MCP_SECRET = "sk-ant-api03-CURSOR-MCP-SECRET-HHHHHHHHHHHHH";
 // OPAQUE value under a secret KEY NAME — matches NO known token pattern. Proves
 // the STRUCTURAL key-name-aware capture path (sanitizeFile) redacts it; the old
 // value-only sanitizeText path would have leaked it verbatim into the repo.
@@ -139,6 +145,7 @@ let repoRoot: string; // the backup repo working tree
 
 let claudeCapture: CaptureResult;
 let codexCapture: CaptureResult;
+let cursorCapture: CaptureResult;
 let sharedFile: CapturedFile;
 
 /** Absolute, OS-correct path under a tool home from a POSIX-ish rel path. */
@@ -158,8 +165,9 @@ beforeAll(async () => {
   dstHome = path.join(tmpRoot, "dst-home");
   repoRoot = path.join(tmpRoot, "repo");
 
-  const claudeSrc = path.join(srcHome, ".claude");
-  const codexSrc = path.join(srcHome, ".codex");
+	  const claudeSrc = path.join(srcHome, ".claude");
+	  const codexSrc = path.join(srcHome, ".codex");
+	  const cursorSrc = path.join(srcHome, ".cursor");
 
   // ---- ~/.claude ----
   // settings.json: an inline API key (redact) + two machine paths to template:
@@ -220,13 +228,65 @@ beforeAll(async () => {
   await writeFile(codexSrc, "config.toml", configToml);
   // Byte-identical to CLAUDE.md.
   await writeFile(codexSrc, "AGENTS.md", SHARED_MD);
-  await writeFile(codexSrc, "prompts/review.md", "Review prompt body.\n");
-  // FAKE SECRET FILE — excluded wholesale.
-  await writeFile(codexSrc, "auth.json", `{"token":"${CODEX_AUTH_SECRET}"}`, 0o600);
+	  await writeFile(codexSrc, "prompts/review.md", "Review prompt body.\n");
+	  // FAKE SECRET FILE — excluded wholesale.
+	  await writeFile(codexSrc, "auth.json", `{"token":"${CODEX_AUTH_SECRET}"}`, 0o600);
+
+	  // ---- ~/.cursor + Cursor app user data ----
+	  await writeFile(
+	    cursorSrc,
+	    "mcp.json",
+	    JSON.stringify(
+	      {
+	        mcpServers: {
+	          figma: {
+	            command: "node",
+	            args: [`${srcHome}/.cursor/mcp/figma.js`],
+	            env: {
+	              ANTHROPIC_API_KEY: CURSOR_MCP_SECRET,
+	            },
+	          },
+	        },
+	      },
+	      null,
+	      2,
+	    ),
+	  );
+	  await writeFile(
+	    cursorSrc,
+	    "skills/local/SKILL.md",
+	    `# Local Cursor skill\n\nReads ${srcHome}/.cursor/skills/local/data.json\n`,
+	  );
+	  await writeFile(cursorSrc, "extensions/extensions.json", JSON.stringify([
+	    {
+	      identifier: { id: "anysphere.cursorpyright" },
+	      version: "1.2.3",
+	    },
+	  ]));
+	  const cursorSkillLink = under(cursorSrc, "skills/humanizer");
+	  await fsp.mkdir(path.dirname(cursorSkillLink), { recursive: true });
+	  await fsp.symlink("../../.agents/skills/humanizer", cursorSkillLink);
+	  const cursorUserDir = path.join(srcHome, ".config", "Cursor", "User");
+	  await writeFile(
+	    cursorUserDir,
+	    "settings.json",
+	    JSON.stringify({ "terminal.integrated.cwd": `${srcHome}/programming` }, null, 2),
+	  );
+	  await writeFile(
+	    cursorUserDir,
+	    "keybindings.json",
+	    JSON.stringify([{ key: "cmd+k", command: "cursorai.action.generate" }], null, 2),
+	  );
+	  await writeFile(
+	    cursorUserDir,
+	    "snippets/typescript.json",
+	    JSON.stringify({ log: { prefix: "cl", body: [`console.log('${srcHome}')`] } }, null, 2),
+	  );
 
   // ---- Capture orchestration (mirrors the backup command's R9 wiring) ----
-  const claudeVars = makeVariables(srcHome, "fab", "linux", claudeSrc);
-  const codexVars = makeVariables(srcHome, "fab", "linux", codexSrc);
+	  const claudeVars = makeVariables(srcHome, "fab", "linux", claudeSrc);
+	  const codexVars = makeVariables(srcHome, "fab", "linux", codexSrc);
+	  const cursorVars = makeVariables(srcHome, "fab", "linux", cursorSrc);
 
   const claudeMd = SHARED_MD;
   const agentsMd = SHARED_MD;
@@ -236,10 +296,13 @@ beforeAll(async () => {
   claudeCapture = await captureClaude(makeCaptureCtx(claudeSrc, claudeVars), {
     skipInstructions: share,
   });
-  codexCapture = await captureCodex(makeCaptureCtx(codexSrc, codexVars), {
-    skipInstructions: share,
-  });
-  sharedFile = buildSharedInstructionsFile(SHARED_MD);
+	  codexCapture = await captureCodex(makeCaptureCtx(codexSrc, codexVars), {
+	    skipInstructions: share,
+	  });
+	  cursorCapture = await captureCursor(makeCaptureCtx(cursorSrc, cursorVars), {
+	    skipInstructions: share,
+	  });
+	  sharedFile = buildSharedInstructionsFile(SHARED_MD);
 });
 
 afterAll(async () => {
@@ -250,10 +313,10 @@ afterAll(async () => {
 /* Helpers over the captured output                                             */
 /* -------------------------------------------------------------------------- */
 
-/** Concatenate every captured file's content + repoPath across both tools + shared. */
+/** Concatenate every captured file's content + repoPath across all tools + shared. */
 function allCapturedText(): string {
   const parts: string[] = [];
-  for (const f of [...claudeCapture.files, ...codexCapture.files, sharedFile]) {
+  for (const f of [...claudeCapture.files, ...codexCapture.files, ...cursorCapture.files, sharedFile]) {
     parts.push(f.repoPath, f.content);
   }
   return parts.join("\n");
@@ -306,8 +369,9 @@ describe("capture: secrets never leave the machine", () => {
 
   itPosixHost("redacts inline secret VALUES in settings.json and config.toml", () => {
     const blob = allCapturedText();
-    expect(blob).not.toContain(SETTINGS_API_KEY);
-    expect(blob).not.toContain(CONFIG_MCP_SECRET);
+	    expect(blob).not.toContain(SETTINGS_API_KEY);
+	    expect(blob).not.toContain(CONFIG_MCP_SECRET);
+	    expect(blob).not.toContain(CURSOR_MCP_SECRET);
 
     const settings = findFile(claudeCapture.files, "claude/files/settings.json");
     expect(settings).toBeDefined();
@@ -345,7 +409,7 @@ describe("capture: machine paths become placeholders", () => {
     expect(settings.content).toContain("{{HOME}}/.agents/skills");
   });
 
-  itPosixHost("folds tool-home and plain-home paths in config.toml (value side)", () => {
+	  itPosixHost("folds tool-home and plain-home paths in config.toml (value side)", () => {
     const config = findFile(codexCapture.files, "codex/files/config.toml")!;
     expect(config.content).not.toContain(srcHome);
     expect(config.content).toContain("{{HOME}}/.agents/notify.sh");
@@ -357,8 +421,57 @@ describe("capture: machine paths become placeholders", () => {
     expect(agent.content).not.toContain(srcHome);
     expect(agent.content).toContain("{{TOOL_HOME}}/agents/reviewer.log");
     expect(agent.content).toContain("{{HOME}}/.agents/shared.md");
-  });
-});
+	  });
+
+	  itPosixHost("folds Cursor MCP, user settings, snippets, and skill paths", () => {
+	    const mcp = findFile(cursorCapture.files, "cursor/files/mcp.json")!;
+	    expect(mcp.content).not.toContain(srcHome);
+	    expect(mcp.content).toContain("{{TOOL_HOME}}/mcp/figma.js");
+	    expect(mcp.content).toContain("{{REDACTED}}");
+
+	    const settings = findFile(cursorCapture.files, "cursor/user/settings.json")!;
+	    expect(settings.content).not.toContain(srcHome);
+	    expect(settings.content).toContain("{{HOME}}/programming");
+
+	    const snippet = findFile(cursorCapture.files, "cursor/user/snippets/typescript.json")!;
+	    expect(snippet.content).not.toContain(srcHome);
+	    expect(snippet.content).toContain("{{HOME}}");
+
+	    const skill = findFile(cursorCapture.files, "cursor/files/skills/local/SKILL.md")!;
+	    expect(skill.content).not.toContain(srcHome);
+	    expect(skill.content).toContain("{{TOOL_HOME}}/skills/local/data.json");
+	  });
+	});
+
+	describe("capture: Cursor portable state", () => {
+	  it("captures global MCP, user data, local skills, skills.sh symlinks, and extension metadata", () => {
+	    expect(findFile(cursorCapture.files, "cursor/files/mcp.json")).toBeDefined();
+	    expect(findFile(cursorCapture.files, "cursor/user/settings.json")).toBeDefined();
+	    expect(findFile(cursorCapture.files, "cursor/user/keybindings.json")).toBeDefined();
+	    expect(findFile(cursorCapture.files, "cursor/user/snippets/typescript.json")).toBeDefined();
+	    expect(findFile(cursorCapture.files, "cursor/files/skills/local/SKILL.md")).toBeDefined();
+
+	    expect(cursorCapture.symlinks).toContainEqual({
+	      repoPath: "cursor/files/skills/humanizer",
+	      target: "../../.agents/skills/humanizer",
+	    });
+	    expect(cursorCapture.manifest.skills).toEqual(
+	      expect.arrayContaining([
+	        expect.objectContaining({ name: "local", source: "frozen", symlinked: false }),
+	        expect.objectContaining({ name: "humanizer", source: "skills.sh", symlinked: true }),
+	      ]),
+	    );
+	    expect(cursorCapture.manifest.plugins).toContainEqual(
+	      expect.objectContaining({
+	        id: "anysphere.cursorpyright",
+	        name: "anysphere.cursorpyright",
+	        version: "1.2.3",
+	        scope: "user",
+	      }),
+	    );
+	    expect(findFile(cursorCapture.files, "cursor/files/extensions/extensions.json")).toBeUndefined();
+	  });
+	});
 
 describe("capture: shared instructions are deduped (R9)", () => {
   it("does NOT emit per-tool CLAUDE.md / AGENTS.md when sharing", () => {
@@ -381,7 +494,7 @@ describe("restore: files reappear correctly in a fresh $HOME", () => {
 
   beforeAll(async () => {
     // Materialize the captured repo tree on disk under repoRoot.
-    for (const f of [...claudeCapture.files, ...codexCapture.files]) {
+	    for (const f of [...claudeCapture.files, ...codexCapture.files, ...cursorCapture.files]) {
       const abs = path.join(repoRoot, ...f.repoPath.split("/"));
       await fsp.mkdir(path.dirname(abs), { recursive: true });
       if (f.binary) {
@@ -396,11 +509,13 @@ describe("restore: files reappear correctly in a fresh $HOME", () => {
     await fsp.writeFile(sharedAbs, sharedFile.content);
 
     // Restore target: a DIFFERENT home, so {{HOME}} must expand to dstHome.
-    const claudeDst = path.join(dstHome, ".claude");
-    const codexDst = path.join(dstHome, ".codex");
-    restoredVars = makeVariables(dstHome, "newuser", "linux");
-    const claudeVars = makeVariables(dstHome, "newuser", "linux", claudeDst);
-    const codexVars = makeVariables(dstHome, "newuser", "linux", codexDst);
+	    const claudeDst = path.join(dstHome, ".claude");
+	    const codexDst = path.join(dstHome, ".codex");
+	    const cursorDst = path.join(dstHome, ".cursor");
+	    restoredVars = makeVariables(dstHome, "newuser", "linux");
+	    const claudeVars = makeVariables(dstHome, "newuser", "linux", claudeDst);
+	    const codexVars = makeVariables(dstHome, "newuser", "linux", codexDst);
+	    const cursorVars = makeVariables(dstHome, "newuser", "linux", cursorDst);
 
     // Restore Claude frozen files + the shared instructions (-> CLAUDE.md).
     const claudeData: RestoreData = {
@@ -425,10 +540,20 @@ describe("restore: files reappear correctly in a fresh $HOME", () => {
       ],
       symlinks: codexCapture.symlinks,
     };
-    await restoreCodex(
-      makeRestoreCtx(codexDst, path.join(repoRoot, "codex"), repoRoot, codexVars),
-      codexData,
-    );
+	    await restoreCodex(
+	      makeRestoreCtx(codexDst, path.join(repoRoot, "codex"), repoRoot, codexVars),
+	      codexData,
+	    );
+
+	    const cursorData: RestoreData = {
+	      manifest: cursorCapture.manifest,
+	      files: cursorCapture.files,
+	      symlinks: cursorCapture.symlinks,
+	    };
+	    await restoreCursor(
+	      makeRestoreCtx(cursorDst, path.join(repoRoot, "cursor"), repoRoot, cursorVars),
+	      cursorData,
+	    );
   });
 
   itPosixHost("re-creates settings.json with placeholders expanded to the TARGET home", async () => {
@@ -464,7 +589,7 @@ describe("restore: files reappear correctly in a fresh $HOME", () => {
     expect(content).not.toContain(CONFIG_MCP_SECRET);
   });
 
-  it("deploys the single shared instructions file to BOTH tools", async () => {
+	  it("deploys the single shared instructions file to BOTH tools", async () => {
     const claudeMd = await fsp.readFile(
       under(path.join(dstHome, ".claude"), "CLAUDE.md"),
       "utf8",
@@ -475,7 +600,43 @@ describe("restore: files reappear correctly in a fresh $HOME", () => {
     );
     expect(claudeMd).toBe(SHARED_MD);
     expect(agentsMd).toBe(SHARED_MD);
-  });
+	  });
+
+	  itPosixHost("restores Cursor tool-home and app User files to the correct locations", async () => {
+	    const mcp = await fsp.readFile(under(path.join(dstHome, ".cursor"), "mcp.json"), "utf8");
+	    expect(mcp).toContain(`${dstHome}/.cursor/mcp/figma.js`);
+	    expect(mcp).toContain("{{REDACTED}}");
+	    expect(mcp).not.toContain(CURSOR_MCP_SECRET);
+
+	    const settings = await fsp.readFile(
+	      path.join(dstHome, ".config", "Cursor", "User", "settings.json"),
+	      "utf8",
+	    );
+	    expect(settings).toContain(`${dstHome}/programming`);
+	    expect(settings).not.toContain("{{HOME}}");
+
+	    const snippet = await fsp.readFile(
+	      path.join(dstHome, ".config", "Cursor", "User", "snippets", "typescript.json"),
+	      "utf8",
+	    );
+	    expect(snippet).toContain(dstHome);
+	    expect(snippet).not.toContain("{{HOME}}");
+
+	    const skill = await fsp.readFile(
+	      under(path.join(dstHome, ".cursor"), "skills/local/SKILL.md"),
+	      "utf8",
+	    );
+	    expect(skill).toContain(`${dstHome}/.cursor/skills/local/data.json`);
+	    const linkTarget = await fsp.readlink(under(path.join(dstHome, ".cursor"), "skills/humanizer"));
+	    expect(linkTarget).toBe("../../.agents/skills/humanizer");
+
+	    const sharedRule = await fsp.readFile(
+	      under(path.join(dstHome, ".cursor"), "rules/arbella-shared-instructions.mdc"),
+	      "utf8",
+	    );
+	    expect(sharedRule).toContain("alwaysApply: true");
+	    expect(sharedRule).toContain(SHARED_MD);
+	  });
 
   it("does NOT recreate any secret file in the fresh home", async () => {
     const credExists = await realFs.exists(
@@ -486,6 +647,65 @@ describe("restore: files reappear correctly in a fresh $HOME", () => {
     );
     expect(credExists).toBe(false);
     expect(authExists).toBe(false);
+  });
+});
+
+describe("restore: Cursor plan actions", () => {
+  it("plans Cursor User files outside ~/.cursor and extension installs", async () => {
+    const root = await fsp.mkdtemp(path.join(os.tmpdir(), "arbella-cursor-plan-"));
+    try {
+      const home = path.join(root, "home");
+      const cursorHome = path.join(home, ".cursor");
+      const repo = path.join(root, "repo");
+      const ctx = makeRestoreCtx(
+        cursorHome,
+        path.join(repo, "cursor"),
+        repo,
+        makeVariables(home, "newuser", "linux", cursorHome),
+      );
+      const actions = await planCursorActions(ctx, {
+        manifest: {
+          tool: "cursor",
+          plugins: [
+            {
+              id: "anysphere.cursorpyright",
+              name: "anysphere.cursorpyright",
+              version: "1.2.3",
+              enabled: true,
+              scope: "user",
+            },
+          ],
+          marketplaces: [],
+          skills: [],
+          npmGlobals: [],
+          enabledPlugins: {},
+        },
+        files: [
+          {
+            repoPath: "cursor/user/settings.json",
+            content: "{}",
+          },
+        ],
+        symlinks: [],
+      });
+
+      expect(actions).toContainEqual(
+        expect.objectContaining({
+          type: "write-file",
+          tool: "cursor",
+          targetPath: path.join(home, ".config", "Cursor", "User", "settings.json"),
+        }),
+      );
+      expect(actions).toContainEqual(
+        expect.objectContaining({
+          type: "install-plugin",
+          tool: "cursor",
+          description: "cursor --install-extension anysphere.cursorpyright",
+        }),
+      );
+    } finally {
+      await fsp.rm(root, { recursive: true, force: true });
+    }
   });
 });
 

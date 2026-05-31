@@ -90,7 +90,7 @@ import { capture as captureCursor } from "../adapters/cursor/index.js";
 import type { Adapter } from "../adapters/adapter.interface.js";
 
 /** arbella version stamped into arbella.json (kept in sync with package.json). */
-const ARBELLA_VERSION = "0.1.0";
+const ARBELLA_VERSION = "0.1.1";
 
 /* -------------------------------------------------------------------------- */
 /* Options + CLI registration                                                  */

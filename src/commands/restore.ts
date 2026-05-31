@@ -97,7 +97,7 @@ import {
 
 import { claudeAdapter } from "../adapters/claude/index.js";
 import { codexAdapter } from "../adapters/codex/index.js";
-import { cursorAdapter } from "../adapters/cursor/index.js";
+import { cursorAdapter, planActions as cursorPlanActions } from "../adapters/cursor/index.js";
 import { planActions as claudePlanActions } from "../adapters/claude/restore.js";
 import { planActions as codexPlanActions } from "../adapters/codex/restore.js";
 
@@ -124,9 +124,7 @@ export interface RestoreOptions {
 /**
  * Per-tool adapter + its (optional) standalone planActions exporter. The Adapter
  * interface itself only exposes restore(); planActions lives as a sibling module
- * export for claude/codex. Cursor has no separate
- * planner — its dry-run plan is derived by running restore() with dryRun=true,
- * which logs the intended writes (see cursor/index.ts). We model that uniformly.
+ * export for the adapters that need tool-specific path mapping.
  */
 interface ToolWiring {
   readonly id: ToolId;
@@ -141,7 +139,7 @@ interface ToolWiring {
 const WIRING: readonly ToolWiring[] = [
   { id: "claude", adapter: claudeAdapter, planActions: claudePlanActions },
   { id: "codex", adapter: codexAdapter, planActions: codexPlanActions },
-  { id: "cursor", adapter: cursorAdapter },
+  { id: "cursor", adapter: cursorAdapter, planActions: cursorPlanActions },
 ];
 
 /** Look up the wiring for a tool id (every ToolId has an entry). */
@@ -563,8 +561,8 @@ function stripFilesPrefix(tool: ToolId, repoPath: string): string {
 }
 
 /**
- * Synthesize a plan fragment for a tool that has no dedicated planActions export
- * (cursor). Mirrors the planner shape used by the claude/codex restore modules:
+ * Synthesize a plan fragment for a tool that has no dedicated planActions export.
+ * Mirrors the planner shape used by adapter restore modules:
  * one write-file/write-symlink action per frozen artifact, honoring sourceOfTruth
  * (when local is authoritative, an existing destination is kept, not overwritten,
  * so we omit the action just as the real restore would skip it).
@@ -609,8 +607,8 @@ async function fallbackActions(
 
 /**
  * Build the full RestorePlan: gather each tool's RestoreData, compute its planned
- * actions (via the tool's planActions when available; otherwise a synthesized
- * file/symlink action list — see fallbackActions), and probe which tool CLIs are
+   * actions (via the tool's planActions when available; otherwise a synthesized
+   * file/symlink action list), and probe which tool CLIs are
  * missing on this machine (R6). No mutation happens here.
  *
  * Actions are always computed against a dryRun context so planning is side-effect
@@ -639,9 +637,8 @@ async function buildPlan(args: {
       os: args.os,
     });
 
-    // Prefer the tool's own planner (claude/codex). For tools without one
-    // (cursor), synthesize file/symlink write actions from the loaded RestoreData
-    // so the dry-run plan is still complete and uniform.
+    // Prefer the tool's own planner. For tools without one, synthesize file/symlink
+    // write actions from RestoreData so the dry-run plan is still complete.
     const toolActions = wiring.planActions
       ? await wiring.planActions(planCtx, data)
       : await fallbackActions(planCtx, id, data);
