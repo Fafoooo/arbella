@@ -7,9 +7,8 @@
  *      to `config.repo`. Clone it if it is not already present locally, else pull
  *      so the working copy is fresh (R12).
  *   2. Parse `arbella.json` (ArbellaMeta) at the repo root.
- *   3. Decide the set of tools to restore: intersection of the repo's captured
- *      tools and (a) the `--tools` flag if given, else (b) the configured tools,
- *      else (c) every captured tool.
+ *   3. Decide the set of tools to restore: every tool captured in the repo, unless
+ *      the user explicitly narrows it with `--tools`.
  *   4. For each tool, load its RestoreData (frozen files + symlinks reconstructed
  *      from <repoRoot>/<tool>/files, manifest via parseManifest) and build the
  *      adapter's planned actions. Probe which CLIs are missing (R6).
@@ -367,22 +366,21 @@ function parseToolsFlag(raw: string | undefined): ToolId[] | undefined {
 
 /**
  * Decide which tools to restore. Always constrained to what the repo actually
- * captured (`meta.tools`). Then narrowed by `--tools` if provided, else by the
- * configured tools, else left as the full captured set. Order follows the
- * canonical TOOL_IDS order for deterministic output.
+ * captured (`meta.tools`). `--tools` is the only narrowing mechanism: a stale
+ * local config on a fresh/old machine must not silently skip tools that are
+ * present in the backup repo. Order follows the canonical TOOL_IDS order for
+ * deterministic output.
  */
-function selectTools(
+export function selectToolsForRestore(
   meta: ArbellaMeta,
   flagTools: ToolId[] | undefined,
-  configTools: ToolId[],
+  _configTools: ToolId[],
 ): ToolId[] {
   const captured = new Set<ToolId>(meta.tools);
 
   let candidate: Set<ToolId>;
   if (flagTools && flagTools.length > 0) {
     candidate = new Set(flagTools);
-  } else if (configTools.length > 0) {
-    candidate = new Set(configTools);
   } else {
     candidate = new Set(captured);
   }
@@ -937,7 +935,7 @@ export async function run(
   // ---- 3. Decide which tools to restore -----------------------------------
   const config = await loadConfigOrDefault();
   const flagTools = parseToolsFlag(opts.tools);
-  const tools = selectTools(meta, flagTools, config.tools);
+  const tools = selectToolsForRestore(meta, flagTools, config.tools);
   if (tools.length === 0) {
     log.warn(
       "No tools to restore (the repo + your selection have no overlap). " +
