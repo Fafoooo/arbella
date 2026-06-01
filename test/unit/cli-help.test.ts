@@ -27,4 +27,13 @@ describe("CLI help", () => {
     expect(init?.options.map((option) => option.long)).toContain("--auto-backup");
     expect(init?.options.map((option) => option.long)).toContain("--no-backup");
   });
+
+  it("registers the public update command", () => {
+    const program = buildProgram();
+    const update = program.commands.find((command) => command.name() === "update");
+
+    expect(update).toBeDefined();
+    expect(update?.description()).toContain("Update arbella");
+    expect(update?.helpInformation()).toContain("--version <version>");
+  });
 });

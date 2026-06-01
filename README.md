@@ -44,6 +44,7 @@ Needs Node 18+.
 ```sh
 npm install -g arbella
 arbella --help
+arbella update   # later: update arbella itself
 ```
 
 ## What it does
@@ -71,6 +72,7 @@ Supported today: **Claude Code**, **Codex**, and **Cursor**. Cursor support cove
 | [`arbella push`](#arbella-push) | Snapshot your setup and push it — the everyday one |
 | [`arbella pull <url>`](#arbella-pull) | Rebuild your setup on a fresh machine |
 | [`arbella status`](#arbella-status) | Show what a push would change — read-only |
+| [`arbella update`](#arbella-update) | Update arbella itself through npm |
 | [`arbella auth`](#arbella-auth) | Sign in to your repo host |
 | [`arbella secrets`](#arbella-secrets) | Move credentials between machines, off Git |
 
@@ -142,6 +144,16 @@ arbella status --json   # pipe it somewhere
 ```
 
 New and modified files, plugin drift, the secrets it would skip. Writes nothing, installs nothing.
+
+### `arbella update`
+
+Updates the Arbella CLI package itself. It does not touch your backed-up Claude, Codex, or Cursor setup.
+
+```sh
+arbella update                  # npm install -g arbella@latest
+arbella update --version 0.1.2  # pin a specific release
+arbella update --dry-run        # show the npm command only
+```
 
 ### `arbella auth`
 
