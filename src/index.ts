@@ -14,7 +14,7 @@
  *      the help footer, sourced from the adapter registry so it never drifts).
  *   2. Declares the single global option `--verbose`, applied via a preAction
  *      hook so debug logging is enabled BEFORE any subcommand action runs.
- *   3. Registers setup / init / push / pull / status / auth / secrets.
+ *   3. Registers setup / init / push / pull / status / update / auth / secrets.
  *   4. Parses argv and funnels any thrown error into a single, friendly
  *      top-level handler (log.error + exit 1) so stack traces never leak to the
  *      user. Commander's own --help / --version exits are passed through.
@@ -40,6 +40,7 @@ import { register as registerAuth } from "./commands/auth.js";
 import { register as registerBackup } from "./commands/backup.js";
 import { register as registerRestore } from "./commands/restore.js";
 import { register as registerStatus } from "./commands/status.js";
+import { register as registerUpdate } from "./commands/update.js";
 import { register as registerSecrets } from "./commands/secrets.js";
 
 /** arbella version, sourced from package.json. */
@@ -82,6 +83,7 @@ export function buildProgram(): Command {
   registerBackup(program);
   registerRestore(program);
   registerStatus(program);
+  registerUpdate(program);
   registerSecrets(program);
 
   return program;
