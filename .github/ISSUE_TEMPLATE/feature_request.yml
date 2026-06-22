@@ -1,0 +1,43 @@
+name: Feature request
+description: Suggest a new capability or improvement for Arbella.
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the idea. If you're proposing support for a **new tool**, the
+        "Tool to support" field below helps a lot — Arbella adds tools as adapters.
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem does this solve?
+      description: The use case or pain point, not just the proposed solution.
+      placeholder: When I move to a new machine I lose …
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: What should Arbella do?
+    validations:
+      required: true
+  - type: input
+    id: new-tool
+    attributes:
+      label: Tool to support (if requesting a new adapter)
+      description: Name + where it stores its config on disk, if you know.
+      placeholder: e.g. "aider — ~/.aider.conf.yml"
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+  - type: checkboxes
+    id: scope
+    attributes:
+      label: Checks
+      options:
+        - label: This is about backing up / restoring AI-tool setup (Arbella's scope), not a general Git tool request.
+          required: true
+        - label: I searched existing issues and this isn't a duplicate.
+          required: true

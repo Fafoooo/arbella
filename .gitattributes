@@ -1,0 +1,16 @@
+# Normalize line endings to LF in the repo for all text files. Without this,
+# checkouts on a Windows filesystem (including a WSL mount under /mnt) flip every
+# file to CRLF, producing whole-file diffs that bury real changes. `text=auto`
+# lets Git detect text vs binary; `eol=lf` forces LF on checkout everywhere.
+* text=auto eol=lf
+
+# Shell scripts and the install entrypoint must stay LF regardless of platform.
+*.sh text eol=lf
+install.sh text eol=lf
+
+# Explicit binary assets (never normalize / never diff as text).
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary

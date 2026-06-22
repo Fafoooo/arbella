@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/Fafoooo/arbella/security/advisories/new
+    about: Report a credential leak, sanitizer/denylist bypass, or other security issue privately — never in a public issue.
+  - name: Question or discussion
+    url: https://github.com/Fafoooo/arbella/discussions
+    about: For usage questions and open-ended ideas (if Discussions is enabled).
