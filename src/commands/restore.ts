@@ -98,6 +98,9 @@ import { claudeAdapter } from "../adapters/claude/index.js";
 import { codexAdapter } from "../adapters/codex/index.js";
 import { cursorAdapter, planActions as cursorPlanActions } from "../adapters/cursor/index.js";
 import { cursorUserPaths } from "../adapters/cursor/paths.js";
+import { opencodeAdapter } from "../adapters/opencode/index.js";
+import { copilotAdapter } from "../adapters/copilot/index.js";
+import { kiloAdapter } from "../adapters/kilo/index.js";
 import { planActions as claudePlanActions } from "../adapters/claude/restore.js";
 import { planActions as codexPlanActions } from "../adapters/codex/restore.js";
 
@@ -140,6 +143,11 @@ const WIRING: readonly ToolWiring[] = [
   { id: "claude", adapter: claudeAdapter, planActions: claudePlanActions },
   { id: "codex", adapter: codexAdapter, planActions: codexPlanActions },
   { id: "cursor", adapter: cursorAdapter, planActions: cursorPlanActions },
+  // opencode/copilot/kilo are single-root (<tool>/files) config-dir tools, so the
+  // command's generic fallbackActions planner covers them — no bespoke planActions.
+  { id: "opencode", adapter: opencodeAdapter },
+  { id: "copilot", adapter: copilotAdapter },
+  { id: "kilo", adapter: kiloAdapter },
 ];
 
 /** Look up the wiring for a tool id (every ToolId has an entry). */
@@ -791,6 +799,25 @@ function printReauthReminder(tools: ToolId[]): void {
         log.step(
           "cursor: sign in via the Cursor app; re-add any MCP server API keys " +
             "in ~/.cursor/mcp.json (their values were redacted on backup).",
+        );
+        break;
+      case "opencode":
+        log.step(
+          "opencode: run `opencode auth login` to re-create " +
+            "~/.local/share/opencode/auth.json; re-add any MCP env API keys " +
+            "(their values were redacted on backup).",
+        );
+        break;
+      case "copilot":
+        log.step(
+          "copilot: run `copilot` and sign in (or `gh auth login`); re-add any " +
+            "MCP server secrets in ~/.copilot/mcp-config.json (redacted on backup).",
+        );
+        break;
+      case "kilo":
+        log.step(
+          "kilo: sign in with the Kilo CLI; re-add any provider/MCP API keys in " +
+            "~/.config/kilo/kilo.jsonc (their values were redacted on backup).",
         );
         break;
     }

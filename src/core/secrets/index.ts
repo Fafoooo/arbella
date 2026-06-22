@@ -227,6 +227,18 @@ const SECRET_FILES_BY_TOOL: Record<ToolId, ReadonlyArray<{ relPath: string; desc
     // Cursor stores auth in the desktop app keychain, not a flat file; nothing
     // portable to bundle here. Present for completeness / forward-compat.
   ],
+  opencode: [
+    // opencode's credentials live at ~/.local/share/opencode/auth.json — OUTSIDE
+    // the config home this adapter captures — so there is nothing under the tool
+    // home to bundle. Re-auth via `opencode auth login` after a restore.
+  ],
+  copilot: [
+    // Copilot CLI signs in via gh/device flow; no portable flat credential file
+    // under ~/.copilot to bundle.
+  ],
+  kilo: [
+    // Kilo CLI keeps no portable flat credential file under ~/.config/kilo.
+  ],
 };
 
 /**

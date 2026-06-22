@@ -62,6 +62,22 @@ export function dataDir(): string {
   return path.join(xdg, "arbella");
 }
 
+/**
+ * An XDG-style config child dir (used by config-dir CLIs like opencode/kilo):
+ *   - linux/darwin: $XDG_CONFIG_HOME/<name> or ~/.config/<name>
+ *   - win32:        %APPDATA%/<name> or ~/AppData/Roaming/<name>
+ * These tools follow XDG even on macOS (no ~/Library), so this stays distinct
+ * from appUserConfigRoot (which uses ~/Library on darwin for Electron apps).
+ */
+function xdgConfigChild(name: string): string {
+  if (detectOS() === "win32") {
+    const appData = process.env.APPDATA ?? path.join(homeDir(), "AppData", "Roaming");
+    return path.join(appData, name);
+  }
+  const xdg = process.env.XDG_CONFIG_HOME ?? path.join(homeDir(), ".config");
+  return path.join(xdg, name);
+}
+
 /** Absolute path to a tool's home directory on this machine. */
 export function toolHomeDir(tool: ToolId): string {
   switch (tool) {
@@ -71,6 +87,13 @@ export function toolHomeDir(tool: ToolId): string {
       return path.join(homeDir(), ".codex");
     case "cursor":
       return path.join(homeDir(), ".cursor");
+    case "opencode":
+      return xdgConfigChild("opencode");
+    case "kilo":
+      return xdgConfigChild("kilo");
+    case "copilot":
+      // GitHub Copilot CLI uses ~/.copilot on every OS; COPILOT_HOME overrides it.
+      return process.env.COPILOT_HOME ?? path.join(homeDir(), ".copilot");
   }
 }
 
@@ -218,6 +241,12 @@ export function installCommandFor(tool: ToolId, targetOS: OS): InstallCommand | 
         return { cmd: "winget", args: ["install", "--id", "Anysphere.Cursor", "-e"] };
       }
       return null; // No standard headless install on Linux.
+    case "opencode":
+      return { cmd: "npm", args: ["install", "-g", "opencode-ai"] };
+    case "copilot":
+      return { cmd: "npm", args: ["install", "-g", "@github/copilot"] };
+    case "kilo":
+      return { cmd: "npm", args: ["install", "-g", "@kilocode/cli"] };
   }
 }
 
@@ -233,5 +262,11 @@ export function cliBinaryName(tool: ToolId): string {
       return "codex";
     case "cursor":
       return "cursor";
+    case "opencode":
+      return "opencode";
+    case "copilot":
+      return "copilot";
+    case "kilo":
+      return "kilo";
   }
 }
