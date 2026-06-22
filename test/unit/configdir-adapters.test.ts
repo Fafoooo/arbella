@@ -174,8 +174,11 @@ describe("opencode adapter restore (round-trip into a fresh home)", () => {
     await restoreOpencode(makeRestoreCtx(dstTool, vars), data);
 
     const restored = await fsp.readFile(under(dstTool, "opencode.json"), "utf8");
-    expect(restored).toContain(`${dstHome}/.config/opencode/AGENTS.md`);
-    expect(restored).not.toContain(srcHome);
+    // Compare separator-agnostically: on Windows the rehydrated machine path uses
+    // native backslashes, so normalize both sides to POSIX before asserting.
+    const toPosix = (s: string) => s.replace(/\\/g, "/");
+    expect(toPosix(restored)).toContain(`${toPosix(dstHome)}/.config/opencode/AGENTS.md`);
+    expect(toPosix(restored)).not.toContain(toPosix(srcHome));
     // The redacted secret stays redacted after restore (it was never captured).
     expect(restored).not.toContain(OPENCODE_MCP_SECRET);
 
