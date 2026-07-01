@@ -31,6 +31,7 @@ import { COMMON_DENY, matchesDeny } from "./denylist.js";
 import {
   REDACTED,
   SECRET_PATTERNS,
+  isSecretContainerKey,
   isSecretKey,
   type SecretPattern,
 } from "./patterns.js";
@@ -309,6 +310,10 @@ function detectJsonIndent(content: string): number | string {
  * Recursively clone `node`, redacting secret values. `keyPath` is the dotted
  * path to `node` from the root (for SecretRef.source); `parentKey` is the
  * immediate key under which `node` sits (drives isSecretKey for scalars).
+ * `inSecretContainer` is set once the walk descends under an env/environment/
+ * headers map and stays set for the whole subtree: env vars are named
+ * arbitrarily (KEY, OPENAI_KEY, ...), so EVERY leaf below such a container is
+ * treated as secret — mirroring codex's TOML structural pass.
  */
 function cloneRedact(
   node: unknown,
@@ -317,11 +322,12 @@ function cloneRedact(
   keyPath: string,
   found: SecretRef[],
   parentKey = "",
+  inSecretContainer = false,
 ): unknown {
   // Arrays: clone element-wise, preserving index in the path.
   if (Array.isArray(node)) {
     return node.map((el, i) =>
-      cloneRedact(el, tool, source, joinPath(keyPath, String(i)), found, parentKey),
+      cloneRedact(el, tool, source, joinPath(keyPath, String(i)), found, parentKey, inSecretContainer),
     );
   }
 
@@ -329,13 +335,14 @@ function cloneRedact(
   if (isPlainObject(node)) {
     const out: Record<string, unknown> = {};
     for (const [k, v] of Object.entries(node)) {
-      out[k] = cloneRedact(v, tool, source, joinPath(keyPath, k), found, k);
+      const childInContainer = inSecretContainer || isSecretContainerKey(k);
+      out[k] = cloneRedact(v, tool, source, joinPath(keyPath, k), found, k, childInContainer);
     }
     return out;
   }
 
   // Scalars (string/number/boolean/null/undefined): redact if warranted.
-  const keyIsSecret = parentKey.length > 0 && isSecretKey(parentKey);
+  const keyIsSecret = parentKey.length > 0 && (isSecretKey(parentKey) || inSecretContainer);
   const { value: redacted, matched } = redactValue(node, keyIsSecret);
   if (matched !== null && redacted !== node) {
     found.push({

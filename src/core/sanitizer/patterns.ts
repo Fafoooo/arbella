@@ -153,6 +153,20 @@ export const SECRET_KEY_NAMES: readonly string[] = [
 ];
 
 /**
+ * Container key names whose ENTIRE subtree holds secret leaves: MCP server env
+ * maps and request headers. Env vars are named arbitrarily (KEY, OPENAI_KEY,
+ * GROQ_WHATEVER), so key-name matching alone cannot catch them — anything a user
+ * puts under one of these maps is treated as a credential. Shared by the JSON
+ * structural pass (sanitizeJson) and codex's TOML pass so both stay consistent.
+ */
+export const SECRET_CONTAINER_KEYS: readonly string[] = ["env", "environment", "headers"];
+
+/** True if a JSON/TOML key introduces a secret container (env/environment/headers). */
+export function isSecretContainerKey(key: string): boolean {
+  return SECRET_CONTAINER_KEYS.includes(key.toLowerCase());
+}
+
+/**
  * Normalize a key for fuzzy matching against SECRET_KEY_NAMES: lowercased with
  * separators (-, _, space) stripped, so "ANTHROPIC_API_KEY" -> "anthropicapikey".
  */
@@ -229,6 +243,11 @@ export function isSecretKey(key: string): boolean {
     "-password",
     "passphrase",
     "credentials",
+    // Separator-suffixed "key" so vendor env names like OPENAI_KEY / DEEPL-KEY /
+    // service_key are caught. Deliberately NOT bare "key": VS Code-style
+    // keybindings.json entries are literally {"key": "cmd+k"} and must survive.
+    "_key",
+    "-key",
   ];
   for (const tok of boundaryTokens) {
     if (lower.endsWith(tok)) return true;

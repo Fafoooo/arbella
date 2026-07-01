@@ -232,3 +232,74 @@ describe("sanitizer: sanitizeFile is the key-name-aware production path (§0.6)"
     expect(JSON.parse(res.content)).toEqual(JSON.parse(benign));
   });
 });
+
+describe("sanitizer: env/environment/headers containers (E2E leak regression)", () => {
+  // Found by a live end-to-end push: an opencode MCP env var named just "KEY"
+  // (no api/token/secret stem, opaque value) sailed through the JSON pass while
+  // codex's TOML pass would have caught it via its env-container rule. The JSON
+  // pass now applies the same rule: EVERY leaf under env/environment/headers is
+  // secret, whatever its name.
+  it("redacts an arbitrarily-named env var (bare KEY) under an MCP environment map", () => {
+    const blob = JSON.stringify(
+      { mcp: { w: { environment: { KEY: "FAKE_OPENCODE_KEY_jkl" } } } },
+      null,
+      2,
+    );
+    const res = sanitizer.sanitizeFile(blob, "opencode", "opencode.json");
+    expect(res.changed).toBe(true);
+    expect(res.content).not.toContain("FAKE_OPENCODE_KEY_jkl");
+    expect(res.content).toContain(REDACTED);
+  });
+
+  it("redacts vendor-named vars (OPENAI_KEY) and header values too", () => {
+    const blob = JSON.stringify(
+      {
+        mcpServers: {
+          s: {
+            env: { OPENAI_KEY: "opaque-vendor-key-000111" },
+            headers: { "X-Custom-Auth": "opaque-header-cred-222333" },
+          },
+        },
+      },
+      null,
+      2,
+    );
+    const res = sanitizer.sanitizeFile(blob, "cursor", "mcp.json");
+    expect(res.content).not.toContain("opaque-vendor-key-000111");
+    expect(res.content).not.toContain("opaque-header-cred-222333");
+  });
+
+  it("isSecretKey catches separator-suffixed *_key / *-key names anywhere", () => {
+    expect(isSecretKey("OPENAI_KEY")).toBe(true);
+    expect(isSecretKey("deepl-key")).toBe(true);
+    expect(isSecretKey("service_key")).toBe(true);
+  });
+
+  it("does NOT treat bare 'key' as secret outside containers — keybindings survive", () => {
+    expect(isSecretKey("key")).toBe(false);
+    expect(isSecretKey("monkey")).toBe(false);
+    expect(isSecretKey("keybindings")).toBe(false);
+
+    const keybindings = JSON.stringify(
+      [{ key: "cmd+k", command: "workbench.action.terminal.clear" }],
+      null,
+      2,
+    );
+    const res = sanitizer.sanitizeFile(keybindings, "cursor", "keybindings.json");
+    expect(res.content).toContain("cmd+k");
+    expect(res.content).not.toContain(REDACTED);
+  });
+
+  it("does not misread dotted VS Code settings keys as containers", () => {
+    // "terminal.integrated.env.osx" is ONE key (not an env container); its
+    // object value is a real env map though — but only once a key literally
+    // named env/environment/headers introduces it.
+    const settings = JSON.stringify(
+      { "editor.fontSize": 14, "workbench.colorTheme": "Dark" },
+      null,
+      2,
+    );
+    const res = sanitizer.sanitizeFile(settings, "cursor", "settings.json");
+    expect(res.changed).toBe(false);
+  });
+});
