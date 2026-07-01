@@ -40,6 +40,7 @@ import { denylistFor, matchesDeny } from "../../core/sanitizer/denylist.js";
 import { cliBinaryName, detectOS, installCommandFor } from "../../platform/os.js";
 import { runInstall, which } from "../../platform/install.js";
 import { normalizeCapturedSymlinkTarget } from "../../utils/symlink.js";
+import { decodeForCapture } from "../../utils/capture-bytes.js";
 
 import {
   GEMINI_FROZEN_PATHS,
@@ -108,15 +109,6 @@ function targetAbsFor(ctx: RestoreContext, target: AntigravityTarget): string {
 /* Small helpers                                                               */
 /* -------------------------------------------------------------------------- */
 
-/** Heuristic: treat a file as binary if its first chunk contains a NUL byte. */
-function looksBinary(buf: Buffer): boolean {
-  const n = Math.min(buf.length, 8000);
-  for (let i = 0; i < n; i++) {
-    if (buf[i] === 0) return true;
-  }
-  return false;
-}
-
 /** An empty manifest for antigravity (it tracks no reinstallable plugins here —
  * the extension list is frozen as a file, not reinstalled from a manifest). */
 function emptyManifest(): ToolManifest {
@@ -162,21 +154,35 @@ async function captureFile(args: {
     return;
   }
 
-  if (looksBinary(bytes)) {
+  const decoded = decodeForCapture(bytes);
+
+  if (decoded.kind === "binary") {
+    // Fail-safe: a genuinely-binary file must not smuggle a secret past the
+    // sanitizer. If secret-shaped bytes are present, DROP it (never store raw)
+    // and record the refs for the re-supply reminder.
+    if (!ctx.includeSecrets) {
+      const scan = ctx.sanitizer.sanitizeText(decoded.utf8, "antigravity", rel);
+      if (scan.changed) {
+        warnings.push(`antigravity: skipped ${rel} — binary content with secret-shaped bytes`);
+        secrets.push(...scan.found);
+        return;
+      }
+    }
     const file: CapturedFile = { repoPath, content: bytes.toString("base64"), binary: true };
     if (mode !== undefined) file.mode = mode;
     files.push(file);
     return;
   }
 
-  const raw = bytes.toString("utf8");
-  let content = raw;
+  let content = decoded.text;
   if (!ctx.includeSecrets) {
     // Structural JSON redaction (secret-key-aware) for settings.json /
     // mcp_config.json, pattern redaction for GEMINI.md and other text — so any
     // MCP env API key or token-shaped value is redacted before the repo, and the
-    // SecretRefs drive the post-restore "re-supply X" reminder.
-    const sanitized = ctx.sanitizer.sanitizeFile(raw, "antigravity", rel);
+    // SecretRefs drive the post-restore "re-supply X" reminder. UTF-16 configs
+    // are decoded above, so they take THIS text path too — never the raw base64
+    // branch that would skip sanitization.
+    const sanitized = ctx.sanitizer.sanitizeFile(content, "antigravity", rel);
     content = sanitized.content;
     secrets.push(...sanitized.found);
   }

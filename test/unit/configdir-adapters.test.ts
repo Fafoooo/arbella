@@ -301,3 +301,52 @@ describe("kilo adapter capture: includes TUI config", () => {
     expect(repoPaths).toContain("kilo/files/rules/global.md");
   });
 });
+
+describe("config-dir capture: UTF-16 configs are sanitized, not shipped raw", () => {
+  // A NUL byte must NOT route a secret-bearing config around the sanitizer.
+  // UTF-16LE (the default of PowerShell's Out-File / Set-Content on Windows) puts
+  // a 0x00 after every ASCII char, which the old "contains NUL => binary"
+  // heuristic misread as binary and base64'd verbatim. Regression guard for the
+  // security review's HIGH finding.
+  let u16Tmp: string;
+  let u16Capture: CaptureResult;
+  const U16_SECRET = "sk-ant-api03-UTF16-CONFIG-MCP-SECRET-BBBBBBBBBBBB";
+
+  beforeAll(async () => {
+    u16Tmp = await fsp.mkdtemp(path.join(os.tmpdir(), "arbella-u16-"));
+    const u16Home = path.join(u16Tmp, ".config", "opencode");
+    const cfg = JSON.stringify(
+      { mcp: { weather: { environment: { ANTHROPIC_API_KEY: U16_SECRET } } } },
+      null,
+      2,
+    );
+    // Write as UTF-16LE with NO BOM — the NUL-interleave heuristic must still
+    // catch it. This is the byte shape PowerShell's Out-File / Set-Content
+    // produce on Windows, and the exact case the old heuristic misread as binary.
+    const abs = under(u16Home, "opencode.json");
+    await fsp.mkdir(path.dirname(abs), { recursive: true });
+    await fsp.writeFile(abs, Buffer.from(cfg, "utf16le"));
+
+    const vars = makeVariables(u16Tmp, "fab", "linux", u16Home);
+    u16Capture = await captureOpencode(makeCaptureCtx(u16Home, vars));
+  });
+
+  afterAll(async () => {
+    await fsp.rm(u16Tmp, { recursive: true, force: true });
+  });
+
+  it("captures the UTF-16 config as sanitized TEXT (not opaque base64)", () => {
+    const cfg = u16Capture.files.find((f) => f.repoPath === "opencode/files/opencode.json");
+    expect(cfg).toBeDefined();
+    expect(cfg!.binary).toBeFalsy();
+    expect(cfg!.content).not.toContain(U16_SECRET);
+    expect(u16Capture.secrets.length).toBeGreaterThan(0);
+  });
+
+  it("leaks the secret into NO captured file (text or base64)", () => {
+    for (const f of u16Capture.files) {
+      const content = f.binary ? Buffer.from(f.content, "base64").toString("utf8") : f.content;
+      expect(content).not.toContain(U16_SECRET);
+    }
+  });
+});
