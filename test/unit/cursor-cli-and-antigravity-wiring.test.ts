@@ -10,10 +10,17 @@ import { afterEach, describe, expect, it } from "vitest";
 import path from "node:path";
 
 import { FROZEN_PATHS as CURSOR_FROZEN_PATHS } from "../../src/adapters/cursor/paths.js";
-import { antigravityUserDir } from "../../src/adapters/antigravity/paths.js";
+import {
+  GEMINI_FROZEN_PATHS,
+  antigravityHomeCandidates,
+  antigravityUserDir,
+  antigravityUserDirCandidates,
+} from "../../src/adapters/antigravity/paths.js";
 import { denylistFor } from "../../src/core/sanitizer/denylist.js";
 import { cliBinaryName, installCommandFor, toolHomeDir } from "../../src/platform/os.js";
 import { getDependency } from "../../src/platform/install.js";
+import { toolRepoDataRoots } from "../../src/commands/backup.js";
+import { safetySourcesForTool } from "../../src/commands/restore.js";
 
 const savedEnv = { ...process.env };
 afterEach(() => {
@@ -100,5 +107,67 @@ describe("Antigravity User dir resolves per OS (cross-platform)", () => {
     expect(antigravityUserDir("/home/fab/.antigravity", "win32", { APPDATA: "/appdata" })).toBe(
       path.join("/appdata", "Antigravity", "User"),
     );
+  });
+
+  it("probes the post-2.0 'Antigravity IDE' variant first, classic name second", () => {
+    // The 2.0 update split the dirs on some platforms (Google AI forum, May 2026);
+    // a migrated machine's live data sits in the IDE-variant, so it wins when both
+    // exist, while the classic name (verified live on macOS 2.0.6) is the default.
+    expect(antigravityUserDirCandidates("/home/fab/.antigravity", "linux", {})).toEqual([
+      path.join("/home/fab", ".config", "Antigravity IDE", "User"),
+      path.join("/home/fab", ".config", "Antigravity", "User"),
+    ]);
+    expect(antigravityHomeCandidates("/home/fab/.antigravity")).toEqual([
+      path.join("/home/fab", ".antigravity-ide"),
+      path.join("/home/fab", ".antigravity"),
+    ]);
+  });
+});
+
+describe("multi-root tools: backup mirror + R14 safety-backup wiring", () => {
+  // Regression guards for the PR #7 review: every root a multi-root adapter OWNS
+  // must be (a) wiped-and-rewritten by backup so deleted files can't resurrect,
+  // and (b) snapshotted by the pre-restore safety backup so a repo-wins pull
+  // can't overwrite local data without a fallback copy.
+
+  it("backup mirrors ALL of antigravity's repo data roots", () => {
+    expect(toolRepoDataRoots("antigravity")).toEqual([
+      "antigravity/files",
+      "antigravity/user",
+      "antigravity/gemini",
+    ]);
+    // Existing behavior stays intact:
+    expect(toolRepoDataRoots("cursor")).toEqual(["cursor/files", "cursor/user"]);
+    expect(toolRepoDataRoots("claude")).toEqual(["claude/files"]);
+  });
+
+  it("safety backup snapshots BOTH antigravity dir variants and gemini restore targets", () => {
+    const labels = safetySourcesForTool("antigravity", "linux", "stamp").map((s) => s.label);
+    expect(labels).toContain("antigravity home");
+    expect(labels).toContain("antigravity home (.antigravity-ide)");
+    expect(labels).toContain("antigravity User data (Antigravity IDE)");
+    expect(labels).toContain("antigravity User data (Antigravity)");
+    for (const rel of GEMINI_FROZEN_PATHS) {
+      expect(labels).toContain(`antigravity gemini ${rel}`);
+    }
+  });
+
+  it("safety backup snapshots ONLY the gemini frozen paths, never the whole ~/.gemini", () => {
+    // ~/.gemini is shared with the Gemini CLI and holds OAuth tokens + a browser
+    // profile — a whole-dir snapshot would bulk-copy those. Every gemini source
+    // must point BELOW ~/.gemini, never at the dir itself.
+    const sources = safetySourcesForTool("antigravity", "linux", "stamp");
+    const gemini = sources.filter((s) => s.label.startsWith("antigravity gemini "));
+    expect(gemini.length).toBe(GEMINI_FROZEN_PATHS.length);
+    for (const s of gemini) {
+      expect(path.basename(s.source)).not.toBe(".gemini");
+      expect(s.source.includes(`${path.sep}.gemini${path.sep}`)).toBe(true);
+    }
+  });
+
+  it("cursor's safety backup still covers its User dir (no regression)", () => {
+    const labels = safetySourcesForTool("cursor", "linux", "stamp").map((s) => s.label);
+    expect(labels).toContain("cursor home");
+    expect(labels).toContain("cursor User data");
   });
 });

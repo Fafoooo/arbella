@@ -105,6 +105,12 @@ import {
   antigravityAdapter,
   planActions as antigravityPlanActions,
 } from "../adapters/antigravity/index.js";
+import {
+  GEMINI_FROZEN_PATHS,
+  antigravityHomeCandidates,
+  antigravityUserDirCandidates,
+  geminiDir,
+} from "../adapters/antigravity/paths.js";
 import { planActions as claudePlanActions } from "../adapters/claude/restore.js";
 import { planActions as codexPlanActions } from "../adapters/codex/restore.js";
 
@@ -460,7 +466,13 @@ async function safetyBackup(
   return made;
 }
 
-function safetySourcesForTool(
+/**
+ * Every local path a tool's restore can WRITE, so the R14 safety backup snapshots
+ * each one before a real pull. Multi-root adapters MUST be listed here — a
+ * missing root means a repo-wins restore can overwrite it with no local snapshot
+ * to fall back to. Exported for the wiring regression test.
+ */
+export function safetySourcesForTool(
   tool: ToolId,
   os: OS,
   stamp: string,
@@ -481,6 +493,42 @@ function safetySourcesForTool(
       source: cursorUserPaths(toolHome, os, process.env).userDir,
       dest: path.join(backupsRoot, `cursor-user-${stamp}`),
     });
+  }
+
+  if (tool === "antigravity") {
+    // The 2.0 update split Antigravity's dirs on some platforms (classic
+    // "Antigravity" + ~/.antigravity vs "Antigravity IDE" + ~/.antigravity-ide),
+    // and restore probes both — so snapshot every candidate that exists (missing
+    // ones are skipped by the exists() check above). toolHome itself is already
+    // sources[0]; add the IDE-variant dotfolder alongside it.
+    for (const source of antigravityHomeCandidates(toolHome)) {
+      if (source === toolHome) continue;
+      sources.push({
+        label: `antigravity home (${path.basename(source)})`,
+        source,
+        dest: path.join(backupsRoot, `antigravity-ide-${stamp}`),
+      });
+    }
+    for (const source of antigravityUserDirCandidates(toolHome, os, process.env)) {
+      const appName = path.basename(path.dirname(source));
+      const slug = appName.toLowerCase().replace(/\s+/g, "-");
+      sources.push({
+        label: `antigravity User data (${appName})`,
+        source,
+        dest: path.join(backupsRoot, `${slug}-user-${stamp}`),
+      });
+    }
+    // ~/.gemini is SHARED with the Gemini CLI and holds large machine-local state
+    // (browser profile, session protobufs) plus live OAuth files. Snapshot ONLY
+    // the paths a restore can overwrite — never the whole dir.
+    const gemini = geminiDir(toolHome);
+    for (const rel of GEMINI_FROZEN_PATHS) {
+      sources.push({
+        label: `antigravity gemini ${rel}`,
+        source: path.join(gemini, ...rel.split("/")),
+        dest: path.join(backupsRoot, `antigravity-gemini-${stamp}`, ...rel.split("/")),
+      });
+    }
   }
 
   return sources;

@@ -30,6 +30,8 @@ import type {
   CaptureResult,
   CapturedFile,
   CapturedSymlink,
+  EnvVars,
+  FsService,
   OS,
   RestoreAction,
   SecretRef,
@@ -49,7 +51,9 @@ import {
   HOME_REPO_PREFIX,
   USER_FROZEN_PATHS,
   USER_REPO_PREFIX,
+  antigravityHomeCandidates,
   antigravityUserDir,
+  antigravityUserDirCandidates,
   geminiDir,
   home,
 } from "./paths.js";
@@ -88,21 +92,47 @@ function targetFromRepoPath(repoPath: string): AntigravityTarget | undefined {
   return undefined;
 }
 
-/** Resolve the absolute path of a root on the target machine. */
-function rootAbs(ctx: RestoreContext, root: Root): string {
-  switch (root) {
-    case "home":
-      return ctx.toolHome;
-    case "user":
-      return antigravityUserDir(ctx.toolHome, ctx.os, ctx.env);
-    case "gemini":
-      return geminiDir(ctx.toolHome);
+/** The absolute dir each root resolves to on THIS machine. */
+type RootDirs = Readonly<Record<Root, string>>;
+
+/** First candidate that exists as a dir, else the fallback. */
+async function firstExistingDir(
+  fs: FsService,
+  candidates: readonly string[],
+  fallback: string,
+): Promise<string> {
+  for (const candidate of candidates) {
+    if ((await fs.statKind(candidate)) === "dir") return candidate;
   }
+  return fallback;
 }
 
-/** Resolve an AntigravityTarget onto the target machine. */
-function targetAbsFor(ctx: RestoreContext, target: AntigravityTarget): string {
-  return path.join(rootAbs(ctx, target.root), ...target.rel.split("/").filter(Boolean));
+/**
+ * Resolve the three roots, probing the post-2.0 candidates: the dotfolder may be
+ * ~/.antigravity-ide and the User dir "Antigravity IDE" on migrated installs (the
+ * IDE-variant is preferred when both exist — it holds the live data there), while
+ * the classic names remain the verified default when nothing exists yet.
+ */
+async function resolveRootDirs(
+  fs: FsService,
+  toolHome: string,
+  os: OS,
+  env: EnvVars,
+): Promise<RootDirs> {
+  return {
+    home: await firstExistingDir(fs, antigravityHomeCandidates(toolHome), toolHome),
+    user: await firstExistingDir(
+      fs,
+      antigravityUserDirCandidates(toolHome, os, env),
+      antigravityUserDir(toolHome, os, env),
+    ),
+    gemini: geminiDir(toolHome),
+  };
+}
+
+/** Resolve an AntigravityTarget onto the target machine's resolved roots. */
+function targetAbsFor(dirs: RootDirs, target: AntigravityTarget): string {
+  return path.join(dirs[target.root], ...target.rel.split("/").filter(Boolean));
 }
 
 /* -------------------------------------------------------------------------- */
@@ -238,11 +268,14 @@ async function walkFrozen(args: {
 /* -------------------------------------------------------------------------- */
 
 /** One (root, its absolute path, its frozen-path list) triple to process. */
-function captureRoots(ctx: CaptureContext): ReadonlyArray<{ root: Root; abs: string; frozen: readonly string[] }> {
+async function captureRoots(
+  ctx: CaptureContext,
+): Promise<ReadonlyArray<{ root: Root; abs: string; frozen: readonly string[] }>> {
+  const dirs = await resolveRootDirs(ctx.fs, ctx.toolHome, ctx.os, ctx.env);
   return [
-    { root: "home", abs: ctx.toolHome, frozen: HOME_FROZEN_PATHS },
-    { root: "user", abs: antigravityUserDir(ctx.toolHome, ctx.os, ctx.env), frozen: USER_FROZEN_PATHS },
-    { root: "gemini", abs: geminiDir(ctx.toolHome), frozen: GEMINI_FROZEN_PATHS },
+    { root: "home", abs: dirs.home, frozen: HOME_FROZEN_PATHS },
+    { root: "user", abs: dirs.user, frozen: USER_FROZEN_PATHS },
+    { root: "gemini", abs: dirs.gemini, frozen: GEMINI_FROZEN_PATHS },
   ];
 }
 
@@ -259,7 +292,7 @@ export async function capture(ctx: CaptureContext): Promise<CaptureResult> {
   const manifest = emptyManifest();
   const deny = denylistFor("antigravity");
 
-  const roots = captureRoots(ctx);
+  const roots = await captureRoots(ctx);
   const present: Array<{ root: Root; abs: string; frozen: readonly string[] }> = [];
   for (const r of roots) {
     if ((await ctx.fs.statKind(r.abs)) === "dir") present.push(r);
@@ -301,13 +334,17 @@ export async function capture(ctx: CaptureContext): Promise<CaptureResult> {
 /* -------------------------------------------------------------------------- */
 
 /** Write one frozen file back onto the right target root, rehydrating {{TOKENS}}. */
-async function writeRestoredFile(ctx: RestoreContext, file: CapturedFile): Promise<void> {
+async function writeRestoredFile(
+  ctx: RestoreContext,
+  dirs: RootDirs,
+  file: CapturedFile,
+): Promise<void> {
   const target = targetFromRepoPath(file.repoPath);
   if (target === undefined) {
     ctx.log.debug(`antigravity: ignoring foreign repoPath ${file.repoPath}`);
     return;
   }
-  const dest = targetAbsFor(ctx, target);
+  const dest = targetAbsFor(dirs, target);
 
   if (ctx.sourceOfTruth === "local" && (await ctx.fs.exists(dest))) {
     ctx.log.debug(`antigravity: keep local ${file.repoPath} (sourceOfTruth=local)`);
@@ -323,13 +360,17 @@ async function writeRestoredFile(ctx: RestoreContext, file: CapturedFile): Promi
 }
 
 /** Recreate one captured symlink under the right target root. */
-async function writeRestoredSymlink(ctx: RestoreContext, link: CapturedSymlink): Promise<void> {
+async function writeRestoredSymlink(
+  ctx: RestoreContext,
+  dirs: RootDirs,
+  link: CapturedSymlink,
+): Promise<void> {
   const target = targetFromRepoPath(link.repoPath);
   if (target === undefined) {
     ctx.log.debug(`antigravity: ignoring foreign symlink ${link.repoPath}`);
     return;
   }
-  const dest = targetAbsFor(ctx, target);
+  const dest = targetAbsFor(dirs, target);
 
   if (ctx.sourceOfTruth === "local" && (await ctx.fs.statKind(dest)) !== "missing") {
     ctx.log.debug(`antigravity: keep local symlink ${link.repoPath} (sourceOfTruth=local)`);
@@ -344,11 +385,12 @@ async function writeRestoredSymlink(ctx: RestoreContext, link: CapturedSymlink):
  */
 export async function planActions(ctx: RestoreContext, data: RestoreData): Promise<RestoreAction[]> {
   const actions: RestoreAction[] = [];
+  const dirs = await resolveRootDirs(ctx.fs, ctx.toolHome, ctx.os, ctx.env);
 
   for (const file of data.files) {
     const target = targetFromRepoPath(file.repoPath);
     if (target === undefined) continue;
-    const targetPath = targetAbsFor(ctx, target);
+    const targetPath = targetAbsFor(dirs, target);
     const overwrites = await ctx.fs.exists(targetPath);
     if (ctx.sourceOfTruth === "local" && overwrites) continue;
     actions.push({
@@ -363,7 +405,7 @@ export async function planActions(ctx: RestoreContext, data: RestoreData): Promi
   for (const link of data.symlinks) {
     const target = targetFromRepoPath(link.repoPath);
     if (target === undefined) continue;
-    const targetPath = targetAbsFor(ctx, target);
+    const targetPath = targetAbsFor(dirs, target);
     const overwrites = (await ctx.fs.statKind(targetPath)) !== "missing";
     if (ctx.sourceOfTruth === "local" && overwrites) continue;
     actions.push({
@@ -390,9 +432,11 @@ export async function restore(ctx: RestoreContext, data: RestoreData): Promise<v
     return;
   }
 
+  const dirs = await resolveRootDirs(ctx.fs, ctx.toolHome, ctx.os, ctx.env);
+
   for (const file of data.files) {
     try {
-      await writeRestoredFile(ctx, file);
+      await writeRestoredFile(ctx, dirs, file);
     } catch (err) {
       ctx.log.warn(`antigravity: failed to write ${file.repoPath}: ${(err as Error).message}`);
     }
@@ -400,7 +444,7 @@ export async function restore(ctx: RestoreContext, data: RestoreData): Promise<v
 
   for (const link of data.symlinks) {
     try {
-      await writeRestoredSymlink(ctx, link);
+      await writeRestoredSymlink(ctx, dirs, link);
     } catch (err) {
       ctx.log.warn(`antigravity: failed to create symlink ${link.repoPath}: ${(err as Error).message}`);
     }
@@ -418,17 +462,23 @@ async function fsExistsDir(p: string): Promise<boolean> {
 }
 
 /**
- * True if Antigravity's setup is present: the ~/.antigravity dotfolder, its VS
- * Code-style User dir, or the antigravity subtree under the shared ~/.gemini.
- * (Plain ~/.gemini alone is NOT enough — that can be a Gemini-CLI-only install.)
+ * True if Antigravity's setup is present: either dotfolder variant
+ * (~/.antigravity or the post-2.0 ~/.antigravity-ide), either VS Code-style User
+ * dir variant ("Antigravity" or "Antigravity IDE"), or the antigravity subtree
+ * under the shared ~/.gemini. (Plain ~/.gemini alone is NOT enough — that can be
+ * a Gemini-CLI-only install.)
  */
 async function detect(): Promise<boolean> {
   const toolHome = home();
-  return (
-    (await fsExistsDir(toolHome)) ||
-    (await fsExistsDir(antigravityUserDir(toolHome, detectOS(), process.env))) ||
-    (await fsExistsDir(path.join(geminiDir(toolHome), "antigravity")))
-  );
+  const candidates = [
+    ...antigravityHomeCandidates(toolHome),
+    ...antigravityUserDirCandidates(toolHome, detectOS(), process.env),
+    path.join(geminiDir(toolHome), "antigravity"),
+  ];
+  for (const candidate of candidates) {
+    if (await fsExistsDir(candidate)) return true;
+  }
+  return false;
 }
 
 /** True if the `antigravity` launcher resolves on PATH. */

@@ -62,13 +62,46 @@ export const GEMINI_FROZEN_PATHS: readonly string[] = [
 ] as const;
 
 /**
- * The VS Code-style application User data dir for Antigravity, per OS. Derived
- * from the tool home's parent (the user home) so tests can point the tool home at
- * a fixture dir and the User dir resolves alongside it.
+ * App-folder names Antigravity has shipped under, in PREFERENCE order. The 2.0
+ * update (May 2026) split the product on Windows: the restored classic IDE is
+ * "Antigravity IDE" (settings under %APPDATA%\Antigravity IDE, extensions under
+ * ~/.antigravity-ide) while other installs — verified live on macOS 2.0.6 — keep
+ * the original "Antigravity" (+ ~/.antigravity). Both exist in the wild, so the
+ * adapter probes candidates and prefers the one present (IDE-variant first: when
+ * both exist, a migrated machine's live data is the IDE one); the classic name
+ * stays the default when neither exists.
+ */
+export const ANTIGRAVITY_APP_DIR_NAMES: readonly string[] = ["Antigravity IDE", "Antigravity"];
+export const ANTIGRAVITY_DOTFOLDER_NAMES: readonly string[] = [".antigravity-ide", ".antigravity"];
+
+/**
+ * The VS Code-style application User data dir for Antigravity, per OS — the
+ * DEFAULT (classic "Antigravity") location. Derived from the tool home's parent
+ * (the user home) so tests can point the tool home at a fixture dir and the User
+ * dir resolves alongside it. Callers that can probe the filesystem should use
+ * antigravityUserDirCandidates() and prefer an existing dir.
  */
 export function antigravityUserDir(toolHome: string, os: OS, env: EnvVars = {}): string {
   const userHome = path.dirname(toolHome);
   return path.join(appUserConfigRoot(os, userHome, env), "Antigravity", "User");
+}
+
+/** All candidate User data dirs, in preference order (IDE-variant first). */
+export function antigravityUserDirCandidates(
+  toolHome: string,
+  os: OS,
+  env: EnvVars = {},
+): string[] {
+  const userHome = path.dirname(toolHome);
+  return ANTIGRAVITY_APP_DIR_NAMES.map((name) =>
+    path.join(appUserConfigRoot(os, userHome, env), name, "User"),
+  );
+}
+
+/** All candidate dotfolder homes, in preference order (IDE-variant first). */
+export function antigravityHomeCandidates(toolHome: string): string[] {
+  const userHome = path.dirname(toolHome);
+  return ANTIGRAVITY_DOTFOLDER_NAMES.map((name) => path.join(userHome, name));
 }
 
 /** The shared ~/.gemini dir, derived from the tool home's parent. */

@@ -214,7 +214,8 @@ describe("copilot adapter capture: user config in, auth state out", () => {
   let cpTmp: string;
   let cpHome: string;
   let cpCapture: CaptureResult;
-  const COPILOT_TOKEN = "ghu_COPILOTinternalStateAuthToken000000000000";
+  // Built at runtime so the token-shaped fixture never trips secret scanners.
+  const COPILOT_TOKEN = ["ghu", "COPILOTinternalStateAuthToken000000000000"].join("_");
 
   beforeAll(async () => {
     cpTmp = await fsp.mkdtemp(path.join(os.tmpdir(), "arbella-copilot-"));
@@ -345,8 +346,15 @@ describe("config-dir capture: UTF-16 configs are sanitized, not shipped raw", ()
 
   it("leaks the secret into NO captured file (text or base64)", () => {
     for (const f of u16Capture.files) {
-      const content = f.binary ? Buffer.from(f.content, "base64").toString("utf8") : f.content;
-      expect(content).not.toContain(U16_SECRET);
+      if (f.binary) {
+        // Check both decodings: a UTF-16LE secret inside a base64 payload would
+        // be invisible to a UTF-8-only scan (s\0k\0-\0...).
+        const bytes = Buffer.from(f.content, "base64");
+        expect(bytes.toString("utf8")).not.toContain(U16_SECRET);
+        expect(bytes.toString("utf16le")).not.toContain(U16_SECRET);
+      } else {
+        expect(f.content).not.toContain(U16_SECRET);
+      }
     }
   });
 });

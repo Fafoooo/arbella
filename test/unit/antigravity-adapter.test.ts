@@ -29,7 +29,8 @@ import { createTemplater } from "../../src/core/templater/index.js";
 import { makeVariables } from "../../src/core/templater/variables.js";
 
 const GEMINI_MCP_SECRET = "sk-ant-api03-ANTIGRAVITY-GEMINI-MCP-SECRET-AAAAAAAA";
-const OAUTH_TOKEN = "ya29.A0-ANTIGRAVITY-OAUTH-ACCESS-TOKEN-MUST-NEVER-LEAK";
+// Built at runtime so the Google-OAuth-shaped fixture never trips secret scanners.
+const OAUTH_TOKEN = ["ya29", "A0-ANTIGRAVITY-OAUTH-ACCESS-TOKEN-MUST-NEVER-LEAK"].join(".");
 
 const silentLog = {
   info() {},
@@ -159,8 +160,15 @@ describe("antigravity capture: SECRET SAFETY (~/.gemini OAuth never leaves)", ()
 
   it("leaks the OAuth token into NO captured file", () => {
     for (const f of result.files) {
-      const content = f.binary ? Buffer.from(f.content, "base64").toString("utf8") : f.content;
-      expect(content).not.toContain(OAUTH_TOKEN);
+      if (f.binary) {
+        // Check both decodings: a UTF-16LE token inside a base64 payload would
+        // be invisible to a UTF-8-only scan.
+        const bytes = Buffer.from(f.content, "base64");
+        expect(bytes.toString("utf8")).not.toContain(OAUTH_TOKEN);
+        expect(bytes.toString("utf16le")).not.toContain(OAUTH_TOKEN);
+      } else {
+        expect(f.content).not.toContain(OAUTH_TOKEN);
+      }
     }
   });
 
@@ -187,6 +195,53 @@ describe("antigravity capture: cross-machine path templating", () => {
     const gemini = result.files.find((f) => f.repoPath === "antigravity/gemini/GEMINI.md");
     expect(gemini!.content).not.toContain(srcBase);
     expect(gemini!.content).toContain("{{HOME}}");
+  });
+});
+
+describe("antigravity: post-2.0 'Antigravity IDE' dir variant", () => {
+  // The 2.0 update moved some installs to ~/.antigravity-ide + "Antigravity IDE"
+  // User data (Windows migration, Google AI forum May 2026). Capture must find
+  // those when the classic dirs are absent, and restore must write into them
+  // when they exist rather than resurrecting the classic layout.
+  it("captures from and restores into the IDE-variant dirs", async () => {
+    const tmp = await fsp.mkdtemp(path.join(os.tmpdir(), "arbella-agy-ide-"));
+    try {
+      const src = path.join(tmp, "src");
+      const srcToolHome = path.join(src, ".antigravity"); // classic — NOT created
+      await write(path.join(src, ".antigravity-ide", "extensions", "extensions.json"), "[]\n");
+      await write(
+        path.join(src, ".config", "Antigravity IDE", "User", "settings.json"),
+        JSON.stringify({ "editor.fontSize": 13 }, null, 2),
+      );
+
+      const res = await capture(captureCtx(srcToolHome, makeVariables(src, "fab", "linux", srcToolHome)));
+      const repoPaths = res.files.map((f) => f.repoPath);
+      expect(repoPaths).toContain("antigravity/files/extensions/extensions.json");
+      expect(repoPaths).toContain("antigravity/user/settings.json");
+
+      // Restore into a machine that already has the IDE-variant dirs: files must
+      // land THERE, and the classic dirs must not be created.
+      const dst = path.join(tmp, "dst");
+      const dstToolHome = path.join(dst, ".antigravity");
+      await fsp.mkdir(path.join(dst, ".antigravity-ide"), { recursive: true });
+      await fsp.mkdir(path.join(dst, ".config", "Antigravity IDE", "User"), { recursive: true });
+      await restore(restoreCtx(dstToolHome, makeVariables(dst, "other", "linux", dstToolHome)), {
+        manifest: res.manifest,
+        files: res.files,
+        symlinks: res.symlinks,
+      });
+
+      expect(
+        await realFs.statKind(path.join(dst, ".antigravity-ide", "extensions", "extensions.json")),
+      ).toBe("file");
+      expect(
+        await realFs.statKind(path.join(dst, ".config", "Antigravity IDE", "User", "settings.json")),
+      ).toBe("file");
+      expect(await realFs.statKind(path.join(dst, ".antigravity"))).toBe("missing");
+      expect(await realFs.statKind(path.join(dst, ".config", "Antigravity"))).toBe("missing");
+    } finally {
+      await fsp.rm(tmp, { recursive: true, force: true });
+    }
   });
 });
 
