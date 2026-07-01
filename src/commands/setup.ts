@@ -92,7 +92,7 @@ export function register(program: Command): void {
     .command("setup")
     .description(
       "Detect and install the tools arbella relies on (git, gh, glab) and the " +
-        "AI CLIs it backs up (claude, codex, cursor, opencode, copilot, kilo) — cross-OS, in one pass.",
+        "AI CLIs it backs up (claude, codex, cursor, opencode, copilot, kilo, antigravity) — cross-OS, in one pass.",
     )
     .option("--all", "select every known dependency (where installable on this OS)")
     .option(

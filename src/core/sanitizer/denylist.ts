@@ -134,6 +134,9 @@ export const CURSOR_DENY: readonly string[] = [
   "User/workspaceStorage/",
   "machineid",
   "storage.json",
+  // Cursor CLI (cursor-agent) runtime git worktree checkouts — machine-local.
+  "worktrees/",
+  "worktrees.json",
 ];
 
 /**
@@ -156,17 +159,36 @@ export const OPENCODE_DENY: readonly string[] = [
 ];
 
 /**
- * GitHub Copilot CLI (~/.copilot) EXCLUDE list. Keep config.json, mcp-config.json,
- * and agents/; drop the machine-local session/log/ide state and the history file
- * (which can echo prompts/paths), plus the reinstallable skills/ tree.
+ * GitHub Copilot CLI (~/.copilot) EXCLUDE list. The adapter freezes only the
+ * user-authored config (settings.json, mcp-config.json, lsp-config.json,
+ * copilot-instructions.md, instructions/, agents/, hooks/); this list is the
+ * defense-in-depth exclusion of everything else. Crucially config.json is auto-
+ * managed state holding auth data (loggedInUsers) + plugin metadata — restoring a
+ * stale one would clobber the target's sign-in, so it is hard-denied. The MCP
+ * OAuth/secret stores, saved permission decisions, session/history/log/ide state,
+ * the cross-session SQLite db, and reinstallable plugin trees are excluded too.
  */
 export const COPILOT_DENY: readonly string[] = [
+  // Auto-managed internal state: authentication data + installed-plugin metadata.
+  "config.json",
+  // MCP OAuth tokens + local secret fallback storage (never leave the machine).
+  "mcp-oauth-config/",
+  "mcp-secrets/",
+  // Saved per-project tool/directory permission decisions (absolute local paths).
+  "permissions-config.json",
+  // Session / history / logs / IDE integration state.
   "session-state/",
+  "session-store.db",
+  "command-history-state/",
+  "command-history-state.json",
   "logs/",
   "ide/",
   "restart/",
+  // Reinstallable plugin artifacts + the skills/ tree (skills is not a Copilot
+  // CLI concept; kept defensively).
+  "installed-plugins/",
+  "plugin-data/",
   "skills/",
-  "command-history-state.json",
 ];
 
 /**
@@ -183,6 +205,37 @@ export const KILO_DENY: readonly string[] = [
   "bun.lockb",
   ".gitignore",
   "skills/",
+];
+
+/**
+ * Google Antigravity EXCLUDE list, applied across all three roots the adapter
+ * walks (~/.antigravity, the VS Code User dir, and the shared ~/.gemini). The
+ * adapter is allowlist-based so these are mostly defense-in-depth — but the
+ * ~/.gemini OAuth/account files are load-bearing: they must NEVER leave the
+ * machine. Also drops VS Code machine state, agent session/memory protobufs, the
+ * browser sub-agent profile, and machine-id/local-path bookkeeping.
+ */
+export const ANTIGRAVITY_DENY: readonly string[] = [
+  // ~/.gemini live Google OAuth tokens + signed-in account identity (SECRET/PII).
+  "oauth_creds.json",
+  "google_accounts.json",
+  // Machine identity / local state / local workspace paths.
+  "installation_id",
+  "state.json",
+  "trustedFolders.json",
+  "projects.json",
+  // Agent session/memory state (protobuf), chat history, browser sub-agent profile.
+  "*.pb",
+  "history/",
+  "antigravity-browser-profile/",
+  // VS Code machine-local state (never portable).
+  "globalStorage/",
+  "workspaceStorage/",
+  "History/",
+  // ~/.antigravity runtime bits: Electron flags (carry a crash-reporter id) + the
+  // regenerated launcher symlinks.
+  "argv.json",
+  "bin/",
 ];
 
 /* -------------------------------------------------------------------------- */
@@ -204,6 +257,8 @@ export function denylistFor(tool: ToolId): string[] {
       return [...COMMON_DENY, ...COPILOT_DENY];
     case "kilo":
       return [...COMMON_DENY, ...KILO_DENY];
+    case "antigravity":
+      return [...COMMON_DENY, ...ANTIGRAVITY_DENY];
   }
 }
 

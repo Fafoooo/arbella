@@ -721,6 +721,8 @@ function displayName(id: ToolId): string {
       return "GitHub Copilot CLI";
     case "kilo":
       return "Kilo Code";
+    case "antigravity":
+      return "Antigravity";
   }
 }
 
@@ -747,7 +749,8 @@ function isToolId(value: string): value is ToolId {
     value === "cursor" ||
     value === "opencode" ||
     value === "copilot" ||
-    value === "kilo"
+    value === "kilo" ||
+    value === "antigravity"
   );
 }
 

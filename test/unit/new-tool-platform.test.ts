@@ -8,6 +8,7 @@
  * that is OS-independent.
  */
 
+import os from "node:os";
 import path from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
@@ -28,7 +29,7 @@ afterEach(() => {
 });
 
 describe("new tools: registry + canonical order", () => {
-  it("registers opencode, copilot, kilo after the original trio", () => {
+  it("registers opencode, copilot, kilo, antigravity after the original trio", () => {
     expect(TOOL_IDS).toEqual([
       "claude",
       "codex",
@@ -36,6 +37,7 @@ describe("new tools: registry + canonical order", () => {
       "opencode",
       "copilot",
       "kilo",
+      "antigravity",
     ]);
   });
 });
@@ -101,5 +103,45 @@ describe("denylistFor", () => {
     expect(deny).toContain("logs/");
     expect(deny).toContain("command-history-state.json");
     expect(deny).toContain("skills/");
+  });
+
+  it("copilot hard-denies config.json (auth/internal state)", () => {
+    // Regression guard for the P1 fix: config.json must be excluded even if it
+    // ever slipped into a frozen path — it holds auth data + plugin metadata.
+    expect(denylistFor("copilot")).toContain("config.json");
+  });
+});
+
+describe("config-dir tools resolve under ~/.config on Windows (not %APPDATA%)", () => {
+  // Regression guard for the P2 fix: opencode + kilo follow the XDG convention on
+  // EVERY OS. Pointing them at %APPDATA% on win32 (the old bug) made detect() miss
+  // them and restore write where the CLI never reads. We fake win32 to prove the
+  // %APPDATA% branch is gone.
+  const withPlatform = (value: NodeJS.Platform, fn: () => void): void => {
+    const original = Object.getOwnPropertyDescriptor(process, "platform");
+    Object.defineProperty(process, "platform", { value, configurable: true });
+    try {
+      fn();
+    } finally {
+      if (original) Object.defineProperty(process, "platform", original);
+    }
+  };
+
+  it("ignores %APPDATA% and uses ~/.config even when the OS is win32", () => {
+    withPlatform("win32", () => {
+      process.env.APPDATA = "C:\\Users\\fab\\AppData\\Roaming";
+      delete process.env.XDG_CONFIG_HOME;
+      const dotConfig = path.join(os.homedir(), ".config");
+      expect(toolHomeDir("opencode")).toBe(path.join(dotConfig, "opencode"));
+      expect(toolHomeDir("kilo")).toBe(path.join(dotConfig, "kilo"));
+      expect(toolHomeDir("opencode").startsWith(process.env.APPDATA!)).toBe(false);
+    });
+  });
+
+  it("still honors XDG_CONFIG_HOME on win32", () => {
+    withPlatform("win32", () => {
+      process.env.XDG_CONFIG_HOME = path.join(os.tmpdir(), "xdgcfg");
+      expect(toolHomeDir("opencode")).toBe(path.join(process.env.XDG_CONFIG_HOME!, "opencode"));
+    });
   });
 });

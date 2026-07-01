@@ -101,6 +101,10 @@ import { cursorUserPaths } from "../adapters/cursor/paths.js";
 import { opencodeAdapter } from "../adapters/opencode/index.js";
 import { copilotAdapter } from "../adapters/copilot/index.js";
 import { kiloAdapter } from "../adapters/kilo/index.js";
+import {
+  antigravityAdapter,
+  planActions as antigravityPlanActions,
+} from "../adapters/antigravity/index.js";
 import { planActions as claudePlanActions } from "../adapters/claude/restore.js";
 import { planActions as codexPlanActions } from "../adapters/codex/restore.js";
 
@@ -148,6 +152,9 @@ const WIRING: readonly ToolWiring[] = [
   { id: "opencode", adapter: opencodeAdapter },
   { id: "copilot", adapter: copilotAdapter },
   { id: "kilo", adapter: kiloAdapter },
+  // Antigravity is multi-root (antigravity/files, /user, /gemini), so it ships its
+  // own planActions like Cursor — the generic single-root fallback can't map it.
+  { id: "antigravity", adapter: antigravityAdapter, planActions: antigravityPlanActions },
 ];
 
 /** Look up the wiring for a tool id (every ToolId has an entry). */
@@ -313,6 +320,12 @@ function frozenRootsForTool(
   ];
   if (tool === "cursor") {
     roots.push({ absRoot: path.join(repoToolDir, "user"), repoPrefix: "cursor/user" });
+  }
+  if (tool === "antigravity") {
+    // Antigravity's VS Code User dir and shared ~/.gemini agent dir are stored as
+    // sibling roots alongside the ~/.antigravity "files" root.
+    roots.push({ absRoot: path.join(repoToolDir, "user"), repoPrefix: "antigravity/user" });
+    roots.push({ absRoot: path.join(repoToolDir, "gemini"), repoPrefix: "antigravity/gemini" });
   }
   return roots;
 }
@@ -818,6 +831,12 @@ function printReauthReminder(tools: ToolId[]): void {
         log.step(
           "kilo: sign in with the Kilo CLI; re-add any provider/MCP API keys in " +
             "~/.config/kilo/kilo.jsonc (their values were redacted on backup).",
+        );
+        break;
+      case "antigravity":
+        log.step(
+          "antigravity: sign in with your Google account; re-add any MCP server " +
+            "secrets in ~/.gemini/antigravity/mcp_config.json (redacted on backup).",
         );
         break;
     }

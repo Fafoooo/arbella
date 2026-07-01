@@ -22,7 +22,14 @@ import type { ToolManifest } from "./core/manifest/schema.js";
 /* -------------------------------------------------------------------------- */
 
 /** The AI coding tools arbella knows how to back up / restore. */
-export type ToolId = "claude" | "codex" | "cursor" | "opencode" | "copilot" | "kilo";
+export type ToolId =
+  | "claude"
+  | "codex"
+  | "cursor"
+  | "opencode"
+  | "copilot"
+  | "kilo"
+  | "antigravity";
 
 /** All known tool ids, in canonical processing order. */
 export const TOOL_IDS: readonly ToolId[] = [
@@ -32,6 +39,7 @@ export const TOOL_IDS: readonly ToolId[] = [
   "opencode",
   "copilot",
   "kilo",
+  "antigravity",
 ] as const;
 
 /** node:os style platform identifiers arbella supports. */

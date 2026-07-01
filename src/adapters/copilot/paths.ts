@@ -3,11 +3,19 @@
  *
  * GitHub Copilot CLI (npm `@github/copilot`, binary `copilot`) stores its setup
  * in ~/.copilot by default (override with the COPILOT_HOME env var, honored by
- * toolHomeDir). The portable parts are config.json (core prefs), mcp-config.json
- * (user-level MCP servers), and agents/ (custom agents). The machine-local /
- * sensitive artifacts — session-state/, logs/, ide/, restart/, the skills/ dir,
- * and command-history-state.json — are excluded by the denylist. Copilot signs in
- * via gh/device flow, so there is no portable credential file to bundle.
+ * toolHomeDir) — the SAME dir on macOS, Linux, and Windows (%USERPROFILE%\.copilot;
+ * it does NOT use %APPDATA% or XDG). The portable, user-authored parts are
+ * settings.json (the primary config file), mcp-config.json (user MCP servers),
+ * lsp-config.json (user LSP servers), copilot-instructions.md + instructions/
+ * (personal custom instructions), agents/ (custom agents), and hooks/ (user hook
+ * scripts). config.json is deliberately NOT frozen: per GitHub's config-dir
+ * reference it is auto-managed internal state holding authentication data
+ * (loggedInUsers) and installed-plugin metadata — machine-local + secret, and
+ * user prefs that once lived there are migrated to settings.json at startup. That,
+ * plus permission/session/log/ide state and the MCP secret stores, is excluded by
+ * the denylist. Copilot signs in via /login (or a COPILOT_GITHUB_TOKEN / GH_TOKEN /
+ * GITHUB_TOKEN env var), so there is no portable credential file to bundle; the
+ * user re-authenticates after a restore.
  *
  * The tool home is resolved via src/platform/os.ts (toolHomeDir); the repoPath
  * prefix is a POSIX literal used inside the backup repo.
@@ -29,9 +37,13 @@ export const REPO_PREFIX = "copilot/files";
  * regardless of its presence here.
  */
 export const FROZEN_PATHS: readonly string[] = [
-  "config.json",
+  "settings.json",
   "mcp-config.json",
+  "lsp-config.json",
+  "copilot-instructions.md",
+  "instructions",
   "agents",
+  "hooks",
 ] as const;
 
 /** Fully-resolved set of Copilot CLI paths, all absolute. */

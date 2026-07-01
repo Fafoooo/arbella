@@ -342,6 +342,8 @@ function toolLabel(tool: ToolId): string {
       return "copilot";
     case "kilo":
       return "kilo";
+    case "antigravity":
+      return "antigravity";
   }
 }
 

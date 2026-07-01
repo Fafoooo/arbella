@@ -87,12 +87,14 @@ import { cursorAdapter } from "../adapters/cursor/index.js";
 import { opencodeAdapter } from "../adapters/opencode/index.js";
 import { copilotAdapter } from "../adapters/copilot/index.js";
 import { kiloAdapter } from "../adapters/kilo/index.js";
+import { antigravityAdapter } from "../adapters/antigravity/index.js";
 import { capture as captureClaude } from "../adapters/claude/capture.js";
 import { capture as captureCodex } from "../adapters/codex/capture.js";
 import { capture as captureCursor } from "../adapters/cursor/index.js";
 import { capture as captureOpencode } from "../adapters/opencode/index.js";
 import { capture as captureCopilot } from "../adapters/copilot/index.js";
 import { capture as captureKilo } from "../adapters/kilo/index.js";
+import { capture as captureAntigravity } from "../adapters/antigravity/index.js";
 
 import type { Adapter } from "../adapters/adapter.interface.js";
 import { getPackageVersion } from "../core/version.js";
@@ -172,6 +174,8 @@ function toolCaptureFor(tool: ToolId): ToolCapture {
       return { adapter: copilotAdapter, capture: captureCopilot };
     case "kilo":
       return { adapter: kiloAdapter, capture: captureKilo };
+    case "antigravity":
+      return { adapter: antigravityAdapter, capture: captureAntigravity };
   }
 }
 
@@ -499,6 +503,8 @@ function toolLabel(tool: ToolId): string {
       return "GitHub Copilot CLI";
     case "kilo":
       return "Kilo Code";
+    case "antigravity":
+      return "Antigravity";
   }
 }
 

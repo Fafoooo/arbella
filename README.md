@@ -6,8 +6,9 @@
 
 **Set up your AI coding tools once. Rebuild that setup on any machine.**
 
-Backup and migration for your Claude Code and Codex setup — skills, subagents,
-plugins, hooks, settings, memories — into a private Git repo you own.
+Backup and migration for your Claude Code, Codex, Cursor, opencode, Copilot CLI,
+Kilo Code, and Antigravity setup — skills, subagents, plugins, hooks, settings,
+memories — into a private Git repo you own.
 
 [![License](https://img.shields.io/badge/license-AGPL--3.0--only-blue.svg)](./LICENSE)
 &nbsp;![Node](https://img.shields.io/badge/node-%E2%89%A518-43853d?logo=node.js&logoColor=white)
@@ -61,7 +62,7 @@ Two things it deliberately won't do:
 - **Never commits secrets.** API keys, OAuth tokens, `auth.json`, `.credentials.json` — all excluded, no exceptions. You sign back in after a pull, or carry them yourself with [`arbella secrets`](#arbella-secrets).
 - **Doesn't copy what it can reinstall.** Plugins and registry skills are saved as a list and pulled fresh, so the repo stays small and never goes stale.
 
-Supported today: **Claude Code**, **Codex**, **Cursor**, **opencode**, **GitHub Copilot CLI**, and **Kilo Code**. Cursor support covers global MCP config, user settings, keybindings, snippets, local skills, skills.sh symlinks, and extension IDs; runtime state and credentials stay out. opencode, Copilot CLI, and Kilo are config-dir CLIs — Arbella captures each one's config dir (the JSON/JSONC config, custom agents/commands, MCP config), strips token-shaped values, and skips machine-local state, plugin install artifacts, and reinstallable skills (regenerated from the config on first run).
+Supported today: **Claude Code**, **Codex**, **Cursor** (IDE + the `cursor-agent` CLI), **opencode**, **GitHub Copilot CLI**, **Kilo Code**, and **Google Antigravity**. Cursor support covers global MCP config, user settings, keybindings, snippets, local skills, skills.sh symlinks, the `cursor-agent` CLI config + global commands, and extension IDs; runtime state and credentials stay out. opencode, Copilot CLI, and Kilo are config-dir CLIs — Arbella captures each one's config dir (the JSON/JSONC config, custom agents/commands, MCP config), strips token-shaped values, and skips machine-local state, plugin install artifacts, and reinstallable skills (regenerated from the config on first run). Antigravity spans three roots — its VS Code-style User settings, the `~/.antigravity` extension list, and the shared `~/.gemini` agent config (global rules, MCP servers, skills) — while its Google OAuth tokens never leave your machine.
 
 ## Commands
 

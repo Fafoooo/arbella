@@ -24,6 +24,7 @@ import { cursorAdapter } from "./cursor/index.js";
 import { opencodeAdapter } from "./opencode/index.js";
 import { copilotAdapter } from "./copilot/index.js";
 import { kiloAdapter } from "./kilo/index.js";
+import { antigravityAdapter } from "./antigravity/index.js";
 
 /**
  * Every adapter arbella ships, keyed by ToolId. The map is the source of truth;
@@ -36,6 +37,7 @@ const ADAPTER_BY_ID: Readonly<Record<ToolId, Adapter>> = {
   opencode: opencodeAdapter,
   copilot: copilotAdapter,
   kilo: kiloAdapter,
+  antigravity: antigravityAdapter,
 };
 
 /** All adapters in canonical processing order (claude, codex, cursor). */

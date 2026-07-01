@@ -63,17 +63,16 @@ export function dataDir(): string {
 }
 
 /**
- * An XDG-style config child dir (used by config-dir CLIs like opencode/kilo):
- *   - linux/darwin: $XDG_CONFIG_HOME/<name> or ~/.config/<name>
- *   - win32:        %APPDATA%/<name> or ~/AppData/Roaming/<name>
- * These tools follow XDG even on macOS (no ~/Library), so this stays distinct
- * from appUserConfigRoot (which uses ~/Library on darwin for Electron apps).
+ * An XDG-style config child dir (used by config-dir CLIs like opencode/kilo).
+ * These tools follow the XDG convention on EVERY OS — including Windows, where
+ * their config lives at ~/.config/<name> (i.e. %USERPROFILE%\.config\<name>), NOT
+ * %APPDATA%\<name>. Pointing them at %APPDATA% on Windows was a bug: detect()
+ * reported the tool absent and restore wrote where the CLI never reads. So
+ * resolution is now uniform across platforms: $XDG_CONFIG_HOME/<name> when set,
+ * else ~/.config/<name>. This stays distinct from appUserConfigRoot (which uses
+ * ~/Library on darwin and %APPDATA% on win32 for Electron / VS Code-style apps).
  */
 function xdgConfigChild(name: string): string {
-  if (detectOS() === "win32") {
-    const appData = process.env.APPDATA ?? path.join(homeDir(), "AppData", "Roaming");
-    return path.join(appData, name);
-  }
   const xdg = process.env.XDG_CONFIG_HOME ?? path.join(homeDir(), ".config");
   return path.join(xdg, name);
 }
@@ -86,7 +85,9 @@ export function toolHomeDir(tool: ToolId): string {
     case "codex":
       return path.join(homeDir(), ".codex");
     case "cursor":
-      return path.join(homeDir(), ".cursor");
+      // Shared by the Cursor IDE and the Cursor CLI (cursor-agent). Default
+      // ~/.cursor; the CLI honors CURSOR_CONFIG_DIR to relocate the config dir.
+      return process.env.CURSOR_CONFIG_DIR ?? path.join(homeDir(), ".cursor");
     case "opencode":
       return xdgConfigChild("opencode");
     case "kilo":
@@ -94,6 +95,11 @@ export function toolHomeDir(tool: ToolId): string {
     case "copilot":
       // GitHub Copilot CLI uses ~/.copilot on every OS; COPILOT_HOME overrides it.
       return process.env.COPILOT_HOME ?? path.join(homeDir(), ".copilot");
+    case "antigravity":
+      // Google Antigravity's ~/.antigravity dotfolder (its VS Code dataFolder).
+      // The adapter derives its two other roots (the VS Code User dir and the
+      // shared ~/.gemini agent dir) from this home's parent.
+      return path.join(homeDir(), ".antigravity");
   }
 }
 
@@ -247,6 +253,11 @@ export function installCommandFor(tool: ToolId, targetOS: OS): InstallCommand | 
       return { cmd: "npm", args: ["install", "-g", "@github/copilot"] };
     case "kilo":
       return { cmd: "npm", args: ["install", "-g", "@kilocode/cli"] };
+    case "antigravity":
+      // Desktop IDE from antigravity.google — no package-manager install on any
+      // OS. Return null so installCli() warns + skips (the adapter points the user
+      // at the download).
+      return null;
   }
 }
 
@@ -268,5 +279,7 @@ export function cliBinaryName(tool: ToolId): string {
       return "copilot";
     case "kilo":
       return "kilo";
+    case "antigravity":
+      return "antigravity";
   }
 }

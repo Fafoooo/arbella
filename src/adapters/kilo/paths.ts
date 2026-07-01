@@ -2,13 +2,16 @@
  * All Kilo Code CLI path knowledge for the arbella kilo adapter.
  *
  * Kilo Code's CLI (npm `@kilocode/cli`, binary `kilo`) reads its global config
- * from the XDG config dir (~/.config/kilo by default, $XDG_CONFIG_HOME/kilo when
- * set): kilo.jsonc (the config — rules live in its `instructions` array, plus MCP
- * servers), and the user's custom agents/ and rules/. The plugin-install
- * artifacts Kilo drops here (node_modules/, package.json, bun.lock,
- * package-lock.json) and the skills/ dir are excluded by the denylist — they are
- * regenerated from the config on first run. The CLI's machine-local runtime state
- * lives in a separate ~/.kilocode/cli tree, which arbella never touches.
+ * from the XDG config dir — ~/.config/kilo on every OS (including Windows, as
+ * %USERPROFILE%\.config\kilo), or $XDG_CONFIG_HOME/kilo when set. The portable,
+ * user-authored parts are kilo.jsonc / kilo.json (the config — rules live in its
+ * `instructions` array, plus MCP servers), tui.jsonc / tui.json (terminal-UI
+ * behavior: attention, notifications, sound), and the user's custom agents/ and
+ * rules/. The plugin-install artifacts Kilo drops here (node_modules/,
+ * package.json, bun.lock, package-lock.json) and the skills/ dir are excluded by
+ * the denylist — they are regenerated from the config on first run. The CLI's
+ * machine-local runtime state lives in a separate ~/.kilocode/cli tree, which
+ * arbella never touches.
  *
  * This adapter intentionally covers the Kilo CLI only, not the Kilo Code VS Code
  * extension (whose state is machine-bound binary globalStorage, out of scope just
@@ -36,6 +39,8 @@ export const REPO_PREFIX = "kilo/files";
 export const FROZEN_PATHS: readonly string[] = [
   "kilo.jsonc",
   "kilo.json",
+  "tui.jsonc",
+  "tui.json",
   "agents",
   "rules",
 ] as const;
