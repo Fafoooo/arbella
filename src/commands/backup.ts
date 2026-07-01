@@ -84,9 +84,15 @@ import { denylistFor } from "../core/sanitizer/denylist.js";
 import { claudeAdapter } from "../adapters/claude/index.js";
 import { codexAdapter } from "../adapters/codex/index.js";
 import { cursorAdapter } from "../adapters/cursor/index.js";
+import { opencodeAdapter } from "../adapters/opencode/index.js";
+import { copilotAdapter } from "../adapters/copilot/index.js";
+import { kiloAdapter } from "../adapters/kilo/index.js";
 import { capture as captureClaude } from "../adapters/claude/capture.js";
 import { capture as captureCodex } from "../adapters/codex/capture.js";
 import { capture as captureCursor } from "../adapters/cursor/index.js";
+import { capture as captureOpencode } from "../adapters/opencode/index.js";
+import { capture as captureCopilot } from "../adapters/copilot/index.js";
+import { capture as captureKilo } from "../adapters/kilo/index.js";
 
 import type { Adapter } from "../adapters/adapter.interface.js";
 import { getPackageVersion } from "../core/version.js";
@@ -160,6 +166,12 @@ function toolCaptureFor(tool: ToolId): ToolCapture {
       return { adapter: codexAdapter, capture: captureCodex };
     case "cursor":
       return { adapter: cursorAdapter, capture: captureCursor };
+    case "opencode":
+      return { adapter: opencodeAdapter, capture: captureOpencode };
+    case "copilot":
+      return { adapter: copilotAdapter, capture: captureCopilot };
+    case "kilo":
+      return { adapter: kiloAdapter, capture: captureKilo };
   }
 }
 
@@ -481,6 +493,12 @@ function toolLabel(tool: ToolId): string {
       return "Codex";
     case "cursor":
       return "Cursor";
+    case "opencode":
+      return "opencode";
+    case "copilot":
+      return "GitHub Copilot CLI";
+    case "kilo":
+      return "Kilo Code";
   }
 }
 

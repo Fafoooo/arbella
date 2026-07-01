@@ -715,6 +715,12 @@ function displayName(id: ToolId): string {
       return "Codex";
     case "cursor":
       return "Cursor";
+    case "opencode":
+      return "opencode";
+    case "copilot":
+      return "GitHub Copilot CLI";
+    case "kilo":
+      return "Kilo Code";
   }
 }
 
@@ -735,7 +741,14 @@ function parseToolList(raw: string): ToolId[] {
 
 /** Type guard for ToolId. */
 function isToolId(value: string): value is ToolId {
-  return value === "claude" || value === "codex" || value === "cursor";
+  return (
+    value === "claude" ||
+    value === "codex" ||
+    value === "cursor" ||
+    value === "opencode" ||
+    value === "copilot" ||
+    value === "kilo"
+  );
 }
 
 /** Type guard for RepoProvider. */

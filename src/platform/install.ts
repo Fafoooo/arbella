@@ -420,6 +420,9 @@ export const DEPENDENCY_IDS: readonly DependencyId[] = [
   "claude",
   "codex",
   "cursor",
+  "opencode",
+  "copilot",
+  "kilo",
 ] as const;
 
 /**
@@ -578,6 +581,33 @@ export const DEPENDENCIES: Readonly<Record<DependencyId, DependencySpec>> = {
       },
       win32: { kind: "winget", id: "Anysphere.Cursor" },
     },
+  },
+  opencode: {
+    id: "opencode",
+    label: "opencode",
+    why: "The opencode terminal AI agent — backed up/restored by arbella.",
+    binary: cliBinaryName("opencode"),
+    recommended: false,
+    strong: false,
+    install: npmEverywhere("opencode-ai"),
+  },
+  copilot: {
+    id: "copilot",
+    label: "GitHub Copilot CLI",
+    why: "GitHub's terminal Copilot CLI — backed up/restored by arbella.",
+    binary: cliBinaryName("copilot"),
+    recommended: false,
+    strong: false,
+    install: npmEverywhere("@github/copilot"),
+  },
+  kilo: {
+    id: "kilo",
+    label: "Kilo Code",
+    why: "The Kilo Code CLI — backed up/restored by arbella.",
+    binary: cliBinaryName("kilo"),
+    recommended: false,
+    strong: false,
+    install: npmEverywhere("@kilocode/cli"),
   },
 };
 

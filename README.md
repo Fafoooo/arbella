@@ -61,7 +61,7 @@ Two things it deliberately won't do:
 - **Never commits secrets.** API keys, OAuth tokens, `auth.json`, `.credentials.json` — all excluded, no exceptions. You sign back in after a pull, or carry them yourself with [`arbella secrets`](#arbella-secrets).
 - **Doesn't copy what it can reinstall.** Plugins and registry skills are saved as a list and pulled fresh, so the repo stays small and never goes stale.
 
-Supported today: **Claude Code**, **Codex**, and **Cursor**. Cursor support covers global MCP config, user settings, keybindings, snippets, local skills, skills.sh symlinks, and extension IDs; runtime state and credentials stay out.
+Supported today: **Claude Code**, **Codex**, **Cursor**, **opencode**, **GitHub Copilot CLI**, and **Kilo Code**. Cursor support covers global MCP config, user settings, keybindings, snippets, local skills, skills.sh symlinks, and extension IDs; runtime state and credentials stay out. opencode, Copilot CLI, and Kilo are config-dir CLIs — Arbella captures each one's config dir (the JSON/JSONC config, custom agents/commands, MCP config), strips token-shaped values, and skips machine-local state, plugin install artifacts, and reinstallable skills (regenerated from the config on first run).
 
 ## Commands
 
@@ -88,7 +88,7 @@ arbella setup --all             # everything, no prompts
 arbella setup --deps git,gh -y  # just these
 ```
 
-- Covers **git** (required), **gh** / **glab** (handle sign-in for you), and the AI CLIs (**claude**, **codex**, **cursor**).
+- Covers **git** (required), **gh** / **glab** (handle sign-in for you), and the AI CLIs (**claude**, **codex**, **cursor**, **opencode**, **copilot**, **kilo**).
 - Installs through your system's package manager: apt, dnf, or pacman on Linux, Homebrew on macOS, winget on Windows.
 - `init` and `pull` also install on demand — if something's missing when you run them, Arbella stops and asks first.
 

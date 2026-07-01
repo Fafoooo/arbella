@@ -68,6 +68,9 @@ import {
 import { claudeAdapter } from "../adapters/claude/index.js";
 import { codexAdapter } from "../adapters/codex/index.js";
 import { cursorAdapter } from "../adapters/cursor/index.js";
+import { opencodeAdapter } from "../adapters/opencode/index.js";
+import { copilotAdapter } from "../adapters/copilot/index.js";
+import { kiloAdapter } from "../adapters/kilo/index.js";
 
 // The R9 `skipInstructions` capture variant is NOT exposed on the Adapter
 // interface (Adapter.capture(ctx) takes no opts). Mirror the backup command and
@@ -75,6 +78,9 @@ import { cursorAdapter } from "../adapters/cursor/index.js";
 import { capture as captureClaude } from "../adapters/claude/capture.js";
 import { capture as captureCodex } from "../adapters/codex/capture.js";
 import { capture as captureCursor } from "../adapters/cursor/index.js";
+import { capture as captureOpencode } from "../adapters/opencode/index.js";
+import { capture as captureCopilot } from "../adapters/copilot/index.js";
+import { capture as captureKilo } from "../adapters/kilo/index.js";
 
 /* -------------------------------------------------------------------------- */
 /* Options                                                                     */
@@ -163,6 +169,9 @@ const ADAPTERS: Record<ToolId, { adapter: import("../adapters/adapter.interface.
   claude: { adapter: claudeAdapter, capture: captureClaude },
   codex: { adapter: codexAdapter, capture: captureCodex },
   cursor: { adapter: cursorAdapter, capture: captureCursor },
+  opencode: { adapter: opencodeAdapter, capture: captureOpencode },
+  copilot: { adapter: copilotAdapter, capture: captureCopilot },
+  kilo: { adapter: kiloAdapter, capture: captureKilo },
 };
 
 /* -------------------------------------------------------------------------- */

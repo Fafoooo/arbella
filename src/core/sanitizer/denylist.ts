@@ -136,6 +136,55 @@ export const CURSOR_DENY: readonly string[] = [
   "storage.json",
 ];
 
+/**
+ * opencode (~/.config/opencode) EXCLUDE list. Keep only the portable config +
+ * agents/commands; drop the plugin-install artifacts (regenerated from the
+ * config's plugin list on first run), the large skills/ tree, and any stray
+ * credential file. opencode's real auth lives at ~/.local/share/opencode/auth.json
+ * (outside this home), but auth.json is listed defensively.
+ */
+export const OPENCODE_DENY: readonly string[] = [
+  "node_modules/",
+  "package.json",
+  "package-lock.json",
+  "bun.lock",
+  "bun.lockb",
+  ".gitignore",
+  "skills/",
+  "plugins/",
+  "auth.json",
+];
+
+/**
+ * GitHub Copilot CLI (~/.copilot) EXCLUDE list. Keep config.json, mcp-config.json,
+ * and agents/; drop the machine-local session/log/ide state and the history file
+ * (which can echo prompts/paths), plus the reinstallable skills/ tree.
+ */
+export const COPILOT_DENY: readonly string[] = [
+  "session-state/",
+  "logs/",
+  "ide/",
+  "restart/",
+  "skills/",
+  "command-history-state.json",
+];
+
+/**
+ * Kilo Code CLI (~/.config/kilo) EXCLUDE list. Same shape as opencode: keep the
+ * config + agents/rules, drop the plugin-install artifacts and skills/ tree. The
+ * CLI's machine-local runtime lives in ~/.kilocode/cli (a different home), so it
+ * never reaches this adapter.
+ */
+export const KILO_DENY: readonly string[] = [
+  "node_modules/",
+  "package.json",
+  "package-lock.json",
+  "bun.lock",
+  "bun.lockb",
+  ".gitignore",
+  "skills/",
+];
+
 /* -------------------------------------------------------------------------- */
 /* Composition + matcher                                                       */
 /* -------------------------------------------------------------------------- */
@@ -149,6 +198,12 @@ export function denylistFor(tool: ToolId): string[] {
       return [...COMMON_DENY, ...CODEX_DENY];
     case "cursor":
       return [...COMMON_DENY, ...CURSOR_DENY];
+    case "opencode":
+      return [...COMMON_DENY, ...OPENCODE_DENY];
+    case "copilot":
+      return [...COMMON_DENY, ...COPILOT_DENY];
+    case "kilo":
+      return [...COMMON_DENY, ...KILO_DENY];
   }
 }
 

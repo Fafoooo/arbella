@@ -22,7 +22,7 @@ import { z } from "zod";
 /** Bump when the on-disk manifest/meta shape changes incompatibly. */
 export const MANIFEST_SCHEMA_VERSION = 1 as const;
 
-const toolIdSchema = z.enum(["claude", "codex", "cursor"]);
+const toolIdSchema = z.enum(["claude", "codex", "cursor", "opencode", "copilot", "kilo"]);
 
 /* -------------------------------------------------------------------------- */
 /* Plugins (Claude installed_plugins.json + Codex [plugins.*])                  */

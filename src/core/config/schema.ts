@@ -13,7 +13,7 @@
 
 import { z } from "zod";
 
-const toolIdSchema = z.enum(["claude", "codex", "cursor"]);
+const toolIdSchema = z.enum(["claude", "codex", "cursor", "opencode", "copilot", "kilo"]);
 
 /** Repo connection details (R11). */
 export const repoConfigSchema = z.object({

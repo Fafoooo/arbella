@@ -336,6 +336,12 @@ function toolLabel(tool: ToolId): string {
       return "codex";
     case "cursor":
       return "cursor";
+    case "opencode":
+      return "opencode";
+    case "copilot":
+      return "copilot";
+    case "kilo":
+      return "kilo";
   }
 }
 
