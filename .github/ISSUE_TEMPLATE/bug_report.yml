@@ -1,0 +1,98 @@
+name: Bug report
+description: Something in Arbella behaved incorrectly.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a bug. **Do not include real tokens, credentials, or
+        full machine paths** — redact secret values and replace home paths with
+        placeholders, the way Arbella does. For a suspected security issue, use the
+        [security advisory flow](../../security/advisories/new) instead of this form.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: What did you do, and what went wrong?
+      placeholder: I ran `arbella push` and …
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What did you expect?
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: The exact commands you ran (with secrets/paths redacted).
+      placeholder: |
+        1. arbella init …
+        2. arbella push --dry-run
+        3. …
+      render: shell
+    validations:
+      required: true
+  - type: dropdown
+    id: command
+    attributes:
+      label: Which command?
+      multiple: true
+      options:
+        - setup
+        - init
+        - push
+        - pull
+        - status
+        - update
+        - auth
+        - secrets
+        - other / not sure
+    validations:
+      required: true
+  - type: dropdown
+    id: tool
+    attributes:
+      label: Which tool(s) were being backed up?
+      multiple: true
+      options:
+        - claude
+        - codex
+        - cursor
+        - opencode
+        - copilot
+        - kilo
+        - not tool-specific
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      options:
+        - Linux
+        - macOS
+        - Windows
+        - WSL
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Arbella version
+      description: Output of `arbella --version`.
+      placeholder: 0.1.3
+    validations:
+      required: true
+  - type: input
+    id: node
+    attributes:
+      label: Node version
+      description: Output of `node --version`.
+      placeholder: v20.x
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant output
+      description: Paste console output from `--verbose` if you have it. Redact secrets and paths.
+      render: shell
