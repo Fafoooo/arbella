@@ -42,7 +42,7 @@ import { denylistFor, matchesDeny } from "../../core/sanitizer/denylist.js";
 import { cliBinaryName, detectOS, installCommandFor } from "../../platform/os.js";
 import { runInstall, which } from "../../platform/install.js";
 import { normalizeCapturedSymlinkTarget } from "../../utils/symlink.js";
-import { decodeForCapture } from "../../utils/capture-bytes.js";
+import { binaryScanViews, decodeForCapture } from "../../utils/capture-bytes.js";
 
 import {
   GEMINI_FROZEN_PATHS,
@@ -188,11 +188,13 @@ async function captureFile(args: {
 
   if (decoded.kind === "binary") {
     // Fail-safe: a genuinely-binary file must not smuggle a secret past the
-    // sanitizer. If secret-shaped bytes are present, DROP it (never store raw)
-    // and record the refs for the re-supply reminder.
+    // sanitizer. Scan every lossy view (UTF-8 + UTF-16LE/BE at both alignments)
+    // — a NUL-interleaved token is invisible to a UTF-8-only scan. On any hit,
+    // DROP the file (never store raw) and record the refs.
     if (!ctx.includeSecrets) {
-      const scan = ctx.sanitizer.sanitizeText(decoded.utf8, "antigravity", rel);
-      if (scan.changed) {
+      for (const view of binaryScanViews(bytes)) {
+        const scan = ctx.sanitizer.sanitizeText(view, "antigravity", rel);
+        if (!scan.changed) continue;
         warnings.push(`antigravity: skipped ${rel} — binary content with secret-shaped bytes`);
         secrets.push(...scan.found);
         return;

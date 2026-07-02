@@ -32,7 +32,7 @@ import type {
 
 import { denylistFor, matchesDeny } from "../../core/sanitizer/denylist.js";
 import { normalizeCapturedSymlinkTarget } from "../../utils/symlink.js";
-import { decodeForCapture } from "../../utils/capture-bytes.js";
+import { binaryScanViews, decodeForCapture } from "../../utils/capture-bytes.js";
 
 /** What a config-dir adapter must declare for the shared engine to do its work. */
 export interface ConfigDirSpec {
@@ -120,10 +120,13 @@ async function captureFile(args: {
 
   if (decoded.kind === "binary") {
     // Fail-safe: never let a "binary" file smuggle a secret past the sanitizer.
-    // If secret-shaped bytes are present, DROP it (never store raw) + record refs.
+    // Scan every lossy view (UTF-8 + UTF-16LE/BE at both alignments) — a NUL-
+    // interleaved token is invisible to a UTF-8-only scan. On any hit, DROP the
+    // file (never store raw) + record refs.
     if (!ctx.includeSecrets) {
-      const scan = ctx.sanitizer.sanitizeText(decoded.utf8, tool, rel);
-      if (scan.changed) {
+      for (const view of binaryScanViews(bytes)) {
+        const scan = ctx.sanitizer.sanitizeText(view, tool, rel);
+        if (!scan.changed) continue;
         warnings.push(`${tool}: skipped ${rel} — binary content with secret-shaped bytes`);
         secrets.push(...scan.found);
         return;

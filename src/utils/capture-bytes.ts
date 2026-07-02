@@ -29,6 +29,25 @@ export type DecodedBytes =
   /** Genuinely binary. `utf8` is a lossy decode for a fail-safe secret scan only. */
   | { kind: "binary"; utf8: string };
 
+/**
+ * Lossy text views of a binary buffer for the fail-safe secret scan. A binary
+ * blob can embed a credential in more encodings than UTF-8: NUL-interleaved
+ * UTF-16 (either endianness) hides an ASCII token from a UTF-8 scan entirely.
+ * Returns the UTF-8 view plus UTF-16LE/BE views at BOTH byte alignments (a
+ * leading header byte shifts the interleave), so the scanner sees an embedded
+ * ASCII-range token regardless of encoding or offset. Views are for SCANNING
+ * only — never for storage (the stored binary payload stays byte-exact).
+ */
+export function binaryScanViews(bytes: Buffer): string[] {
+  return [
+    bytes.toString("utf8"),
+    bytes.toString("utf16le"),
+    bytes.subarray(1).toString("utf16le"),
+    decodeUtf16be(bytes),
+    decodeUtf16be(bytes.subarray(1)),
+  ];
+}
+
 /** Strip a single leading BOM (U+FEFF) left by a UTF-16 decode. */
 function stripBom(s: string): string {
   return s.charCodeAt(0) === 0xfeff ? s.slice(1) : s;

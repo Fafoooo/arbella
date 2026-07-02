@@ -6,7 +6,7 @@
 
 import { describe, expect, it } from "vitest";
 
-import { decodeForCapture } from "../../src/utils/capture-bytes.js";
+import { binaryScanViews, decodeForCapture } from "../../src/utils/capture-bytes.js";
 
 describe("decodeForCapture: text detection", () => {
   it("decodes an empty buffer to empty text", () => {
@@ -80,5 +80,43 @@ describe("decodeForCapture: binary detection (lossless, never lossy-decoded)", (
     const d = decodeForCapture(blob);
     expect(d.kind).toBe("binary");
     expect((d as { utf8: string }).utf8).toContain("sk-marker");
+  });
+});
+
+describe("binaryScanViews: UTF-16-embedded secrets are visible to the fail-safe scan", () => {
+  // A NUL-interleaved token ("s\0k\0-\0...") is invisible to a UTF-8-only scan,
+  // so the fail-safe must also look through UTF-16 views — at both byte
+  // alignments, since a leading header byte shifts the interleave.
+  const SECRET = "sk-ant-api03-EMBEDDED-IN-BINARY-AAAAAAAAAAAAAAAA";
+
+  function swapToBe(le: Buffer): Buffer {
+    const be = Buffer.allocUnsafe(le.length);
+    for (let i = 0; i + 1 < le.length; i += 2) {
+      be[i] = le[i + 1]!;
+      be[i + 1] = le[i]!;
+    }
+    return be;
+  }
+
+  it("keeps plain UTF-8 content visible (first view)", () => {
+    const views = binaryScanViews(Buffer.from(`x${SECRET}x`, "utf8"));
+    expect(views[0]).toContain(SECRET);
+  });
+
+  it("exposes a UTF-16LE secret at an even byte offset", () => {
+    const blob = Buffer.concat([Buffer.from([0x00, 0x01]), Buffer.from(SECRET, "utf16le")]);
+    expect(binaryScanViews(blob).some((v) => v.includes(SECRET))).toBe(true);
+    // ...which the UTF-8 view alone would have missed:
+    expect(blob.toString("utf8")).not.toContain(SECRET);
+  });
+
+  it("exposes a UTF-16LE secret at an ODD byte offset (leading header byte)", () => {
+    const blob = Buffer.concat([Buffer.from([0x7f]), Buffer.from(SECRET, "utf16le")]);
+    expect(binaryScanViews(blob).some((v) => v.includes(SECRET))).toBe(true);
+  });
+
+  it("exposes a UTF-16BE secret", () => {
+    const blob = Buffer.concat([Buffer.from([0x00, 0x01]), swapToBe(Buffer.from(SECRET, "utf16le"))]);
+    expect(binaryScanViews(blob).some((v) => v.includes(SECRET))).toBe(true);
   });
 });

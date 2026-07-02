@@ -30,7 +30,7 @@
 
 import path from "node:path";
 
-import { decodeForCapture } from "../../utils/capture-bytes.js";
+import { binaryScanViews, decodeForCapture } from "../../utils/capture-bytes.js";
 import type { CaptureContext } from "../adapter.interface.js";
 import type {
   CaptureResult,
@@ -154,10 +154,15 @@ async function captureFile(
   const decoded = decodeForCapture(bytes);
 
   if (decoded.kind === "binary") {
-    // Fail-safe: never let a "binary" file smuggle a secret past the sanitizer. If
-    // secret-shaped bytes are present (and we're not opted into carrying secrets),
-    // DROP it with a warning rather than base64'ing it in raw.
-    if (!ctx.includeSecrets && ctx.sanitizer.sanitizeText(decoded.utf8, "claude", rel).changed) {
+    // Fail-safe: never let a "binary" file smuggle a secret past the sanitizer.
+    // Scan every lossy view (UTF-8 + UTF-16LE/BE at both alignments) — a NUL-
+    // interleaved token is invisible to a UTF-8-only scan. If secret-shaped bytes
+    // are present (and we're not opted into carrying secrets), DROP the file with
+    // a warning rather than base64'ing it in raw.
+    if (
+      !ctx.includeSecrets &&
+      binaryScanViews(bytes).some((view) => ctx.sanitizer.sanitizeText(view, "claude", rel).changed)
+    ) {
       warnings.push(`claude: skipped ${rel} — binary content with secret-shaped bytes`);
       return;
     }

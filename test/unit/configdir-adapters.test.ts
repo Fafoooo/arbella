@@ -358,3 +358,55 @@ describe("config-dir capture: UTF-16 configs are sanitized, not shipped raw", ()
     }
   });
 });
+
+describe("config-dir capture: binary fail-safe drops UTF-16-embedded secrets", () => {
+  // A file that classifies as BINARY (NULs at both parities) but carries a
+  // UTF-16LE token: the fail-safe must scan the UTF-16 views too, skip the file
+  // with a warning, and report a SecretRef — while a benign binary of the same
+  // shape is still captured as base64.
+  let bTmp: string;
+  let bCapture: CaptureResult;
+  const BIN_SECRET = "sk-ant-api03-BINARY-EMBEDDED-SECRET-CCCCCCCCCCCC";
+
+  beforeAll(async () => {
+    bTmp = await fsp.mkdtemp(path.join(os.tmpdir(), "arbella-binfs-"));
+    const home = path.join(bTmp, ".config", "opencode");
+
+    // A long all-NUL prefix puts NULs at BOTH parities in equal measure, so the
+    // UTF-16 parity heuristic cannot fire (no dominant side) and the blob
+    // classifies as BINARY — while the UTF-16LE payload after it stays intact.
+    const binaryPrefix = Buffer.alloc(40);
+    const withSecret = Buffer.concat([binaryPrefix, Buffer.from(BIN_SECRET, "utf16le")]);
+    const benign = Buffer.concat([binaryPrefix, Buffer.from("just-plain-data", "utf16le")]);
+
+    const secretAbs = under(home, "agents/leaky.bin");
+    const benignAbs = under(home, "agents/benign.bin");
+    await fsp.mkdir(path.dirname(secretAbs), { recursive: true });
+    await fsp.writeFile(secretAbs, withSecret);
+    await fsp.writeFile(benignAbs, benign);
+
+    const vars = makeVariables(bTmp, "fab", "linux", home);
+    bCapture = await captureOpencode(makeCaptureCtx(home, vars));
+  });
+
+  afterAll(async () => {
+    await fsp.rm(bTmp, { recursive: true, force: true });
+  });
+
+  it("skips the secret-bearing binary with a warning and a SecretRef", () => {
+    const repoPaths = bCapture.files.map((f) => f.repoPath);
+    expect(repoPaths.some((p) => p.includes("leaky.bin"))).toBe(false);
+    expect(bCapture.warnings.some((w) => w.includes("leaky.bin"))).toBe(true);
+    expect(bCapture.secrets.length).toBeGreaterThan(0);
+    for (const f of bCapture.files) {
+      const bytes = f.binary ? Buffer.from(f.content, "base64") : Buffer.from(f.content, "utf8");
+      expect(bytes.toString("utf16le")).not.toContain(BIN_SECRET);
+    }
+  });
+
+  it("still captures the benign binary as base64 (no over-dropping)", () => {
+    const benign = bCapture.files.find((f) => f.repoPath.includes("benign.bin"));
+    expect(benign).toBeDefined();
+    expect(benign!.binary).toBe(true);
+  });
+});
