@@ -206,3 +206,207 @@ describe("config-dir adapters: graceful absence", () => {
     expect(result.warnings.length).toBeGreaterThan(0);
   });
 });
+
+describe("copilot adapter capture: user config in, auth state out", () => {
+  // GitHub's config-dir reference: user prefs live in settings.json; config.json is
+  // auto-managed state holding authentication data + plugin metadata. Regression
+  // guard for the P1 fix — config.json (and its token) must never be captured.
+  let cpTmp: string;
+  let cpHome: string;
+  let cpCapture: CaptureResult;
+  // Built at runtime so the token-shaped fixture never trips secret scanners.
+  const COPILOT_TOKEN = ["ghu", "COPILOTinternalStateAuthToken000000000000"].join("_");
+
+  beforeAll(async () => {
+    cpTmp = await fsp.mkdtemp(path.join(os.tmpdir(), "arbella-copilot-"));
+    cpHome = path.join(cpTmp, ".copilot");
+
+    // Portable, user-authored config (must be captured).
+    await writeFile(cpHome, "settings.json", JSON.stringify({ theme: "dark", model: "gpt-5" }, null, 2));
+    await writeFile(cpHome, "mcp-config.json", JSON.stringify({ mcpServers: {} }, null, 2));
+    await writeFile(cpHome, "lsp-config.json", JSON.stringify({ servers: {} }, null, 2));
+    await writeFile(cpHome, "copilot-instructions.md", "# My instructions\n");
+    await writeFile(cpHome, "instructions/style.instructions.md", "Be terse.\n");
+    await writeFile(cpHome, "agents/reviewer.md", "# Reviewer\n");
+
+    // Auto-managed internal state holding AUTH DATA — must NEVER be captured.
+    await writeFile(
+      cpHome,
+      "config.json",
+      JSON.stringify({ loggedInUsers: [{ token: COPILOT_TOKEN }] }, null, 2),
+    );
+    // Other machine-local state (denylisted).
+    await writeFile(cpHome, "session-state/abc/events.jsonl", "{}\n");
+    await writeFile(cpHome, "logs/process.log", "log line\n");
+
+    const vars = makeVariables(cpTmp, "fab", "linux", cpHome);
+    cpCapture = await captureCopilot(makeCaptureCtx(cpHome, vars));
+  });
+
+  afterAll(async () => {
+    await fsp.rm(cpTmp, { recursive: true, force: true });
+  });
+
+  it("captures the user-authored config files", () => {
+    const repoPaths = cpCapture.files.map((f) => f.repoPath);
+    expect(repoPaths).toContain("copilot/files/settings.json");
+    expect(repoPaths).toContain("copilot/files/mcp-config.json");
+    expect(repoPaths).toContain("copilot/files/lsp-config.json");
+    expect(repoPaths).toContain("copilot/files/copilot-instructions.md");
+    expect(repoPaths).toContain("copilot/files/instructions/style.instructions.md");
+    expect(repoPaths).toContain("copilot/files/agents/reviewer.md");
+  });
+
+  it("never captures config.json (auth/internal state) nor its token", () => {
+    const repoPaths = cpCapture.files.map((f) => f.repoPath);
+    expect(repoPaths).not.toContain("copilot/files/config.json");
+    for (const f of cpCapture.files) {
+      const content = f.binary ? Buffer.from(f.content, "base64").toString("utf8") : f.content;
+      expect(content).not.toContain(COPILOT_TOKEN);
+    }
+  });
+
+  it("excludes machine-local session/log state", () => {
+    const repoPaths = cpCapture.files.map((f) => f.repoPath);
+    expect(repoPaths.some((p) => p.includes("session-state"))).toBe(false);
+    expect(repoPaths.some((p) => p.includes("logs/"))).toBe(false);
+  });
+});
+
+describe("kilo adapter capture: includes TUI config", () => {
+  // Regression guard for the P2 fix — Kilo stores terminal attention/notification/
+  // sound behavior in tui.json(c); it must round-trip alongside kilo.jsonc.
+  let kTmp: string;
+  let kHome: string;
+  let kCapture: CaptureResult;
+
+  beforeAll(async () => {
+    kTmp = await fsp.mkdtemp(path.join(os.tmpdir(), "arbella-kilo-"));
+    kHome = path.join(kTmp, ".config", "kilo");
+    await writeFile(kHome, "kilo.jsonc", '{ "model": "sonnet" }\n');
+    await writeFile(kHome, "tui.json", JSON.stringify({ notifications: true, sound: false }, null, 2));
+    await writeFile(kHome, "rules/global.md", "Be careful.\n");
+
+    const vars = makeVariables(kTmp, "fab", "linux", kHome);
+    kCapture = await captureKilo(makeCaptureCtx(kHome, vars));
+  });
+
+  afterAll(async () => {
+    await fsp.rm(kTmp, { recursive: true, force: true });
+  });
+
+  it("captures tui.json (terminal UI settings) alongside the config", () => {
+    const repoPaths = kCapture.files.map((f) => f.repoPath);
+    expect(repoPaths).toContain("kilo/files/tui.json");
+    expect(repoPaths).toContain("kilo/files/kilo.jsonc");
+    expect(repoPaths).toContain("kilo/files/rules/global.md");
+  });
+});
+
+describe("config-dir capture: UTF-16 configs are sanitized, not shipped raw", () => {
+  // A NUL byte must NOT route a secret-bearing config around the sanitizer.
+  // UTF-16LE (the default of PowerShell's Out-File / Set-Content on Windows) puts
+  // a 0x00 after every ASCII char, which the old "contains NUL => binary"
+  // heuristic misread as binary and base64'd verbatim. Regression guard for the
+  // security review's HIGH finding.
+  let u16Tmp: string;
+  let u16Capture: CaptureResult;
+  const U16_SECRET = "sk-ant-api03-UTF16-CONFIG-MCP-SECRET-BBBBBBBBBBBB";
+
+  beforeAll(async () => {
+    u16Tmp = await fsp.mkdtemp(path.join(os.tmpdir(), "arbella-u16-"));
+    const u16Home = path.join(u16Tmp, ".config", "opencode");
+    const cfg = JSON.stringify(
+      { mcp: { weather: { environment: { ANTHROPIC_API_KEY: U16_SECRET } } } },
+      null,
+      2,
+    );
+    // Write as UTF-16LE with NO BOM — the NUL-interleave heuristic must still
+    // catch it. This is the byte shape PowerShell's Out-File / Set-Content
+    // produce on Windows, and the exact case the old heuristic misread as binary.
+    const abs = under(u16Home, "opencode.json");
+    await fsp.mkdir(path.dirname(abs), { recursive: true });
+    await fsp.writeFile(abs, Buffer.from(cfg, "utf16le"));
+
+    const vars = makeVariables(u16Tmp, "fab", "linux", u16Home);
+    u16Capture = await captureOpencode(makeCaptureCtx(u16Home, vars));
+  });
+
+  afterAll(async () => {
+    await fsp.rm(u16Tmp, { recursive: true, force: true });
+  });
+
+  it("captures the UTF-16 config as sanitized TEXT (not opaque base64)", () => {
+    const cfg = u16Capture.files.find((f) => f.repoPath === "opencode/files/opencode.json");
+    expect(cfg).toBeDefined();
+    expect(cfg!.binary).toBeFalsy();
+    expect(cfg!.content).not.toContain(U16_SECRET);
+    expect(u16Capture.secrets.length).toBeGreaterThan(0);
+  });
+
+  it("leaks the secret into NO captured file (text or base64)", () => {
+    for (const f of u16Capture.files) {
+      if (f.binary) {
+        // Check both decodings: a UTF-16LE secret inside a base64 payload would
+        // be invisible to a UTF-8-only scan (s\0k\0-\0...).
+        const bytes = Buffer.from(f.content, "base64");
+        expect(bytes.toString("utf8")).not.toContain(U16_SECRET);
+        expect(bytes.toString("utf16le")).not.toContain(U16_SECRET);
+      } else {
+        expect(f.content).not.toContain(U16_SECRET);
+      }
+    }
+  });
+});
+
+describe("config-dir capture: binary fail-safe drops UTF-16-embedded secrets", () => {
+  // A file that classifies as BINARY (NULs at both parities) but carries a
+  // UTF-16LE token: the fail-safe must scan the UTF-16 views too, skip the file
+  // with a warning, and report a SecretRef — while a benign binary of the same
+  // shape is still captured as base64.
+  let bTmp: string;
+  let bCapture: CaptureResult;
+  const BIN_SECRET = "sk-ant-api03-BINARY-EMBEDDED-SECRET-CCCCCCCCCCCC";
+
+  beforeAll(async () => {
+    bTmp = await fsp.mkdtemp(path.join(os.tmpdir(), "arbella-binfs-"));
+    const home = path.join(bTmp, ".config", "opencode");
+
+    // A long all-NUL prefix puts NULs at BOTH parities in equal measure, so the
+    // UTF-16 parity heuristic cannot fire (no dominant side) and the blob
+    // classifies as BINARY — while the UTF-16LE payload after it stays intact.
+    const binaryPrefix = Buffer.alloc(40);
+    const withSecret = Buffer.concat([binaryPrefix, Buffer.from(BIN_SECRET, "utf16le")]);
+    const benign = Buffer.concat([binaryPrefix, Buffer.from("just-plain-data", "utf16le")]);
+
+    const secretAbs = under(home, "agents/leaky.bin");
+    const benignAbs = under(home, "agents/benign.bin");
+    await fsp.mkdir(path.dirname(secretAbs), { recursive: true });
+    await fsp.writeFile(secretAbs, withSecret);
+    await fsp.writeFile(benignAbs, benign);
+
+    const vars = makeVariables(bTmp, "fab", "linux", home);
+    bCapture = await captureOpencode(makeCaptureCtx(home, vars));
+  });
+
+  afterAll(async () => {
+    await fsp.rm(bTmp, { recursive: true, force: true });
+  });
+
+  it("skips the secret-bearing binary with a warning and a SecretRef", () => {
+    const repoPaths = bCapture.files.map((f) => f.repoPath);
+    expect(repoPaths.some((p) => p.includes("leaky.bin"))).toBe(false);
+    expect(bCapture.warnings.some((w) => w.includes("leaky.bin"))).toBe(true);
+    expect(bCapture.secrets.length).toBeGreaterThan(0);
+    for (const f of bCapture.files) {
+      const bytes = f.binary ? Buffer.from(f.content, "base64") : Buffer.from(f.content, "utf8");
+      expect(bytes.toString("utf16le")).not.toContain(BIN_SECRET);
+    }
+  });
+
+  it("still captures the benign binary as base64 (no over-dropping)", () => {
+    const benign = bCapture.files.find((f) => f.repoPath.includes("benign.bin"));
+    expect(benign).toBeDefined();
+    expect(benign!.binary).toBe(true);
+  });
+});

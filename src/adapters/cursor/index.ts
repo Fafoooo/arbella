@@ -48,6 +48,7 @@ import { denylistFor, matchesDeny } from "../../core/sanitizer/denylist.js";
 import { cliBinaryName, detectOS, installCommandFor } from "../../platform/os.js";
 import { runInstall, which } from "../../platform/install.js";
 import { normalizeCapturedSymlinkTarget } from "../../utils/symlink.js";
+import { binaryScanViews, decodeForCapture } from "../../utils/capture-bytes.js";
 
 import {
   FROZEN_PATHS,
@@ -97,14 +98,6 @@ function targetAbsFor(ctx: RestoreContext, target: CursorTarget): string {
   return path.join(root, ...target.rel.split("/").filter(Boolean));
 }
 
-/** Heuristic: treat a file as binary if its bytes contain a NUL. */
-function looksBinary(buf: Buffer): boolean {
-  const n = Math.min(buf.length, 8000);
-  for (let i = 0; i < n; i++) {
-    if (buf[i] === 0) return true;
-  }
-  return false;
-}
 
 /** An empty manifest for cursor (all arrays empty). Kept inline so the adapter
  * does not depend on the manifest module's internals. */
@@ -197,7 +190,21 @@ async function captureFile(args: {
     return;
   }
 
-  if (looksBinary(bytes)) {
+  const decoded = decodeForCapture(bytes);
+
+  if (decoded.kind === "binary") {
+    // Fail-safe: never let a "binary" file smuggle a secret past the sanitizer.
+    // Scan every lossy view (UTF-8 + UTF-16LE/BE at both alignments) — a NUL-
+    // interleaved token is invisible to a UTF-8-only scan.
+    if (!ctx.includeSecrets) {
+      for (const view of binaryScanViews(bytes)) {
+        const scan = ctx.sanitizer.sanitizeText(view, "cursor", rel);
+        if (!scan.changed) continue;
+        warnings.push(`cursor: skipped ${rel} — binary content with secret-shaped bytes`);
+        secrets.push(...scan.found);
+        return;
+      }
+    }
     const file: CapturedFile = {
       repoPath,
       content: bytes.toString("base64"),
@@ -208,7 +215,8 @@ async function captureFile(args: {
     return;
   }
 
-  const raw = bytes.toString("utf8");
+  // UTF-16 configs are decoded to text above (never the raw base64 branch).
+  const raw = decoded.text;
   if (scanMcpSecrets) {
     try {
       secrets.push(...collectMcpSecretRefs(ctx, JSON.parse(raw), rel));

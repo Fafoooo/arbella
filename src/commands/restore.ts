@@ -101,6 +101,16 @@ import { cursorUserPaths } from "../adapters/cursor/paths.js";
 import { opencodeAdapter } from "../adapters/opencode/index.js";
 import { copilotAdapter } from "../adapters/copilot/index.js";
 import { kiloAdapter } from "../adapters/kilo/index.js";
+import {
+  antigravityAdapter,
+  planActions as antigravityPlanActions,
+} from "../adapters/antigravity/index.js";
+import {
+  GEMINI_FROZEN_PATHS,
+  antigravityHomeCandidates,
+  antigravityUserDirCandidates,
+  geminiDir,
+} from "../adapters/antigravity/paths.js";
 import { planActions as claudePlanActions } from "../adapters/claude/restore.js";
 import { planActions as codexPlanActions } from "../adapters/codex/restore.js";
 
@@ -148,6 +158,9 @@ const WIRING: readonly ToolWiring[] = [
   { id: "opencode", adapter: opencodeAdapter },
   { id: "copilot", adapter: copilotAdapter },
   { id: "kilo", adapter: kiloAdapter },
+  // Antigravity is multi-root (antigravity/files, /user, /gemini), so it ships its
+  // own planActions like Cursor — the generic single-root fallback can't map it.
+  { id: "antigravity", adapter: antigravityAdapter, planActions: antigravityPlanActions },
 ];
 
 /** Look up the wiring for a tool id (every ToolId has an entry). */
@@ -314,6 +327,12 @@ function frozenRootsForTool(
   if (tool === "cursor") {
     roots.push({ absRoot: path.join(repoToolDir, "user"), repoPrefix: "cursor/user" });
   }
+  if (tool === "antigravity") {
+    // Antigravity's VS Code User dir and shared ~/.gemini agent dir are stored as
+    // sibling roots alongside the ~/.antigravity "files" root.
+    roots.push({ absRoot: path.join(repoToolDir, "user"), repoPrefix: "antigravity/user" });
+    roots.push({ absRoot: path.join(repoToolDir, "gemini"), repoPrefix: "antigravity/gemini" });
+  }
   return roots;
 }
 
@@ -447,7 +466,13 @@ async function safetyBackup(
   return made;
 }
 
-function safetySourcesForTool(
+/**
+ * Every local path a tool's restore can WRITE, so the R14 safety backup snapshots
+ * each one before a real pull. Multi-root adapters MUST be listed here — a
+ * missing root means a repo-wins restore can overwrite it with no local snapshot
+ * to fall back to. Exported for the wiring regression test.
+ */
+export function safetySourcesForTool(
   tool: ToolId,
   os: OS,
   stamp: string,
@@ -468,6 +493,42 @@ function safetySourcesForTool(
       source: cursorUserPaths(toolHome, os, process.env).userDir,
       dest: path.join(backupsRoot, `cursor-user-${stamp}`),
     });
+  }
+
+  if (tool === "antigravity") {
+    // The 2.0 update split Antigravity's dirs on some platforms (classic
+    // "Antigravity" + ~/.antigravity vs "Antigravity IDE" + ~/.antigravity-ide),
+    // and restore probes both — so snapshot every candidate that exists (missing
+    // ones are skipped by the exists() check above). toolHome itself is already
+    // sources[0]; add the IDE-variant dotfolder alongside it.
+    for (const source of antigravityHomeCandidates(toolHome)) {
+      if (source === toolHome) continue;
+      sources.push({
+        label: `antigravity home (${path.basename(source)})`,
+        source,
+        dest: path.join(backupsRoot, `antigravity-ide-${stamp}`),
+      });
+    }
+    for (const source of antigravityUserDirCandidates(toolHome, os, process.env)) {
+      const appName = path.basename(path.dirname(source));
+      const slug = appName.toLowerCase().replace(/\s+/g, "-");
+      sources.push({
+        label: `antigravity User data (${appName})`,
+        source,
+        dest: path.join(backupsRoot, `${slug}-user-${stamp}`),
+      });
+    }
+    // ~/.gemini is SHARED with the Gemini CLI and holds large machine-local state
+    // (browser profile, session protobufs) plus live OAuth files. Snapshot ONLY
+    // the paths a restore can overwrite — never the whole dir.
+    const gemini = geminiDir(toolHome);
+    for (const rel of GEMINI_FROZEN_PATHS) {
+      sources.push({
+        label: `antigravity gemini ${rel}`,
+        source: path.join(gemini, ...rel.split("/")),
+        dest: path.join(backupsRoot, `antigravity-gemini-${stamp}`, ...rel.split("/")),
+      });
+    }
   }
 
   return sources;
@@ -818,6 +879,12 @@ function printReauthReminder(tools: ToolId[]): void {
         log.step(
           "kilo: sign in with the Kilo CLI; re-add any provider/MCP API keys in " +
             "~/.config/kilo/kilo.jsonc (their values were redacted on backup).",
+        );
+        break;
+      case "antigravity":
+        log.step(
+          "antigravity: sign in with your Google account; re-add any MCP server " +
+            "secrets in ~/.gemini/antigravity/mcp_config.json (redacted on backup).",
         );
         break;
     }

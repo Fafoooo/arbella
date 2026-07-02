@@ -30,6 +30,7 @@
 
 import path from "node:path";
 
+import { binaryScanViews, decodeForCapture } from "../../utils/capture-bytes.js";
 import type { CaptureContext } from "../adapter.interface.js";
 import type {
   CaptureResult,
@@ -68,14 +69,6 @@ const SECRET_FILES: ReadonlyArray<{ rel: string; key: string; description: strin
   },
 ];
 
-/** Heuristic: treat a file as binary if its bytes contain a NUL. */
-function looksBinary(buf: Buffer): boolean {
-  const n = Math.min(buf.length, 8000);
-  for (let i = 0; i < n; i++) {
-    if (buf[i] === 0) return true;
-  }
-  return false;
-}
 
 /** Build the repo path for a tool-home-relative POSIX path. */
 function repoPathFor(rel: string): string {
@@ -158,7 +151,21 @@ async function captureFile(
     return;
   }
 
-  if (looksBinary(bytes)) {
+  const decoded = decodeForCapture(bytes);
+
+  if (decoded.kind === "binary") {
+    // Fail-safe: never let a "binary" file smuggle a secret past the sanitizer.
+    // Scan every lossy view (UTF-8 + UTF-16LE/BE at both alignments) — a NUL-
+    // interleaved token is invisible to a UTF-8-only scan. If secret-shaped bytes
+    // are present (and we're not opted into carrying secrets), DROP the file with
+    // a warning rather than base64'ing it in raw.
+    if (
+      !ctx.includeSecrets &&
+      binaryScanViews(bytes).some((view) => ctx.sanitizer.sanitizeText(view, "claude", rel).changed)
+    ) {
+      warnings.push(`claude: skipped ${rel} — binary content with secret-shaped bytes`);
+      return;
+    }
     const file: CapturedFile = {
       repoPath: repoPathFor(rel),
       content: bytes.toString("base64"),
@@ -184,7 +191,9 @@ async function captureFile(
   // Whole-file credential stores (.credentials.json/.claude.json) remain excluded
   // by the denylist regardless — only in-place values in shareable configs are
   // carried, never the wholesale token files.
-  const raw = bytes.toString("utf8");
+  // UTF-16 files are decoded to text above, so a lone NUL byte never routes a
+  // secret-bearing config around sanitizeFile.
+  const raw = decoded.text;
   const content = ctx.includeSecrets ? raw : ctx.sanitizer.sanitizeFile(raw, "claude", rel).content;
   const templated = ctx.templater.toTemplate(content, ctx.vars);
 

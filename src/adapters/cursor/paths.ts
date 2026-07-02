@@ -10,11 +10,15 @@
  * correct on win32 as well. The `repoPath` prefix, by contrast, is a POSIX-only
  * string used inside the backup repo and is intentionally a literal.
  *
- * Cursor reality: Cursor is a desktop app and may be entirely absent (no CLI on
- * Linux). Portable global state is split between `~/.cursor` (MCP, skills,
- * rules) and the VS Code-style application User directory (settings,
- * keybindings, snippets). Runtime state, projects, workspace DBs, and extension
- * payloads remain out of scope.
+ * Cursor reality: Cursor is a desktop app and may be entirely absent (the IDE has
+ * no headless install on Linux). It ALSO ships a terminal CLI, `cursor-agent`,
+ * which SHARES this same ~/.cursor config dir (adding cli-config.json and global
+ * commands/) and does run on Linux. Portable global state is split between
+ * `~/.cursor` (MCP config, skills, rules, CLI config, commands) and the VS Code-
+ * style application User directory (settings, keybindings, snippets). The CLI's
+ * own runtime/credentials live under ~/.local/share/cursor-agent (a different
+ * home this adapter never touches); runtime state, projects, workspace DBs,
+ * worktrees, and extension payloads remain out of scope.
  */
 
 import path from "node:path";
@@ -97,7 +101,19 @@ export function cursorUserPaths(toolHome: string, os: OS, env: EnvVars = {}): Cu
  * skills are recorded as reinstallable skills.sh entries, while local skill dirs
  * are frozen just like Claude/Codex local skills.
  *
+ * The trailing three cover the Cursor CLI (cursor-agent), which shares ~/.cursor
+ * with the IDE: `cli-config.json` is its user config (editor prefs, permission
+ * allow/deny, model, notifications — no credentials), `commands/` holds global
+ * slash-command markdown shared by IDE + CLI, and `rules/` holds global rules
+ * when present (harmless if absent — capture skips missing paths).
+ *
  * NOTE: anything matching the denylist is skipped during capture regardless of
  * its presence here.
  */
-export const FROZEN_PATHS: readonly string[] = ["mcp.json", "skills"] as const;
+export const FROZEN_PATHS: readonly string[] = [
+  "mcp.json",
+  "skills",
+  "cli-config.json",
+  "commands",
+  "rules",
+] as const;

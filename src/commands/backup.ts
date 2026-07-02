@@ -87,12 +87,14 @@ import { cursorAdapter } from "../adapters/cursor/index.js";
 import { opencodeAdapter } from "../adapters/opencode/index.js";
 import { copilotAdapter } from "../adapters/copilot/index.js";
 import { kiloAdapter } from "../adapters/kilo/index.js";
+import { antigravityAdapter } from "../adapters/antigravity/index.js";
 import { capture as captureClaude } from "../adapters/claude/capture.js";
 import { capture as captureCodex } from "../adapters/codex/capture.js";
 import { capture as captureCursor } from "../adapters/cursor/index.js";
 import { capture as captureOpencode } from "../adapters/opencode/index.js";
 import { capture as captureCopilot } from "../adapters/copilot/index.js";
 import { capture as captureKilo } from "../adapters/kilo/index.js";
+import { capture as captureAntigravity } from "../adapters/antigravity/index.js";
 
 import type { Adapter } from "../adapters/adapter.interface.js";
 import { getPackageVersion } from "../core/version.js";
@@ -172,6 +174,8 @@ function toolCaptureFor(tool: ToolId): ToolCapture {
       return { adapter: copilotAdapter, capture: captureCopilot };
     case "kilo":
       return { adapter: kiloAdapter, capture: captureKilo };
+    case "antigravity":
+      return { adapter: antigravityAdapter, capture: captureAntigravity };
   }
 }
 
@@ -422,7 +426,9 @@ function toolFilesPrefix(tool: ToolId): string {
  * Replace a captured tool's frozen subtree wholesale, then write its fresh files
  * + symlinks + manifest. Removing each owned repo data root first makes the
  * backup a true mirror: files deleted locally disappear from the repo on the next
- * backup. Cursor owns an extra `cursor/user` root for application User data.
+ * backup. Cursor owns an extra `cursor/user` root for application User data;
+ * Antigravity owns `antigravity/user` + `antigravity/gemini` alongside its
+ * `antigravity/files` root.
  *
  * NOTE: memories (when included) are emitted by the codex adapter under
  * `codex/files/memories/...`, so they live inside the same subtree and are
@@ -449,9 +455,17 @@ async function replaceToolFiles(repoRoot: string, result: CaptureResult): Promis
   await fs.write(manifestPath, serialize(result.manifest));
 }
 
-function toolRepoDataRoots(tool: ToolId): string[] {
+/**
+ * Every repo data root a tool's capture OWNS (and the backup therefore mirrors:
+ * each is wiped before fresh capture output is written, and each anchors the
+ * generated .gitignore's scoped rules). Multi-root adapters MUST be listed here —
+ * a missing root means locally-deleted files linger in the repo and get
+ * resurrected by a later pull. Exported for the wiring regression test.
+ */
+export function toolRepoDataRoots(tool: ToolId): string[] {
   const roots = [toolFilesPrefix(tool)];
   if (tool === "cursor") roots.push("cursor/user");
+  if (tool === "antigravity") roots.push("antigravity/user", "antigravity/gemini");
   return roots;
 }
 
@@ -499,6 +513,8 @@ function toolLabel(tool: ToolId): string {
       return "GitHub Copilot CLI";
     case "kilo":
       return "Kilo Code";
+    case "antigravity":
+      return "Antigravity";
   }
 }
 

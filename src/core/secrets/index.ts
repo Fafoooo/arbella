@@ -239,6 +239,11 @@ const SECRET_FILES_BY_TOOL: Record<ToolId, ReadonlyArray<{ relPath: string; desc
   kilo: [
     // Kilo CLI keeps no portable flat credential file under ~/.config/kilo.
   ],
+  antigravity: [
+    // Antigravity signs in with a Google account (OAuth). Its tokens live in
+    // ~/.gemini/oauth_creds.json + the OS keychain — never captured — so there is
+    // no portable credential file to bundle. Re-authenticate after a restore.
+  ],
 };
 
 /**

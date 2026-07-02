@@ -423,6 +423,7 @@ export const DEPENDENCY_IDS: readonly DependencyId[] = [
   "opencode",
   "copilot",
   "kilo",
+  "antigravity",
 ] as const;
 
 /**
@@ -608,6 +609,30 @@ export const DEPENDENCIES: Readonly<Record<DependencyId, DependencySpec>> = {
     recommended: false,
     strong: false,
     install: npmEverywhere("@kilocode/cli"),
+  },
+  antigravity: {
+    id: "antigravity",
+    label: "Antigravity",
+    why: "Google Antigravity (IDE + agent) — backed up/restored by arbella.",
+    binary: cliBinaryName("antigravity"),
+    recommended: false,
+    strong: false,
+    // A desktop app downloaded from antigravity.google — no package-manager
+    // install on any OS. Setup reports the download URL and skips.
+    install: {
+      darwin: {
+        kind: "none",
+        reason: "Antigravity is a desktop app — download it from https://antigravity.google.",
+      },
+      linux: {
+        kind: "none",
+        reason: "Antigravity is a desktop app — download it from https://antigravity.google.",
+      },
+      win32: {
+        kind: "none",
+        reason: "Antigravity is a desktop app — download it from https://antigravity.google.",
+      },
+    },
   },
 };
 

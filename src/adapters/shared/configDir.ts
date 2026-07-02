@@ -32,6 +32,7 @@ import type {
 
 import { denylistFor, matchesDeny } from "../../core/sanitizer/denylist.js";
 import { normalizeCapturedSymlinkTarget } from "../../utils/symlink.js";
+import { binaryScanViews, decodeForCapture } from "../../utils/capture-bytes.js";
 
 /** What a config-dir adapter must declare for the shared engine to do its work. */
 export interface ConfigDirSpec {
@@ -67,14 +68,6 @@ function relFromRepoPath(tool: ToolId, repoPath: string): string | undefined {
   return norm.startsWith(prefix) ? norm.slice(prefix.length) : undefined;
 }
 
-/** Heuristic: treat a file as binary if its first chunk contains a NUL byte. */
-function looksBinary(buf: Buffer): boolean {
-  const n = Math.min(buf.length, 8000);
-  for (let i = 0; i < n; i++) {
-    if (buf[i] === 0) return true;
-  }
-  return false;
-}
 
 /** An empty manifest for a config-dir tool (these tools track no plugins here:
  * opencode/kilo declare plugins inside their config file, which is captured as a
@@ -123,14 +116,31 @@ async function captureFile(args: {
     return;
   }
 
-  if (looksBinary(bytes)) {
+  const decoded = decodeForCapture(bytes);
+
+  if (decoded.kind === "binary") {
+    // Fail-safe: never let a "binary" file smuggle a secret past the sanitizer.
+    // Scan every lossy view (UTF-8 + UTF-16LE/BE at both alignments) — a NUL-
+    // interleaved token is invisible to a UTF-8-only scan. On any hit, DROP the
+    // file (never store raw) + record refs.
+    if (!ctx.includeSecrets) {
+      for (const view of binaryScanViews(bytes)) {
+        const scan = ctx.sanitizer.sanitizeText(view, tool, rel);
+        if (!scan.changed) continue;
+        warnings.push(`${tool}: skipped ${rel} — binary content with secret-shaped bytes`);
+        secrets.push(...scan.found);
+        return;
+      }
+    }
     const file: CapturedFile = { repoPath, content: bytes.toString("base64"), binary: true };
     if (mode !== undefined) file.mode = mode;
     files.push(file);
     return;
   }
 
-  const raw = bytes.toString("utf8");
+  // UTF-16 configs are decoded to text above, so a lone NUL byte never routes a
+  // secret-bearing config around sanitizeFile.
+  const raw = decoded.text;
   let content = raw;
   if (!ctx.includeSecrets) {
     // sanitizeFile structurally redacts JSON/JSONC config (secret-key-aware) and
