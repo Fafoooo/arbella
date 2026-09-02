@@ -27,10 +27,10 @@ import type {
   RestoreAction,
   SecretRef,
   ToolId,
-  ToolManifest,
 } from "../../types.js";
 
 import { denylistFor, matchesDeny } from "../../core/sanitizer/denylist.js";
+import { emptyManifest } from "../../core/manifest/index.js";
 import { normalizeCapturedSymlinkTarget } from "../../utils/symlink.js";
 import { binaryScanViews, decodeForCapture } from "../../utils/capture-bytes.js";
 
@@ -68,20 +68,6 @@ function relFromRepoPath(tool: ToolId, repoPath: string): string | undefined {
   return norm.startsWith(prefix) ? norm.slice(prefix.length) : undefined;
 }
 
-
-/** An empty manifest for a config-dir tool (these tools track no plugins here:
- * opencode/kilo declare plugins inside their config file, which is captured as a
- * frozen file, so there is nothing to reinstall from a separate manifest). */
-function emptyConfigManifest(tool: ToolId): ToolManifest {
-  return {
-    tool,
-    plugins: [],
-    marketplaces: [],
-    skills: [],
-    npmGlobals: [],
-    enabledPlugins: {},
-  };
-}
 
 /** Read mode bits best-effort so executable helper files keep their mode. */
 async function readMode(abs: string): Promise<number | undefined> {
@@ -215,7 +201,7 @@ export async function captureConfigDir(
   const symlinks: CapturedSymlink[] = [];
   const secrets: SecretRef[] = [];
   const warnings: string[] = [];
-  const manifest = emptyConfigManifest(spec.tool);
+  const manifest = emptyManifest(spec.tool);
   const home = ctx.toolHome;
   const deny = denylistFor(spec.tool);
 

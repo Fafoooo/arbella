@@ -20,6 +20,9 @@
  *   5. Diff the would-be repo paths against what is committed on disk under
  *      repo.localPath: classify each as added / changed / unchanged, and find
  *      committed tool files that are no longer produced (removed).
+ *   5b. Split the cross-tool `shared/home` files out of the per-tool results,
+ *      merge them with a fresh `extraPaths` pass, and diff that set as ONE
+ *      repo-level section (they belong to no single tool).
  *   6. Diff each tool's would-be manifest against the committed manifest.json to
  *      surface plugin / marketplace / skill / npm-global / enabled-plugin drift.
  *   7. Print a human table to STDERR (via log), or a machine-readable JSON report
@@ -64,8 +67,23 @@ import {
   buildSharedInstructionsFile,
   SHARED_INSTRUCTIONS_REPO_PATH,
 } from "../core/manifest/index.js";
+import type { HomeCaptureOut } from "../core/homefiles/capture.js";
+import {
+  SHARED_HOME_REPO_PREFIX,
+  captureExtraPaths,
+  computeAlreadyCaptured,
+  homeExcludeRoots,
+  isSharedHomePath,
+} from "../core/homefiles/capture.js";
+import {
+  EXTRA_PATHS_ORIGIN,
+  HOME_INDEX_REPO_PATH,
+  mergeHomeIndex,
+  parseHomeIndex,
+} from "../core/homefiles/home-index.js";
 
 import { claudeAdapter } from "../adapters/claude/index.js";
+import { listUnmanagedEntries } from "../adapters/claude/paths.js";
 import { codexAdapter } from "../adapters/codex/index.js";
 import { cursorAdapter } from "../adapters/cursor/index.js";
 import { opencodeAdapter } from "../adapters/opencode/index.js";
@@ -116,7 +134,9 @@ export interface ManifestDrift {
     | "marketplaces"
     | "skills"
     | "npmGlobals"
-    | "enabledPlugins";
+    | "enabledPlugins"
+    | "mcpServers"
+    | "externalTools";
   /** Items present locally but not in the committed manifest. */
   added: string[];
   /** Items present in the committed manifest but no longer produced locally. */
@@ -137,6 +157,12 @@ export interface ToolStatus {
   secrets: Array<{ source: string; key: string; kind: SecretRef["kind"]; description: string }>;
   /** Non-fatal warnings surfaced by capture (missing optional files, etc.). */
   warnings: string[];
+  /**
+   * Top-level entries of the tool home arbella neither captures nor knowingly
+   * ignores — the "you have stuff here we don't carry" hint. Empty for tools that
+   * have no such probe yet.
+   */
+  unmanaged: string[];
 }
 
 export interface StatusReport {
@@ -216,6 +242,14 @@ export async function run(opts: StatusOptions): Promise<void> {
 
   // --- Per-tool capture + diff ---------------------------------------------
   const toolStatuses: ToolStatus[] = [];
+  /**
+   * shared/home files every adapter would emit this run, WITH the tool that
+   * produced each (see the shared diff — the provenance decides what counts as
+   * removed, exactly as it does on a push).
+   */
+  const homeFiles: Array<{ file: CapturedFile; origin: string }> = [];
+  /** Every tool's raw CaptureResult this run, for computeAlreadyCaptured(). */
+  const captureResults: CaptureResult[] = [];
 
   for (const tool of config.tools) {
     const wiring = ADAPTERS[tool];
@@ -231,6 +265,7 @@ export async function run(opts: StatusOptions): Promise<void> {
         manifest: [],
         secrets: [],
         warnings: [`${tool}: not present on this machine; nothing to back up.`],
+        unmanaged: [],
       });
       continue;
     }
@@ -249,15 +284,25 @@ export async function run(opts: StatusOptions): Promise<void> {
         manifest: [],
         secrets: [],
         warnings: [`${tool}: capture failed: ${errMessage(err)}`],
+        unmanaged: await unmanagedFor(tool),
       });
       continue;
     }
 
-    const fileChanges = await diffFiles(repoRoot, result.files, result.symlinks);
+    captureResults.push(result);
+
+    // shared/home files are CROSS-TOOL: they belong to the repo-level "shared"
+    // section, not to the tool that happened to discover them.
+    const toolFiles = result.files.filter((f) => !isSharedHomePath(f.repoPath));
+    for (const file of result.files) {
+      if (isSharedHomePath(file.repoPath)) homeFiles.push({ file, origin: result.tool });
+    }
+
+    const fileChanges = await diffFiles(repoRoot, toolFiles, result.symlinks);
     const removed = await findRemovedToolFiles(
       repoRoot,
       tool,
-      expectedRepoPathsForTool(result.files, result.symlinks),
+      expectedRepoPathsForTool(toolFiles, result.symlinks),
     );
     fileChanges.push(...removed);
 
@@ -275,6 +320,7 @@ export async function run(opts: StatusOptions): Promise<void> {
         description: s.description,
       })),
       warnings: result.warnings,
+      unmanaged: await unmanagedFor(tool),
     });
   }
 
@@ -290,6 +336,11 @@ export async function run(opts: StatusOptions): Promise<void> {
       sharedChanges.push({ repoPath: SHARED_INSTRUCTIONS_REPO_PATH, kind: "removed" });
     }
   }
+
+  // --- shared/home diff (WP-B) ---------------------------------------------
+  sharedChanges.push(
+    ...(await diffSharedHome(repoRoot, homeFiles, config.extraPaths, config, captureResults)),
+  );
 
   const clean =
     sharedChanges.length === 0 &&
@@ -344,6 +395,115 @@ function buildCaptureContext(
     includeMemories,
     dryRun: true,
   };
+}
+
+/* -------------------------------------------------------------------------- */
+/* shared/home diffing (WP-B)                                                  */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Diff the cross-tool `shared/home` root exactly as `arbella push` would write
+ * it: the linked scripts the adapters discovered (already collected from their
+ * capture results) merged with a fresh `extraPaths` pass, deduped first-wins,
+ * then compared against what is committed — including files that are committed
+ * but would no longer be produced ("removed").
+ *
+ * Capture-side warnings from the extraPaths pass are surfaced as log lines
+ * rather than folded into a tool's `warnings`, because they belong to no tool.
+ *
+ * `extraPaths` may reach INSIDE a tool home (see the module doc in
+ * core/homefiles/capture.ts), so `captureResults` — this run's raw per-tool
+ * CaptureResults — is turned into an `alreadyCaptured` set and passed through,
+ * mirroring what `arbella push` does, so a file the tool already captured is
+ * not also reported as a new "added" shared/home entry.
+ *
+ * Exported for the mirror regression test: status and push have to agree about
+ * what "removed" means, and only a test that drives both can show that.
+ */
+export async function diffSharedHome(
+  repoRoot: string,
+  adapterFiles: Array<{ file: CapturedFile; origin: string }>,
+  extraPaths: string[],
+  config: { includeSecrets: boolean },
+  captureResults: CaptureResult[],
+): Promise<FileChange[]> {
+  const out: HomeCaptureOut = { files: [], secrets: [], warnings: [] };
+  if (extraPaths.length > 0) {
+    await captureExtraPaths(
+      {
+        fs,
+        log,
+        sanitizer,
+        templater,
+        vars: buildVariables(),
+        os: detectOS(),
+        env: process.env,
+        includeSecrets: config.includeSecrets,
+      },
+      extraPaths,
+      "claude",
+      out,
+      {
+        excludeRoots: homeExcludeRoots(),
+        alreadyCaptured: computeAlreadyCaptured(captureResults, toolHomeDir),
+      },
+    );
+    for (const warning of out.warnings) log.warn(warning);
+  }
+
+  // First wins, exactly as the push merges them: adapters (in capture order),
+  // then extraPaths.
+  const seen = new Set<string>();
+  const produced: Array<{ file: CapturedFile; origin: string }> = [];
+  for (const entry of [
+    ...adapterFiles,
+    ...out.files.map((file) => ({ file, origin: EXTRA_PATHS_ORIGIN })),
+  ]) {
+    if (seen.has(entry.file.repoPath)) continue;
+    seen.add(entry.file.repoPath);
+    produced.push(entry);
+  }
+
+  const changes: FileChange[] = [];
+  for (const entry of produced) {
+    const change = await classifyFile(repoRoot, entry.file);
+    if (change.kind !== "unchanged") changes.push(change);
+  }
+
+  // "Removed" uses the SAME provenance rule the push applies, so status cannot
+  // announce a deletion that the push then declines to make: a committed file
+  // whose every origin is a tool absent from this run is kept, not removed.
+  const merge = mergeHomeIndex(
+    parseHomeIndex(await readJsonIfExists(repoAbsPath(repoRoot, HOME_INDEX_REPO_PATH))),
+    produced.map((entry) => ({ repoPath: entry.file.repoPath, origin: entry.origin })),
+    new Set<string>([...captureResults.map((r) => r.tool), EXTRA_PATHS_ORIGIN]),
+  );
+  const expectedPaths = new Set(merge.expected);
+
+  const committed = await walkRepoFiles(
+    repoAbsPath(repoRoot, SHARED_HOME_REPO_PREFIX),
+    SHARED_HOME_REPO_PREFIX,
+  );
+  for (const entry of committed) {
+    if (expectedPaths.has(entry.repoPath)) continue;
+    changes.push({
+      repoPath: entry.repoPath,
+      kind: "removed",
+      ...(entry.symlink ? { symlink: true } : {}),
+    });
+  }
+
+  return sortChanges(changes);
+}
+
+/**
+ * The "not backed up" probe for a tool. Only Claude has one today (its home is
+ * the one that accumulates third-party dirs); every other tool reports nothing
+ * rather than pretending the list is exhaustive.
+ */
+async function unmanagedFor(tool: ToolId): Promise<string[]> {
+  if (tool !== "claude") return [];
+  return listUnmanagedEntries(toolHomeDir("claude"), fs);
 }
 
 /* -------------------------------------------------------------------------- */
@@ -541,7 +701,32 @@ async function diffManifest(
   );
   if (hasDrift(enabledDrift)) drifts.push(enabledDrift);
 
+  const mcpDrift = diffKeyed(
+    "mcpServers",
+    namedMcpServers(committed?.mcpServers ?? {}),
+    namedMcpServers(local.mcpServers),
+    (m) => m.name,
+    (m) => serialize(m.def),
+  );
+  if (hasDrift(mcpDrift)) drifts.push(mcpDrift);
+
+  const externalDrift = diffKeyed(
+    "externalTools",
+    committed?.externalTools ?? [],
+    local.externalTools,
+    (t) => `${t.manager}:${t.name}`,
+    (t) => serialize(t),
+  );
+  if (hasDrift(externalDrift)) drifts.push(externalDrift);
+
   return drifts;
+}
+
+/** Flatten an mcpServers map into keyed entries so diffKeyed can consume it. */
+function namedMcpServers(
+  map: ToolManifest["mcpServers"],
+): Array<{ name: string; def: unknown }> {
+  return Object.entries(map).map(([name, def]) => ({ name, def }));
 }
 
 /**
@@ -698,6 +883,17 @@ async function readIfExists(absPath: string): Promise<string | undefined> {
   }
 }
 
+/** Parse a JSON file, or undefined when absent/unreadable/invalid. Never throws. */
+async function readJsonIfExists(absPath: string): Promise<unknown | undefined> {
+  const raw = await readIfExists(absPath);
+  if (raw === undefined) return undefined;
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return undefined;
+  }
+}
+
 /** True when the working copy already has committed content (not a fresh dir). */
 async function isRepoInitialized(repoRoot: string): Promise<boolean> {
   if (!(await fs.exists(repoRoot))) return false;
@@ -795,6 +991,17 @@ function printHuman(report: StatusReport): void {
       for (const id of drift.added) log.step(`  + ${id}`);
       for (const id of drift.changed) log.step(`  ~ ${id}`);
       for (const id of drift.removed) log.step(`  - ${id}`);
+    }
+
+    if (tool.unmanaged.length > 0) {
+      // extraPaths can carry an entry from inside the tool's own home (e.g.
+      // ~/.claude/.agents) — see core/homefiles/capture.ts. unmanagedFor()
+      // only ever populates this for "claude" today, so `~/.${tool}/` is the
+      // real home for the example this hint shows.
+      log.step(
+        `not backed up (unknown to arbella): ${tool.unmanaged.join(", ")} — ` +
+          `list them in extraPaths (e.g. ~/.${tool.tool}/${tool.unmanaged[0]}) to carry them`,
+      );
     }
 
     if (tool.secrets.length > 0) {

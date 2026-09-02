@@ -15,6 +15,17 @@
  *     expanded back to the target machine's home, and the shared instructions
  *     deploy to BOTH ~/.claude/CLAUDE.md and ~/.codex/AGENTS.md. No secret files
  *     are recreated (they were never captured).
+ *   - WIDER CLAUDE SET (WP-A): rules/, scripts/ and keybindings.json round-trip,
+ *     a settings.json.bak-* dropping is NOT captured, ~/.claude.json's MCP servers
+ *     reach the manifest while its oauthAccount/userID reach nothing at all, and a
+ *     per-project memory lands under claude/memories/ and restores into the fresh
+ *     $HOME's own project slug.
+ *   - SHARED HOME (WP-B): the scripts the configs POINT AT but that live outside
+ *     every tool home (a hook dispatcher under ~/.agents, an MCP launcher under
+ *     ~/.local/bin), the claude-mem companion config, and a configured
+ *     `extraPaths` dir all land under shared/home/… with their secrets redacted
+ *     and their exec bits intact — while a hook script that lives INSIDE
+ *     ~/.claude is never duplicated there.
  *
  * npm/CLI shell-outs are mocked away so the test is hermetic, fast, and offline.
  */
@@ -33,10 +44,33 @@ vi.mock("../../src/platform/install.js", () => ({
   installCli: async () => undefined,
   ensureCli: async () => undefined,
   runInstall: async () => undefined,
+  // WP-C: a deterministic stand-in for the PATH probe. An absolute path still
+  // has to EXIST (matching the real resolveBinaryPath), and exactly one bare
+  // name is "installed" on this fake machine — via `uv tool install`.
+  resolveBinaryPath: async (name: string) => {
+    if (name.startsWith("/")) {
+      try {
+        const { promises: fsp } = await import("node:fs");
+        await fsp.access(name);
+        return name;
+      } catch {
+        return null;
+      }
+    }
+    return name === "codegraph" ? UV_TOOL_BIN : null;
+  },
+  realPathOrSelf: async (binaryPath: string) => binaryPath,
 }));
+
+/** Where the mocked resolver claims the `codegraph` MCP binary lives (uv layout). */
+const UV_TOOL_BIN = "/opt/fake-uv/uv/tools/codegraph/bin/codegraph";
 
 import { capture as captureClaude } from "../../src/adapters/claude/capture.js";
 import { restore as restoreClaude } from "../../src/adapters/claude/restore.js";
+import {
+  MEMORIES_REPO_PREFIX,
+  slugifyPath,
+} from "../../src/adapters/claude/memories.js";
 import { capture as captureCodex } from "../../src/adapters/codex/capture.js";
 import { restore as restoreCodex } from "../../src/adapters/codex/restore.js";
 import {
@@ -49,7 +83,18 @@ import { fs as realFs } from "../../src/utils/fs.js";
 import { createSanitizer } from "../../src/core/sanitizer/index.js";
 import { createTemplater } from "../../src/core/templater/index.js";
 import { makeVariables } from "../../src/core/templater/variables.js";
-import { loadRestoreData } from "../../src/commands/restore.js";
+import { loadRestoreData, loadHomeFiles } from "../../src/commands/restore.js";
+import type {
+  HomeCaptureContext,
+  HomeCaptureOut,
+} from "../../src/core/homefiles/capture.js";
+import {
+  SHARED_HOME_REPO_PREFIX,
+  captureExtraPaths,
+  dedupeByRepoPath,
+  isSharedHomePath,
+} from "../../src/core/homefiles/capture.js";
+import { restoreHomeFiles } from "../../src/core/homefiles/restore.js";
 import {
   shouldShareInstructions,
   buildSharedInstructionsFile,
@@ -80,6 +125,15 @@ const CURSOR_MCP_SECRET = "sk-ant-api03-CURSOR-MCP-SECRET-HHHHHHHHHHHHH";
 // the STRUCTURAL key-name-aware capture path (sanitizeFile) redacts it; the old
 // value-only sanitizeText path would have leaked it verbatim into the repo.
 const SETTINGS_OPAQUE_SECRET = "corp-gateway-OPAQUE-EEEEEEEE-no-known-prefix";
+// ~/.claude.json: the OAuth payload that must never reach the repo, plus an MCP
+// env value that must come back redacted.
+const GLOBAL_STATE_OAUTH_TOKEN = "sk-ant-oat01-GLOBAL-STATE-IIIIIIIIIIIIIIIIIIII";
+const GLOBAL_STATE_USER_ID = "acct_GLOBAL_STATE_USERID_JJJJJJJJ";
+const GLOBAL_MCP_ENV_SECRET = "glpat-GLOBAL-MCP-ENV-KKKKKKKKKKKKK";
+// WP-B: secrets that live in $HOME files OUTSIDE every tool home.
+const HOME_SCRIPT_TOKEN = "sk-ant-api03-HOME-SCRIPT-LLLLLLLLLLLLLLLLLLLL";
+const CLAUDE_MEM_API_KEY = "sk-ant-api03-CLAUDE-MEM-MMMMMMMMMMMMMMMMMMMM";
+const HOME_DOTENV_SECRET = "sk-ant-api03-HOME-DOTENV-NNNNNNNNNNNNNNNNNNNN";
 
 /** Shared instructions content (identical in CLAUDE.md and AGENTS.md). */
 const SHARED_MD = "# Global AI instructions\n\n- Be concise.\n- Prefer absolute paths.\n";
@@ -152,6 +206,10 @@ let claudeCapture: CaptureResult;
 let codexCapture: CaptureResult;
 let cursorCapture: CaptureResult;
 let sharedFile: CapturedFile;
+/** The `extraPaths` pass the backup command runs after the adapters (WP-B). */
+let extraHomeCapture: HomeCaptureOut;
+/** Adapter shared/home files + extraPaths, merged first-wins like backup.ts. */
+let mergedHomeFiles: CapturedFile[];
 
 /** Absolute, OS-correct path under a tool home from a POSIX-ish rel path. */
 function under(home: string, rel: string): string {
@@ -182,6 +240,21 @@ beforeAll(async () => {
     model: "claude-sonnet",
     statusLine: { command: `${srcHome}/.claude/statusline/run.sh` },
     sharedDir: `${srcHome}/.agents/skills`,
+    // WP-B: a hook chain that reaches OUT of ~/.claude (the dispatcher), one that
+    // stays INSIDE it (send_event.py, already covered by claude/files), and one
+    // that points at a credential file which must never be carried.
+    hooks: {
+      PreToolUse: [
+        {
+          matcher: "*",
+          hooks: [
+            { type: "command", command: "bash ~/.agents/hooks/dispatch.sh --json" },
+            { type: "command", command: `python3 ${srcHome}/.claude/hooks/send_event.py` },
+            { type: "command", command: "cat ~/.env" },
+          ],
+        },
+      ],
+    },
     mcpServers: {
       weather: {
         command: "npx",
@@ -215,6 +288,117 @@ beforeAll(async () => {
   // A denylisted DB sidecar to prove COMMON_DENY exclusion too.
   await writeFile(claudeSrc, "telemetry.sqlite", "binary-ish-db-bytes");
 
+  // ---- WP-A: the wider frozen set ----
+  // rules/ is referenced by CLAUDE.md; scripts/ holds the hook dispatchers that
+  // settings.json points at; keybindings.json is plain user config whose "key"
+  // entries must survive the secret-key heuristics.
+  await writeFile(
+    claudeSrc,
+    "rules/ecc/common/coding-style.md",
+    `Style rules. See ${srcHome}/.claude/rules/ecc/README.md\n`,
+  );
+  await writeFile(claudeSrc, "scripts/dispatch.sh", "#!/bin/sh\nexec \"$@\"\n", 0o755);
+  await writeFile(
+    claudeSrc,
+    "keybindings.json",
+    JSON.stringify([{ key: "cmd+k", command: "arbella.push" }], null, 2),
+  );
+  // Editor/tool droppings that must NEVER be captured.
+  await writeFile(claudeSrc, "settings.json.bak-routing-20260829", "{\"stale\":true}");
+  await writeFile(claudeSrc, "scripts/dispatch.sh.bak", "#!/bin/sh\n# old\n");
+  // A hook script INSIDE the tool home: captured under claude/files, and it must
+  // NOT be duplicated into shared/home just because a hook references it.
+  await writeFile(claudeSrc, "hooks/send_event.py", "print('event')\n", 0o755);
+
+  // ---- WP-B: files in $HOME but OUTSIDE every tool home ----
+  // The hook dispatcher settings.json points at: executable, references other
+  // $HOME paths (must template) and carries an inline token (must redact).
+  await writeFile(
+    srcHome,
+    ".agents/hooks/dispatch.sh",
+    "#!/bin/sh\n" +
+      `. ${srcHome}/.agents/lib/common.sh\n` +
+      `export API_TOKEN=${HOME_SCRIPT_TOKEN}\n` +
+      `exec ${srcHome}/.agents/hooks/handoff-offer.sh "$@"\n`,
+    0o755,
+  );
+  // The MCP launcher ~/.claude.json points at.
+  await writeFile(
+    srcHome,
+    ".local/bin/serena-mcp-start",
+    "#!/bin/sh\nexec uv tool run serena-agent \"$@\"\n",
+    0o755,
+  );
+  // A credential file a (misguided) hook references: NEVER carried.
+  await writeFile(srcHome, ".env", `ANTHROPIC_API_KEY=${HOME_DOTENV_SECRET}\n`);
+  // The claude-mem plugin's companion config (reinstalled from the manifest, but
+  // its own settings live outside ~/.claude).
+  await writeFile(
+    srcHome,
+    ".claude-mem/settings.json",
+    JSON.stringify(
+      { archiveMode: "full", ANTHROPIC_API_KEY: CLAUDE_MEM_API_KEY },
+      null,
+      2,
+    ),
+  );
+  // An extraPaths directory (user-authored content nothing links to).
+  await writeFile(
+    srcHome,
+    ".agents/memory/PROJECTS.md",
+    `Memory notes. Repos live in ${srcHome}/programming.\n`,
+  );
+  await writeFile(srcHome, ".agents/memory/scratch.log", "noise that must not travel\n");
+
+  // ---- WP-A: ~/.claude.json (SIBLING of the tool home) ----
+  // Only mcpServers / projects.*.mcpServers may be lifted out of it.
+  const claudeProjectDir = path.join(srcHome, "programming", "arbella");
+  await fsp.mkdir(claudeProjectDir, { recursive: true });
+  await writeFile(
+    srcHome,
+    ".claude.json",
+    JSON.stringify(
+      {
+        numStartups: 91,
+        userID: GLOBAL_STATE_USER_ID,
+        oauthAccount: {
+          emailAddress: "fab@example.com",
+          accessToken: GLOBAL_STATE_OAUTH_TOKEN,
+        },
+        mcpServers: {
+          serena: {
+            command: `${srcHome}/.local/bin/serena-mcp-start`,
+            args: ["--stdio"],
+            env: { SERENA_TOKEN: GLOBAL_MCP_ENV_SECRET },
+          },
+          // WP-C: a bare command name whose binary a package manager installed —
+          // the launcher above is carried as a FILE, this one must be recorded as
+          // an external tool to reinstall.
+          codegraph: { command: "codegraph", args: ["mcp"] },
+        },
+        projects: {
+          [claudeProjectDir]: { mcpServers: { local: { command: "local-mcp" } } },
+        },
+      },
+      null,
+      2,
+    ),
+    0o600,
+  );
+
+  // ---- WP-A: a per-project memory (includeMemories) ----
+  await writeFile(
+    claudeSrc,
+    `projects/${slugifyPath(srcHome)}-programming-arbella/memory/MEMORY.md`,
+    `Arbella notes. Code at ${srcHome}/programming/arbella\n`,
+  );
+  // Session state alongside it must stay behind.
+  await writeFile(
+    claudeSrc,
+    `projects/${slugifyPath(srcHome)}-programming-arbella/history.jsonl`,
+    "{}\n",
+  );
+
   // ---- ~/.codex ----
   const configToml = [
     "model = \"o4\"",
@@ -233,6 +417,23 @@ beforeAll(async () => {
   await writeFile(codexSrc, "config.toml", configToml);
   // Byte-identical to CLAUDE.md.
   await writeFile(codexSrc, "AGENTS.md", SHARED_MD);
+	  // WP-B: a codex hook pointing at a script outside ~/.codex.
+	  await writeFile(
+	    codexSrc,
+	    "hooks.json",
+	    JSON.stringify(
+	      {
+	        hooks: {
+	          SessionStart: [
+	            { hooks: [{ type: "command", command: "~/.local/bin/graphify update ." }] },
+	          ],
+	        },
+	      },
+	      null,
+	      2,
+	    ),
+	  );
+	  await writeFile(srcHome, ".local/bin/graphify", "#!/bin/sh\necho graphify\n", 0o755);
 	  await writeFile(codexSrc, "prompts/review.md", "Review prompt body.\n");
 	  // FAKE SECRET FILE — excluded wholesale.
 	  await writeFile(codexSrc, "auth.json", `{"token":"${CODEX_AUTH_SECRET}"}`, 0o600);
@@ -299,9 +500,10 @@ beforeAll(async () => {
   const share = shouldShareInstructions(claudeMd, agentsMd);
   expect(share).toBe(true); // identical -> dedupe path is exercised
 
-  claudeCapture = await captureClaude(makeCaptureCtx(claudeSrc, claudeVars), {
-    skipInstructions: share,
-  });
+  claudeCapture = await captureClaude(
+    { ...makeCaptureCtx(claudeSrc, claudeVars), includeMemories: true },
+    { skipInstructions: share },
+  );
 	  codexCapture = await captureCodex(makeCaptureCtx(codexSrc, codexVars), {
 	    skipInstructions: share,
 	  });
@@ -309,6 +511,27 @@ beforeAll(async () => {
 	    skipInstructions: share,
 	  });
 	  sharedFile = buildSharedInstructionsFile(SHARED_MD);
+
+	  // ---- WP-B: the extraPaths pass + the cross-tool shared/home merge -------
+	  // Mirrors src/commands/backup.ts: adapters first (in capture order), then
+	  // extraPaths, deduped by repoPath.
+	  const homeCtx: HomeCaptureContext = {
+	    ...makeCaptureCtx(srcHome, makeVariables(srcHome, "fab", "linux")),
+	    includeSecrets: false,
+	  };
+	  extraHomeCapture = { files: [], secrets: [], warnings: [] };
+	  await captureExtraPaths(
+	    homeCtx,
+	    ["~/.agents/memory", "/etc/hosts"],
+	    "claude",
+	    extraHomeCapture,
+	    { excludeRoots: [claudeSrc, codexSrc, cursorSrc] },
+	  );
+	  mergedHomeFiles = dedupeByRepoPath([
+	    ...claudeCapture.files.filter((f) => isSharedHomePath(f.repoPath)),
+	    ...codexCapture.files.filter((f) => isSharedHomePath(f.repoPath)),
+	    ...extraHomeCapture.files,
+	  ]);
 });
 
 afterAll(async () => {
@@ -400,8 +623,36 @@ describe("capture: secrets never leave the machine", () => {
     expect(settings.content).toContain("{{REDACTED}}");
   });
 
-  it("excludes denylisted junk (the .sqlite sidecar)", () => {
+  it("excludes denylisted junk (the .sqlite sidecar and the .bak droppings)", () => {
     expect(findFile(claudeCapture.files, "claude/files/telemetry.sqlite")).toBeUndefined();
+    expect(
+      findFile(claudeCapture.files, "claude/files/settings.json.bak-routing-20260829"),
+    ).toBeUndefined();
+    expect(findFile(claudeCapture.files, "claude/files/scripts/dispatch.sh.bak")).toBeUndefined();
+    // ...and the stale copy's content never reaches the repo either.
+    expect(allCapturedText()).not.toContain('{"stale":true}');
+  });
+
+  it("lifts ONLY mcpServers out of ~/.claude.json (WP-A)", () => {
+    const blob = allCapturedText() + JSON.stringify(claudeCapture.manifest);
+    // The account payload is absent by VALUE and by KEY NAME.
+    expect(blob).not.toContain(GLOBAL_STATE_OAUTH_TOKEN);
+    expect(blob).not.toContain(GLOBAL_STATE_USER_ID);
+    expect(blob).not.toContain("oauthAccount");
+    expect(blob).not.toContain("numStartups");
+    // ~/.claude.json itself is never a captured file, under any prefix.
+    expect(claudeCapture.files.some((f) => f.repoPath.includes(".claude.json"))).toBe(false);
+
+    // The servers DID make it, sanitized + templated.
+    const serena = claudeCapture.manifest.mcpServers.serena as Record<string, unknown>;
+    expect(serena).toBeDefined();
+    expect(serena.command).toBe("{{HOME}}/.local/bin/serena-mcp-start");
+    expect((serena.env as Record<string, unknown>).SERENA_TOKEN).toBe("{{REDACTED}}");
+    expect(blob).not.toContain(GLOBAL_MCP_ENV_SECRET);
+
+    expect(claudeCapture.manifest.projectMcpServers).toEqual([
+      { projectPath: "{{HOME}}/programming/arbella", servers: { local: { command: "local-mcp" } } },
+    ]);
   });
 });
 
@@ -480,6 +731,144 @@ describe("capture: machine paths become placeholders", () => {
 	  });
 	});
 
+describe("capture: the wider Claude frozen set (WP-A)", () => {
+  it("captures rules/, scripts/ (with its exec bit) and keybindings.json", () => {
+    const rule = findFile(claudeCapture.files, "claude/files/rules/ecc/common/coding-style.md");
+    expect(rule).toBeDefined();
+    expect(rule!.content).toContain("{{TOOL_HOME}}/rules/ecc/README.md");
+
+    const script = findFile(claudeCapture.files, "claude/files/scripts/dispatch.sh");
+    expect(script).toBeDefined();
+    expect(script!.mode).toBe(0o755);
+
+    const keys = findFile(claudeCapture.files, "claude/files/keybindings.json");
+    expect(keys).toBeDefined();
+    // "key" is deliberately NOT a secret key name — a keybinding must survive.
+    expect(keys!.content).toContain("cmd+k");
+    expect(keys!.content).not.toContain("{{REDACTED}}");
+  });
+
+  it("captures projects/<slug>/memory under its own repo root, not projects/", () => {
+    const mem = findFile(
+      claudeCapture.files,
+      `${MEMORIES_REPO_PREFIX}/home/-programming-arbella/MEMORY.md`,
+    );
+    expect(mem).toBeDefined();
+    expect(mem!.content).toContain("{{HOME}}/programming/arbella");
+    // Session state next to it stays behind, and nothing lands under claude/files.
+    expect(
+      claudeCapture.files.some((f) => f.repoPath.includes("history.jsonl")),
+    ).toBe(false);
+    expect(
+      claudeCapture.files.some((f) => f.repoPath.startsWith("claude/files/projects")),
+    ).toBe(false);
+  });
+});
+
+describe("capture: linked $HOME files land in shared/home (WP-B)", () => {
+  /** Look a shared/home file up by its $HOME-relative path. */
+  function homeFile(rel: string): CapturedFile | undefined {
+    return mergedHomeFiles.find((f) => f.repoPath === `${SHARED_HOME_REPO_PREFIX}/${rel}`);
+  }
+
+  it("carries the hook dispatcher settings.json points at, redacted and executable", () => {
+    const script = homeFile(".agents/hooks/dispatch.sh");
+    expect(script).toBeDefined();
+    expect(script!.mode).toBe(0o755);
+    // The inline token is gone; the machine paths are placeholders.
+    expect(script!.content).not.toContain(HOME_SCRIPT_TOKEN);
+    expect(script!.content).toContain("{{REDACTED}}");
+    expect(script!.content).not.toContain(srcHome);
+    expect(script!.content).toContain("{{HOME}}/.agents/lib/common.sh");
+    // Shared home files are tool-agnostic: no {{TOOL_HOME}} may appear.
+    expect(script!.content).not.toContain("{{TOOL_HOME}}");
+  });
+
+  it("carries the MCP launcher ~/.claude.json points at", () => {
+    const launcher = homeFile(".local/bin/serena-mcp-start");
+    expect(launcher).toBeDefined();
+    expect(launcher!.mode).toBe(0o755);
+  });
+
+  it("carries a codex hook script from hooks.json", () => {
+    expect(homeFile(".local/bin/graphify")).toBeDefined();
+  });
+
+  it("carries the claude-mem companion config with its API key redacted", () => {
+    const companion = homeFile(".claude-mem/settings.json");
+    expect(companion).toBeDefined();
+    expect(companion!.content).not.toContain(CLAUDE_MEM_API_KEY);
+    expect(companion!.content).toContain("{{REDACTED}}");
+    expect(JSON.parse(companion!.content).archiveMode).toBe("full");
+  });
+
+  it("carries an extraPaths directory but not its denylisted noise", () => {
+    const notes = homeFile(".agents/memory/PROJECTS.md");
+    expect(notes).toBeDefined();
+    expect(notes!.content).toContain("{{HOME}}/programming");
+    expect(homeFile(".agents/memory/scratch.log")).toBeUndefined();
+    // A configured path outside $HOME is refused, loudly.
+    expect(extraHomeCapture.warnings.join("\n")).toContain("/etc/hosts");
+  });
+
+  it("NEVER carries ~/.env, even though a hook command reads it", () => {
+    expect(homeFile(".env")).toBeUndefined();
+    const blob = [allCapturedText(), ...mergedHomeFiles.map((f) => f.content)].join("\n");
+    expect(blob).not.toContain(HOME_DOTENV_SECRET);
+  });
+
+  it("NEVER duplicates a script that already lives inside a tool home", () => {
+    // send_event.py is referenced by a hook AND lives under ~/.claude: it belongs
+    // to claude/files exactly once, and to shared/home not at all.
+    expect(findFile(claudeCapture.files, "claude/files/hooks/send_event.py")).toBeDefined();
+    expect(homeFile(".claude/hooks/send_event.py")).toBeUndefined();
+    for (const file of mergedHomeFiles) {
+      expect(file.repoPath.startsWith(`${SHARED_HOME_REPO_PREFIX}/.claude/`)).toBe(false);
+      expect(file.repoPath.startsWith(`${SHARED_HOME_REPO_PREFIX}/.codex/`)).toBe(false);
+    }
+  });
+});
+
+describe("capture: external tools behind MCP/hook commands (WP-C)", () => {
+  it("records the package-manager binary an MCP server invokes", () => {
+    expect(claudeCapture.manifest.externalTools).toEqual([
+      {
+        name: "codegraph",
+        manager: "uv",
+        command: "codegraph",
+        resolvedPath: UV_TOOL_BIN,
+        usedBy: ["claude:.claude.json#mcpServers.codegraph"],
+      },
+    ]);
+  });
+
+  it("never records a script the backup already carries as a file", () => {
+    const commands = [
+      ...claudeCapture.manifest.externalTools,
+      ...codexCapture.manifest.externalTools,
+    ].map((tool) => tool.command);
+
+    // Each of these IS referenced by a hook / statusline / MCP command, and each
+    // one travels in shared/home or claude/files — reinstalling them would be
+    // wrong, and telling the user to install them by hand would be a lie.
+    for (const carried of [
+      "serena-mcp-start",
+      "dispatch.sh",
+      "graphify",
+      "send_event.py",
+      "statusline",
+    ]) {
+      expect(commands.some((command) => command.includes(carried))).toBe(false);
+    }
+  });
+
+  it("leaves the list empty when every referenced command is a runtime or carried", () => {
+    // Codex's fixture references `node` (a runtime) and ~/.local/bin/graphify
+    // (carried into shared/home) — nothing left to install.
+    expect(codexCapture.manifest.externalTools).toEqual([]);
+  });
+});
+
 describe("capture: shared instructions are deduped (R9)", () => {
   it("does NOT emit per-tool CLAUDE.md / AGENTS.md when sharing", () => {
     expect(findFile(claudeCapture.files, "claude/files/CLAUDE.md")).toBeUndefined();
@@ -500,14 +889,22 @@ describe("restore: files reappear correctly in a fresh $HOME", () => {
   let restoredVars: TemplateVariables;
 
   beforeAll(async () => {
-    // Materialize the captured repo tree on disk under repoRoot.
-	    for (const f of [...claudeCapture.files, ...codexCapture.files, ...cursorCapture.files]) {
+    // Materialize the captured repo tree on disk under repoRoot. Modes are
+	    // written too, so the exec bit round-trips through the repo like it does in
+	    // a real clone.
+	    for (const f of [
+	      ...claudeCapture.files,
+	      ...codexCapture.files,
+	      ...cursorCapture.files,
+	      ...extraHomeCapture.files,
+	    ]) {
 	      const abs = path.join(repoRoot, ...f.repoPath.split("/"));
 	      await fsp.mkdir(path.dirname(abs), { recursive: true });
+	      const mode = f.mode !== undefined ? { mode: f.mode } : undefined;
 	      if (f.binary) {
-	        await fsp.writeFile(abs, Buffer.from(f.content, "base64"));
+	        await fsp.writeFile(abs, Buffer.from(f.content, "base64"), mode);
 	      } else {
-	        await fsp.writeFile(abs, f.content);
+	        await fsp.writeFile(abs, f.content, mode);
 	      }
 	    }
 	    for (const link of [...claudeCapture.symlinks, ...codexCapture.symlinks, ...cursorCapture.symlinks]) {
@@ -521,6 +918,9 @@ describe("restore: files reappear correctly in a fresh $HOME", () => {
     await fsp.writeFile(sharedAbs, sharedFile.content);
 
     // Restore target: a DIFFERENT home, so {{HOME}} must expand to dstHome.
+	    // The project-scope MCP entry only applies when its (rehydrated) project dir
+	    // exists here, so create the twin of the source machine's project.
+	    await fsp.mkdir(path.join(dstHome, "programming", "arbella"), { recursive: true });
 	    const claudeDst = path.join(dstHome, ".claude");
 	    const codexDst = path.join(dstHome, ".codex");
 	    const cursorDst = path.join(dstHome, ".cursor");
@@ -561,6 +961,25 @@ describe("restore: files reappear correctly in a fresh $HOME", () => {
 	    await restoreCursor(
 	      makeRestoreCtx(cursorDst, path.join(repoRoot, "cursor"), repoRoot, cursorVars),
 	      cursorData,
+	    );
+
+	    // WP-B step "8c": the cross-tool shared/home root, read back out of the
+	    // repo exactly as `arbella pull` reads it and written into the fresh $HOME.
+	    const homeFilesFromRepo = await loadHomeFiles(repoRoot);
+	    await restoreHomeFiles(
+	      {
+	        fs: realFs,
+	        log: silentLog,
+	        sanitizer,
+	        templater,
+	        vars: restoredVars,
+	        os: "linux",
+	        env: {},
+	        sourceOfTruth: "repo",
+	        dryRun: false,
+	      },
+	      homeFilesFromRepo,
+	      { safetyDir: path.join(tmpRoot, "home-safety") },
 	    );
   });
 
@@ -644,6 +1063,98 @@ describe("restore: files reappear correctly in a fresh $HOME", () => {
 	    expect(sharedRuleExists).toBe(false);
 	  });
 
+  itPosixHost("restores the wider frozen set into the fresh home (WP-A)", async () => {
+    const claudeDst = path.join(dstHome, ".claude");
+
+    const rule = await fsp.readFile(under(claudeDst, "rules/ecc/common/coding-style.md"), "utf8");
+    expect(rule).toContain(`${dstHome}/.claude/rules/ecc/README.md`);
+    expect(rule).not.toContain("{{TOOL_HOME}}");
+
+    const scriptPath = under(claudeDst, "scripts/dispatch.sh");
+    expect(await realFs.exists(scriptPath)).toBe(true);
+    expect((await fsp.stat(scriptPath)).mode & 0o777).toBe(0o755);
+
+    const keys = await fsp.readFile(under(claudeDst, "keybindings.json"), "utf8");
+    expect(JSON.parse(keys)[0].key).toBe("cmd+k");
+
+    // The droppings were never captured, so they cannot reappear.
+    expect(await realFs.exists(under(claudeDst, "settings.json.bak-routing-20260829"))).toBe(false);
+    expect(await realFs.exists(under(claudeDst, "scripts/dispatch.sh.bak"))).toBe(false);
+  });
+
+  itPosixHost("restores the memory under the TARGET machine's project slug", async () => {
+    const dest = under(
+      path.join(dstHome, ".claude"),
+      `projects/${slugifyPath(dstHome)}-programming-arbella/memory/MEMORY.md`,
+    );
+    const content = await fsp.readFile(dest, "utf8");
+    expect(content).toContain(`${dstHome}/programming/arbella`);
+    expect(content).not.toContain("{{HOME}}");
+    // The source machine's slug must not survive into the target home.
+    expect(
+      await realFs.exists(
+        under(path.join(dstHome, ".claude"), `projects/${slugifyPath(srcHome)}-programming-arbella`),
+      ),
+    ).toBe(false);
+  });
+
+  itPosixHost("merges the MCP servers into a freshly created ~/.claude.json", async () => {
+    const globalState = path.join(dstHome, ".claude.json");
+    const stat = await fsp.stat(globalState);
+    expect(stat.mode & 0o777).toBe(0o600);
+
+    const obj = JSON.parse(await fsp.readFile(globalState, "utf8"));
+    // ONLY the keys arbella owns exist — nothing was invented from the source file.
+    expect(Object.keys(obj).sort()).toEqual(["mcpServers", "projects"]);
+    expect(obj.mcpServers.serena.command).toBe(`${dstHome}/.local/bin/serena-mcp-start`);
+    expect(obj.mcpServers.serena.env.SERENA_TOKEN).toBe("{{REDACTED}}");
+    // The project dir exists in the fresh home only because the fixture created it
+    // there too; the entry is keyed by THIS machine's absolute path.
+    const projectDir = path.join(dstHome, "programming", "arbella");
+    expect(obj.projects[projectDir].mcpServers.local).toEqual({ command: "local-mcp" });
+
+    const blob = await fsp.readFile(globalState, "utf8");
+    expect(blob).not.toContain(GLOBAL_STATE_OAUTH_TOKEN);
+    expect(blob).not.toContain(GLOBAL_MCP_ENV_SECRET);
+  });
+
+  itPosixHost("writes the shared/home files back into the fresh $HOME (WP-B)", async () => {
+    const dispatch = path.join(dstHome, ".agents", "hooks", "dispatch.sh");
+    const content = await fsp.readFile(dispatch, "utf8");
+    // Paths rehydrated to the TARGET home, secret still redacted, exec bit kept.
+    expect(content).toContain(`${dstHome}/.agents/lib/common.sh`);
+    expect(content).toContain(`${dstHome}/.agents/hooks/handoff-offer.sh`);
+    expect(content).not.toContain("{{HOME}}");
+    expect(content).not.toContain(srcHome);
+    expect(content).toContain("{{REDACTED}}");
+    expect(content).not.toContain(HOME_SCRIPT_TOKEN);
+    expect((await fsp.stat(dispatch)).mode & 0o777).toBe(0o755);
+
+    const launcher = path.join(dstHome, ".local", "bin", "serena-mcp-start");
+    expect((await fsp.stat(launcher)).mode & 0o777).toBe(0o755);
+    expect(await realFs.exists(path.join(dstHome, ".local", "bin", "graphify"))).toBe(true);
+
+    const companion = await fsp.readFile(
+      path.join(dstHome, ".claude-mem", "settings.json"),
+      "utf8",
+    );
+    expect(JSON.parse(companion).ANTHROPIC_API_KEY).toBe("{{REDACTED}}");
+    expect(companion).not.toContain(CLAUDE_MEM_API_KEY);
+
+    const notes = await fsp.readFile(
+      path.join(dstHome, ".agents", "memory", "PROJECTS.md"),
+      "utf8",
+    );
+    expect(notes).toContain(`${dstHome}/programming`);
+  });
+
+  it("never recreates a denylisted $HOME file that a hook referenced", async () => {
+    expect(await realFs.exists(path.join(dstHome, ".env"))).toBe(false);
+    expect(
+      await realFs.exists(path.join(dstHome, ".agents", "memory", "scratch.log")),
+    ).toBe(false);
+  });
+
   it("does NOT recreate any secret file in the fresh home", async () => {
     const credExists = await realFs.exists(
       under(path.join(dstHome, ".claude"), ".credentials.json"),
@@ -653,6 +1164,46 @@ describe("restore: files reappear correctly in a fresh $HOME", () => {
     );
     expect(credExists).toBe(false);
     expect(authExists).toBe(false);
+  });
+});
+
+describe("restore: shared/home can never write outside $HOME", () => {
+  it("refuses a hand-edited repo path that climbs out of shared/home", async () => {
+    const root = await fsp.mkdtemp(path.join(os.tmpdir(), "arbella-home-escape-"));
+    try {
+      const home = path.join(root, "home");
+      await fsp.mkdir(home, { recursive: true });
+      const warnings: string[] = [];
+
+      const written = await restoreHomeFiles(
+        {
+          fs: realFs,
+          log: { ...silentLog, warn: (m: string) => warnings.push(m) },
+          sanitizer,
+          templater,
+          vars: makeVariables(home, "newuser", "linux"),
+          os: "linux",
+          env: {},
+          sourceOfTruth: "repo",
+          dryRun: false,
+        },
+        [
+          { repoPath: `${SHARED_HOME_REPO_PREFIX}/../../escaped.txt`, content: "nope" },
+          { repoPath: `${SHARED_HOME_REPO_PREFIX}/./ok.txt`, content: "nope" },
+          { repoPath: "claude/files/settings.json", content: "nope" },
+          { repoPath: `${SHARED_HOME_REPO_PREFIX}/fine.txt`, content: "yes" },
+        ],
+        { safetyDir: path.join(root, "safety") },
+      );
+
+      expect(written).toBe(1);
+      expect(await fsp.readFile(path.join(home, "fine.txt"), "utf8")).toBe("yes");
+      // Nothing was created next to (or above) the home dir.
+      expect(await fsp.readdir(root)).toEqual(["home"]);
+      expect(warnings.join("\n")).toContain("escaped.txt");
+    } finally {
+      await fsp.rm(root, { recursive: true, force: true });
+    }
   });
 });
 

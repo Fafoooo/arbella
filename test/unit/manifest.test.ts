@@ -85,6 +85,53 @@ describe("manifest: build -> serialize -> parse round-trip", () => {
   });
 });
 
+/* -------------------------------------------------------------------------- */
+/* externalTools name validation (repo data -> argv)                           */
+/* -------------------------------------------------------------------------- */
+
+describe("manifest: unsafe externalTools names are dropped, not thrown on", () => {
+  /** A manifest as it would arrive from a repo, with `names` as external tools. */
+  function rawManifestWith(names: readonly string[]): unknown {
+    return {
+      tool: "claude",
+      externalTools: names.map((name) => ({
+        name,
+        manager: "brew",
+        command: "x",
+        usedBy: ["mcp:x"],
+      })),
+    };
+  }
+
+  it("drops names that would become an option or a source on the install line", () => {
+    // Each of these reaches `brew install <name>` as an argv element on a pull:
+    // a leading "-" is an option, "git+https://…" and a URL are SOURCES, and a
+    // space is two arguments' worth of intent.
+    const hostile = ["--foo", "git+https://evil.example/x", "https://evil.example/e.rb", "a b"];
+    const parsed = parseManifest(rawManifestWith(hostile));
+    expect(parsed.externalTools).toEqual([]);
+  });
+
+  it("keeps the names real packages actually have", () => {
+    const good = ["serena-agent", "cloudflare-cli4", "graphifyy", "foo.bar+baz"];
+    const parsed = parseManifest(rawManifestWith(good));
+    expect(parsed.externalTools.map((t) => t.name)).toEqual(good);
+  });
+
+  it("parses the rest of a manifest that carries a hostile entry, and reports it", () => {
+    // A repo written by another (or older, or hostile) client must stay
+    // READABLE — dropping one entry, not failing the whole restore.
+    const dropped: string[] = [];
+    const parsed = parseManifest(rawManifestWith(["--cask", "greppy"]), (name) =>
+      dropped.push(name),
+    );
+
+    expect(parsed.tool).toBe("claude");
+    expect(parsed.externalTools.map((t) => t.name)).toEqual(["greppy"]);
+    expect(dropped).toEqual(["--cask"]);
+  });
+});
+
 describe("manifest: ArbellaMeta round-trip", () => {
   const config: ArbellaConfig = {
     repo: { provider: "generic", url: "", localPath: "" },

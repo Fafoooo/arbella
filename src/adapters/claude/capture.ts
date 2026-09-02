@@ -19,7 +19,18 @@
  *   - Collect npm globals via the shared platform helper.
  *   - Any denylisted-but-present secret file (.credentials.json, .claude.json)
  *     is recorded as a SecretRef(kind:"file") so the user is reminded to
- *     re-supply it; its CONTENTS are never read or stored.
+ *     re-supply it; its CONTENTS are never read or stored. The ONE exception is
+ *     ~/.claude.json's `mcpServers` / `projects.*.mcpServers` sub-objects, which
+ *     mcp.ts lifts into the manifest (sanitized + templated) — no other key of
+ *     that file is ever read past the parse.
+ *   - projects/<slug>/memory/** is captured under its own `claude/memories/`
+ *     root when ctx.includeMemories is on (see memories.ts).
+ *   - Scripts the configs POINT AT but that live outside ~/.claude (hook
+ *     dispatchers, statusline scripts, MCP launchers under ~/.agents, ~/.local/bin)
+ *     are followed with core/homefiles and emitted as `shared/home/<rel>` files
+ *     inside this same CaptureResult, together with the well-known plugin
+ *     companion configs (~/.claude-mem/settings.json). The backup command merges
+ *     every tool's shared/home files into one mirrored root.
  *
  * All fs/sanitizer/templater work goes through the injected CaptureContext, so
  * this module is unit-testable against a fixture dir. No clock, no direct
@@ -42,30 +53,58 @@ import type {
 } from "../../types.js";
 
 import {
+  COMMON_DENY,
   denylistFor,
   matchesDeny,
 } from "../../core/sanitizer/denylist.js";
+import type { CommandRef } from "../../core/homefiles/scan.js";
+import { collectCommandRefs } from "../../core/homefiles/scan.js";
+import {
+  captureHomeFile,
+  captureLinkedHomeFiles,
+  homeExcludeRoots,
+} from "../../core/homefiles/capture.js";
+import {
+  capturedAbsolutePaths,
+  collectExternalTools,
+} from "../../core/externaltools/collect.js";
 import { normalizeCapturedSymlinkTarget } from "../../utils/symlink.js";
 import { listNpmGlobals } from "../../platform/install.js";
 
+import type { ClaudePaths } from "./paths.js";
 import { REPO_PREFIX, FROZEN_PATHS, INSTRUCTIONS_FILE, paths } from "./paths.js";
 import {
   parseInstalledPlugins,
   parseKnownMarketplaces,
   extractEnabledPlugins,
 } from "./plugins.js";
+import { captureMcpServers } from "./mcp.js";
+import { captureMemories, slugifyPath } from "./memories.js";
 
-/** Files known to hold whole-file secrets; recorded (never read) if present. */
-const SECRET_FILES: ReadonlyArray<{ rel: string; key: string; description: string }> = [
+/**
+ * Files known to hold whole-file secrets; recorded (never read) if present.
+ * `abs` resolves each one from the path set because they do not all live INSIDE
+ * the tool home — ~/.claude.json is a sibling of ~/.claude.
+ */
+const SECRET_FILES: ReadonlyArray<{
+  rel: string;
+  key: string;
+  description: string;
+  abs: (p: ClaudePaths) => string;
+}> = [
   {
     rel: ".credentials.json",
     key: ".credentials.json",
     description: "Claude OAuth / API credentials — re-login after restore.",
+    abs: (p) => path.join(p.home, ".credentials.json"),
   },
   {
     rel: ".claude.json",
     key: ".claude.json",
-    description: "Claude global state (auth tokens + project history) — excluded.",
+    description:
+      "Claude global state (auth + telemetry) — excluded; MCP server definitions " +
+      "are carried in manifest.mcpServers.",
+    abs: (p) => p.globalState,
   },
 ];
 
@@ -121,15 +160,22 @@ async function walk(
   }
 
   // kind === "file"
-  await captureFile(ctx, home, abs, rel, files, warnings);
+  await captureFile(ctx, abs, repoPathFor(rel), rel, files, warnings);
 }
 
-/** Read + sanitize + template a single file and push a CapturedFile. */
+/**
+ * Read + sanitize + template a single file and push a CapturedFile.
+ *
+ * `repoPath` is the destination inside the backup repo and `source` the label
+ * used for sanitizer SecretRefs and warnings. They are passed explicitly (rather
+ * than derived from a tool-home-relative path) because memories land under a
+ * different repo root than the frozen tree — see memories.ts.
+ */
 async function captureFile(
   ctx: CaptureContext,
-  home: string,
   abs: string,
-  rel: string,
+  repoPath: string,
+  source: string,
   files: CapturedFile[],
   warnings: string[],
 ): Promise<void> {
@@ -147,7 +193,7 @@ async function captureFile(
   try {
     bytes = await ctx.fs.readBytes(abs);
   } catch (err) {
-    warnings.push(`claude: could not read ${rel}: ${(err as Error).message}`);
+    warnings.push(`claude: could not read ${source}: ${(err as Error).message}`);
     return;
   }
 
@@ -161,13 +207,13 @@ async function captureFile(
     // a warning rather than base64'ing it in raw.
     if (
       !ctx.includeSecrets &&
-      binaryScanViews(bytes).some((view) => ctx.sanitizer.sanitizeText(view, "claude", rel).changed)
+      binaryScanViews(bytes).some((view) => ctx.sanitizer.sanitizeText(view, "claude", source).changed)
     ) {
-      warnings.push(`claude: skipped ${rel} — binary content with secret-shaped bytes`);
+      warnings.push(`claude: skipped ${source} — binary content with secret-shaped bytes`);
       return;
     }
     const file: CapturedFile = {
-      repoPath: repoPathFor(rel),
+      repoPath,
       content: bytes.toString("base64"),
       binary: true,
     };
@@ -194,11 +240,13 @@ async function captureFile(
   // UTF-16 files are decoded to text above, so a lone NUL byte never routes a
   // secret-bearing config around sanitizeFile.
   const raw = decoded.text;
-  const content = ctx.includeSecrets ? raw : ctx.sanitizer.sanitizeFile(raw, "claude", rel).content;
+  const content = ctx.includeSecrets
+    ? raw
+    : ctx.sanitizer.sanitizeFile(raw, "claude", source).content;
   const templated = ctx.templater.toTemplate(content, ctx.vars);
 
   const file: CapturedFile = {
-    repoPath: repoPathFor(rel),
+    repoPath,
     content: templated,
   };
   if (mode !== undefined) file.mode = mode;
@@ -251,9 +299,54 @@ async function captureSkills(
       ctx.log.debug(`claude: skill (frozen) ${name}`);
     } else if (kind === "file") {
       // A loose file directly under skills/ (rare) — freeze it.
-      await captureFile(ctx, home, abs, rel, files, warnings);
+      await captureFile(ctx, abs, repoPathFor(rel), rel, files, warnings);
     }
   }
+}
+
+/**
+ * Companion config dirs of Claude PLUGINS: reinstalled from the manifest, but
+ * their own settings live outside ~/.claude and would otherwise be lost. Paths
+ * are $HOME-relative POSIX and land under `shared/home/` like any linked script.
+ */
+const COMPANION_FILES: ReadonlyArray<{ rel: string; reason: string }> = [
+  { rel: ".claude-mem/settings.json", reason: "companion:claude-mem" },
+];
+
+/**
+ * Capture everything Claude needs that lives in $HOME but OUTSIDE ~/.claude:
+ * the hook/statusline/MCP scripts its configs point at, and the well-known
+ * plugin companion configs.
+ *
+ * The command refs come from the already-parsed settings files and from
+ * mcp.ts's raw pass over ~/.claude.json — no config file is read twice, and no
+ * key of ~/.claude.json beyond its MCP sub-objects is ever looked at.
+ *
+ * Returns the full ref list so the external-tool collector (WP-C) can classify
+ * the same commands without parsing anything again.
+ */
+async function captureHomeExtras(
+  ctx: CaptureContext,
+  settingsJson: unknown,
+  settingsLocalJson: unknown,
+  mcpRefs: readonly CommandRef[],
+  out: { files: CapturedFile[]; secrets: SecretRef[]; warnings: string[] },
+): Promise<CommandRef[]> {
+  const opts = { excludeRoots: homeExcludeRoots(ctx.toolHome) };
+
+  const refs: CommandRef[] = [
+    ...collectCommandRefs(settingsJson, "claude:settings.json"),
+    ...collectCommandRefs(settingsLocalJson, "claude:settings.local.json"),
+    ...mcpRefs,
+  ];
+  await captureLinkedHomeFiles(ctx, refs, "claude", out, opts);
+
+  for (const companion of COMPANION_FILES) {
+    const abs = path.join(ctx.vars.HOME, ...companion.rel.split("/"));
+    await captureHomeFile(ctx, abs, "claude", companion.reason, out, opts);
+  }
+
+  return refs;
 }
 
 /** Read + parse a JSON file via the fs service; returns undefined if absent/bad. */
@@ -308,10 +401,36 @@ export async function capture(
     await walk(ctx, home, path.join(home, top), deny, files, symlinks, warnings);
   }
 
+  // ----- Per-project memories (R13, opt-in) -----
+  // Stored under their OWN repo root (claude/memories/…), not claude/files/,
+  // because ~/.claude/projects is denylisted wholesale and the layout has to be
+  // portable across machines with different $HOME values.
+  if (ctx.includeMemories) {
+    await captureMemories(
+      ctx,
+      p.projectsDir,
+      slugifyPath(ctx.vars.HOME),
+      // COMMON_DENY, not the Claude list: memory paths are relative to a
+      // project's memory/ dir, so the root-anchored Claude patterns ("/feedback/",
+      // "/plugins/") would match a memory SUBDIRECTORY of the same name and drop
+      // it. Only the universal cruft rules make sense at this root.
+      [...COMMON_DENY],
+      (abs, repoPath, source) => captureFile(ctx, abs, repoPath, source, files, warnings),
+    );
+  } else {
+    ctx.log.debug("claude: skipping projects/*/memory (includeMemories is off)");
+  }
+
   // ----- Manifest: plugins, marketplaces, enabledPlugins -----
   const installedJson = await readJson(ctx, p.installedPlugins, warnings, "installed_plugins.json");
   const marketplacesJson = await readJson(ctx, p.knownMarketplaces, warnings, "known_marketplaces.json");
   const settingsJson = await readJson(ctx, p.settings, warnings, "settings.json");
+  const settingsLocalJson = await readJson(
+    ctx,
+    p.settingsLocal,
+    warnings,
+    "settings.local.json",
+  );
 
   // Fold project-scope plugin paths (projectPath) to {{HOME}}-style placeholders,
   // exactly like file contents — otherwise the raw machine path leaks into the repo.
@@ -338,8 +457,7 @@ export async function capture(
 
   // ----- Secret files: record presence, never read contents -----
   for (const sf of SECRET_FILES) {
-    const abs = path.join(home, sf.rel);
-    if ((await ctx.fs.exists(abs))) {
+    if (await ctx.fs.exists(sf.abs(p))) {
       secrets.push({
         tool: "claude",
         source: sf.rel,
@@ -350,6 +468,34 @@ export async function capture(
     }
   }
 
+  // ----- MCP servers lifted out of ~/.claude.json (see mcp.ts) -----
+  const mcp = await captureMcpServers(ctx);
+  secrets.push(...mcp.secrets);
+  warnings.push(...mcp.warnings);
+
+  // ----- Linked scripts + companion configs in $HOME (WP-B) -----
+  const commandRefs = await captureHomeExtras(
+    ctx,
+    settingsJson,
+    settingsLocalJson,
+    mcp.commandRefs,
+    { files, secrets, warnings },
+  );
+
+  // ----- External tools behind those same commands (WP-C) -----
+  // Runs on the FULL file list so a command pointing at something this capture
+  // already carries (a statusline script under ~/.claude, a hook dispatcher in
+  // shared/home) is restored as a file rather than reported as a missing package.
+  const externalTools = await collectExternalTools(commandRefs, {
+    home: ctx.vars.HOME,
+    capturedPaths: capturedAbsolutePaths(files, {
+      home: ctx.vars.HOME,
+      toolHome: home,
+      filesPrefix: REPO_PREFIX,
+    }),
+    toTemplate: (value) => ctx.templater.toTemplate(value, ctx.vars),
+  });
+
   const manifest: ToolManifest = {
     tool: "claude",
     plugins,
@@ -357,12 +503,17 @@ export async function capture(
     skills,
     npmGlobals,
     enabledPlugins,
+    mcpServers: mcp.mcpServers,
+    projectMcpServers: mcp.projectMcpServers,
+    externalTools,
   };
 
   ctx.log.debug(
     `claude: captured ${files.length} files, ${symlinks.length} symlinks, ` +
       `${plugins.length} plugins, ${marketplaces.length} marketplaces, ` +
-      `${skills.length} skills, ${npmGlobals.length} npm globals`,
+      `${skills.length} skills, ${npmGlobals.length} npm globals, ` +
+      `${Object.keys(mcp.mcpServers).length} MCP servers, ` +
+      `${externalTools.length} external tools`,
   );
 
   return { tool: "claude", files, symlinks, manifest, secrets, warnings };

@@ -13,7 +13,9 @@
  *   2. VALUE REDACTION (in-place). For files that ARE shareable but may contain a
  *      stray credential, `sanitizeText` redacts matches of SECRET_PATTERNS, and
  *      `sanitizeJson` deep-clones a parsed object redacting any value whose KEY
- *      is secret (isSecretKey) or whose VALUE matches a pattern.
+ *      is secret (isSecretKey), whose VALUE matches a pattern, or that is a URL
+ *      carrying its own credential (isCredentialBearingUrl — userinfo or a
+ *      token-shaped query parameter, which neither of the other two rules sees).
  *
  * Pure-ish: operates on strings / already-parsed objects. TOML/JSON parsing and
  * re-serialization are done by callers; only `sanitizeJson` clones a parsed
@@ -26,13 +28,16 @@ import type {
   SecretRef,
   ToolId,
 } from "../../types.js";
+import { isPlainObject } from "../../utils/object.js";
 
 import { COMMON_DENY, matchesDeny } from "./denylist.js";
 import {
   REDACTED,
   SECRET_PATTERNS,
+  isCredentialBearingUrl,
   isSecretContainerKey,
   isSecretKey,
+  isUrlKey,
   type SecretPattern,
 } from "./patterns.js";
 
@@ -341,6 +346,22 @@ function cloneRedact(
     return out;
   }
 
+  // A URL-shaped key whose VALUE carries the credential (userinfo, or a token
+  // query parameter). Neither the key name nor the token shape catches this:
+  // "url" is not a secret key, and a signed URL matches no SECRET_PATTERNS
+  // entry — so an MCP server authenticated by its URL would otherwise be stored
+  // in the repo complete with its credential.
+  if (typeof node === "string" && isUrlKey(parentKey) && isCredentialBearingUrl(node)) {
+    found.push({
+      tool,
+      source: keyPath ? `${source}#${keyPath}` : source,
+      key: parentKey,
+      description: `Redacted credential-bearing URL for key "${parentKey}"`,
+      kind: "value",
+    });
+    return REDACTED;
+  }
+
   // Scalars (string/number/boolean/null/undefined): redact if warranted.
   const keyIsSecret = parentKey.length > 0 && (isSecretKey(parentKey) || inSecretContainer);
   const { value: redacted, matched } = redactValue(node, keyIsSecret);
@@ -390,13 +411,6 @@ function humanizePattern(name: string): string {
  */
 function freshRegex(re: RegExp): RegExp {
   return new RegExp(re.source, re.flags);
-}
-
-/** True for ordinary `{}`-style objects (not arrays, not class instances). */
-function isPlainObject(v: unknown): v is Record<string, unknown> {
-  if (v === null || typeof v !== "object" || Array.isArray(v)) return false;
-  const proto = Object.getPrototypeOf(v);
-  return proto === Object.prototype || proto === null;
 }
 
 /** Join two dotted-path segments, skipping empties. */

@@ -9,7 +9,11 @@
  *   - DROP [hooks.state.*] tables entirely (machine-specific trusted hashes, and
  *     their KEYS embed absolute paths — never useful on another machine);
  *   - extract [plugins."name@marketplace"] -> PluginEntry and
- *     [marketplaces.name]   -> MarketplaceEntry for the reinstall manifest;
+ *     [marketplaces.name]   -> MarketplaceEntry for the reinstall manifest, with
+ *     each MarketplaceEntry.source TEMPLATED individually (it is stored as JSON
+ *     in the manifest, not the re-stringified TOML text below, so a "local"
+ *     marketplace's raw absolute path — e.g. Codex's bundled-runtime
+ *     marketplaces under ~/.codex/.tmp or ~/.cache — would otherwise leak);
  *   - TEMPLATE absolute machine paths — both in VALUES (mcp command/args, etc.)
  *     and in [projects."/abs/path"] KEYS — via templater.toTemplate over the
  *     re-stringified text (the templater is path-aware and separator-agnostic, so
@@ -234,9 +238,17 @@ export function processConfigToml(
 
   const parsed = parseToml(raw) as TomlTable;
 
-  // 2) Manifest extraction first — from the still-pristine parse.
+  // 2) Manifest extraction first — from the still-pristine parse. Marketplace
+  //    `source` is templated immediately: for "local" marketplaces this is a raw
+  //    absolute path (e.g. Codex's bundled-runtime marketplaces under
+  //    ~/.codex/.tmp or ~/.cache), and the manifest is stored as JSON text that
+  //    never passes through the TOML re-stringify + toTemplate(text) pass below
+  //    — so without this it leaks the source machine's path verbatim.
   const plugins = extractPlugins(parsed);
-  const marketplaces = extractMarketplaces(parsed);
+  const marketplaces = extractMarketplaces(parsed).map((m) => ({
+    ...m,
+    source: templater.toTemplate(m.source, vars),
+  }));
 
   // 3) Redact secrets under the at-risk tables. We walk the whole tree so any
   //    secret-keyed leaf anywhere is caught, but the explicit container handling

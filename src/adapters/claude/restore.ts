@@ -4,11 +4,17 @@
  * via the `claude` CLI, re-enable plugins by merging enabledPlugins into the
  * restored settings.json, and reinstall skills.sh skills via `npx skills add`.
  *
- * Placement:
- *   - For each CapturedFile, strip the "claude/files/" prefix from repoPath and
- *     join onto ctx.toolHome. Run templater.fromTemplate FIRST so {{HOME}}/
- *     {{USER}}/... become this machine's real values, then write (restoring the
- *     POSIX mode for executables). Binary files are base64-decoded.
+ * Placement is decided by the repoPath PREFIX:
+ *   - "claude/files/…"    -> under ctx.toolHome.
+ *   - "claude/memories/…" -> under ctx.toolHome/projects/<slug>/memory (the slug
+ *                            is re-derived for THIS machine's $HOME; see
+ *                            memories.ts).
+ *   - anything else       -> ignored with a debug line. Other repo roots (e.g.
+ *                            shared/home/…) belong to other restore steps and
+ *                            must NOT be dumped inside ~/.claude.
+ *   Content is run through templater.fromTemplate FIRST so {{HOME}}/{{USER}}/...
+ *   become this machine's real values, then written (restoring the POSIX mode for
+ *   executables). Binary files are base64-decoded.
  *   - Recreate each CapturedSymlink with its verbatim (relative) target.
  *   - `claude plugin marketplace add <source>` for every marketplace, then
  *     `claude plugin install <id> --scope user` for every USER-scope plugin.
@@ -16,6 +22,8 @@
  *     file Claude actually reads) so disabled plugins stay disabled.
  *   - `npx skills add <name>` for every skills.sh skill (the symlink itself is
  *     recreated above; this repopulates ~/.agents/skills/<name>).
+ *   - manifest.mcpServers / projectMcpServers are merged key-wise into
+ *     ~/.claude.json (mcp.ts) after the files are written and before plugins.
  *
  * sourceOfTruth (R12): "repo" => overwrite existing local files; "local" =>
  * never clobber a file that already exists locally (skip + debug). All install
@@ -35,6 +43,7 @@ import type { RestoreAction, CapturedFile } from "../../types.js";
 
 import { cliBinaryName } from "../../platform/os.js";
 import { which } from "../../platform/install.js";
+import { findSymlinkComponent } from "../../utils/safe-path.js";
 
 import { REPO_PREFIX } from "./paths.js";
 import {
@@ -42,6 +51,8 @@ import {
   pluginInstallArgs,
   isUserScope,
 } from "./plugins.js";
+import { planMcpMerge, restoreMcpServers } from "./mcp.js";
+import { MEMORIES_REPO_PREFIX, memoryTargetPath, slugifyPath } from "./memories.js";
 
 /** Strip the "claude/files/" repo prefix; returns the tool-home-relative POSIX path. */
 function stripPrefix(repoPath: string): string {
@@ -49,10 +60,44 @@ function stripPrefix(repoPath: string): string {
   return repoPath.startsWith(prefix) ? repoPath.slice(prefix.length) : repoPath;
 }
 
-/** Absolute target path on this machine for a captured file/symlink. */
-function targetFor(toolHome: string, repoPath: string): string {
-  const rel = stripPrefix(repoPath);
-  return path.join(toolHome, ...rel.split("/"));
+/**
+ * Absolute target path on this machine for a captured file/symlink, or null when
+ * the repoPath belongs to a root this adapter does not own (the caller logs a
+ * debug line and skips). Routing is prefix-based — see the module header.
+ */
+function targetFor(ctx: RestoreContext, repoPath: string): string | null {
+  if (repoPath.startsWith(`${REPO_PREFIX}/`)) {
+    return path.join(ctx.toolHome, ...stripPrefix(repoPath).split("/"));
+  }
+  if (repoPath.startsWith(`${MEMORIES_REPO_PREFIX}/`)) {
+    return memoryTargetPath(ctx.toolHome, slugifyPath(ctx.vars.HOME), repoPath);
+  }
+  return null;
+}
+
+/**
+ * The symlinked component that makes a MEMORY destination unsafe, or null.
+ *
+ * Memory paths are the one place a repo names a directory this machine may not
+ * have: `projects/<slug>/memory/…` is created on demand, so a link planted (or
+ * merely configured) at `projects/<slug>` would redirect the write out of
+ * ~/.claude entirely. The `claude/files/` tree is deliberately NOT checked —
+ * skills there are legitimately symlinks into ~/.agents/skills, and refusing to
+ * write through them would break the feature the adapter exists to restore.
+ */
+async function memorySymlinkBlock(
+  ctx: RestoreContext,
+  repoPath: string,
+  dest: string,
+): Promise<string | null> {
+  if (!repoPath.startsWith(`${MEMORIES_REPO_PREFIX}/`)) return null;
+  return findSymlinkComponent(ctx.fs, ctx.toolHome, dest);
+}
+
+/** Human label for an action description: the path relative to its repo root. */
+function describePath(repoPath: string): string {
+  if (repoPath.startsWith(`${REPO_PREFIX}/`)) return stripPrefix(repoPath);
+  return repoPath;
 }
 
 /** True if `claude` CLI is on PATH. */
@@ -68,7 +113,20 @@ async function writeOne(
   ctx: RestoreContext,
   file: CapturedFile,
 ): Promise<boolean> {
-  const dest = targetFor(ctx.toolHome, file.repoPath);
+  const dest = targetFor(ctx, file.repoPath);
+  if (dest === null) {
+    ctx.log.debug(`claude: ignoring ${file.repoPath} (not a Claude repo root)`);
+    return false;
+  }
+
+  const link = await memorySymlinkBlock(ctx, file.repoPath, dest);
+  if (link !== null) {
+    ctx.log.warn(
+      `claude: skipping ${file.repoPath} — ${link} is a symlink; ` +
+        "arbella does not write memories through links.",
+    );
+    return false;
+  }
 
   if (ctx.sourceOfTruth === "local" && (await ctx.fs.exists(dest))) {
     ctx.log.debug(`claude: keep local (sourceOfTruth=local) ${dest}`);
@@ -126,29 +184,38 @@ export async function planActions(
   const actions: RestoreAction[] = [];
 
   for (const file of data.files) {
-    const dest = targetFor(ctx.toolHome, file.repoPath);
+    const dest = targetFor(ctx, file.repoPath);
+    if (dest === null) continue;
+    // Mirror the write-side refusal so the dry run cannot list a memory file the
+    // restore will then skip.
+    if ((await memorySymlinkBlock(ctx, file.repoPath, dest)) !== null) continue;
     const overwrites = await ctx.fs.exists(dest);
     if (ctx.sourceOfTruth === "local" && overwrites) continue;
     actions.push({
       type: "write-file",
       tool: "claude",
       targetPath: dest,
-      description: `Write ${stripPrefix(file.repoPath)}`,
+      description: `Write ${describePath(file.repoPath)}`,
       overwrites,
     });
   }
 
   for (const link of data.symlinks) {
-    const dest = targetFor(ctx.toolHome, link.repoPath);
+    const dest = targetFor(ctx, link.repoPath);
+    if (dest === null) continue;
     const overwrites = (await ctx.fs.statKind(dest)) !== "missing";
     actions.push({
       type: "write-symlink",
       tool: "claude",
       targetPath: dest,
-      description: `Symlink ${stripPrefix(link.repoPath)} -> ${link.target}`,
+      description: `Symlink ${describePath(link.repoPath)} -> ${link.target}`,
       overwrites,
     });
   }
+
+  // The MCP half of the plan comes from the SAME decision function the merge
+  // applies, so a listed registration is one that will really happen.
+  actions.push(...(await planMcpMerge(ctx, data.manifest)).actions);
 
   for (const m of data.manifest.marketplaces) {
     actions.push({
@@ -209,7 +276,11 @@ export async function restore(ctx: RestoreContext, data: RestoreData): Promise<v
 
   // ----- 2. Symlinks -----
   for (const link of data.symlinks) {
-    const dest = targetFor(ctx.toolHome, link.repoPath);
+    const dest = targetFor(ctx, link.repoPath);
+    if (dest === null) {
+      ctx.log.debug(`claude: ignoring symlink ${link.repoPath} (not a Claude repo root)`);
+      continue;
+    }
     if (ctx.sourceOfTruth === "local" && (await ctx.fs.statKind(dest)) !== "missing") {
       ctx.log.debug(`claude: keep local symlink ${dest}`);
       continue;
@@ -221,7 +292,10 @@ export async function restore(ctx: RestoreContext, data: RestoreData): Promise<v
     }
   }
 
-  // ----- 3. Marketplaces + plugins via the claude CLI -----
+  // ----- 3. MCP servers merged into ~/.claude.json -----
+  await restoreMcpServers(ctx, data.manifest);
+
+  // ----- 4. Marketplaces + plugins via the claude CLI -----
   const hasClaude = await claudeAvailable();
   if (!hasClaude) {
     ctx.log.warn(
@@ -251,10 +325,10 @@ export async function restore(ctx: RestoreContext, data: RestoreData): Promise<v
     }
   }
 
-  // ----- 4. Re-enable plugins (authoritative: settings.enabledPlugins) -----
+  // ----- 5. Re-enable plugins (authoritative: settings.enabledPlugins) -----
   await mergeEnabledPlugins(ctx, data.manifest.enabledPlugins);
 
-  // ----- 5. skills.sh skills (repopulate ~/.agents/skills) -----
+  // ----- 6. skills.sh skills (repopulate ~/.agents/skills) -----
   for (const skill of data.manifest.skills) {
     if (skill.source !== "skills.sh") continue;
     try {

@@ -31,6 +31,46 @@ async function writeBytes(p: string, content: Buffer, mode?: number): Promise<vo
   await fsp.writeFile(p, content, mode !== undefined ? { mode } : undefined);
 }
 
+/**
+ * Write `content` to `p` as one indivisible replacement: a temp file next to the
+ * target (same directory, so `rename` stays on one filesystem and is atomic),
+ * then a rename over the target.
+ *
+ * A plain `writeFile` truncates first: any reader that opens the file in that
+ * window — Claude Code itself, for ~/.claude.json — sees an empty or partial
+ * file, and a crash mid-write leaves it that way for good.
+ *
+ * Mode: an explicit `mode` is applied; otherwise an EXISTING target's mode is
+ * carried onto the replacement (a 0600 credentials-adjacent file must not become
+ * 0644 because it was rewritten). The temp file is created 0600 and only widened
+ * afterwards, so its contents are never briefly world-readable.
+ */
+async function writeAtomic(p: string, content: string, mode?: number): Promise<void> {
+  await ensureDir(path.dirname(p));
+
+  let target = mode;
+  if (target === undefined) {
+    try {
+      target = (await fsp.stat(p)).mode & 0o777;
+    } catch {
+      target = undefined; // absent (or unreadable) -> let the default stand.
+    }
+  }
+
+  const tmp = path.join(
+    path.dirname(p),
+    `.${path.basename(p)}.arbella-${process.pid}-${Date.now().toString(36)}.tmp`,
+  );
+  try {
+    await fsp.writeFile(tmp, content, { mode: 0o600 });
+    if (target !== undefined) await fsp.chmod(tmp, target);
+    await fsp.rename(tmp, p);
+  } catch (err) {
+    await fsp.rm(tmp, { force: true }).catch(() => {});
+    throw err;
+  }
+}
+
 async function copy(from: string, to: string): Promise<void> {
   await ensureDir(path.dirname(to));
   // cpSync/cp handles files and dirs recursively; preserve nothing special.
@@ -91,10 +131,25 @@ async function statKind(
   }
 }
 
+/**
+ * Resolve every symlink in `p` (parents included), falling back to `p` itself
+ * when it cannot be resolved (missing path, permission denied). Never throws:
+ * callers use it to ask "where does this really live", and an unanswerable
+ * question must not abort a capture.
+ */
+async function realPath(p: string): Promise<string> {
+  try {
+    return await fsp.realpath(p);
+  } catch {
+    return p;
+  }
+}
+
 export const fs: FsService = {
   read,
   readBytes,
   write,
+  writeAtomic,
   writeBytes,
   copy,
   ensureDir,
@@ -105,6 +160,7 @@ export const fs: FsService = {
   readLink,
   symlink,
   statKind,
+  realPath,
 };
 
 export default fs;

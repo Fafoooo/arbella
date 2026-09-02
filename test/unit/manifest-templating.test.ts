@@ -18,10 +18,23 @@ import {
   partitionPluginsForRestore,
   pluginInstallArgs,
 } from "../../src/adapters/codex/restore.js";
+import { processConfigToml } from "../../src/adapters/codex/configToml.js";
 import { createTemplater } from "../../src/core/templater/index.js";
 import { makeVariables } from "../../src/core/templater/variables.js";
 import type { RestoreContext, RestoreData } from "../../src/adapters/adapter.interface.js";
-import type { MarketplaceEntry, PluginEntry } from "../../src/types.js";
+import type { Logger, MarketplaceEntry, PluginEntry } from "../../src/types.js";
+
+/** Minimal no-op Logger fake shared by the restore-planning tests below. */
+function fakeLogger(): Logger {
+  return {
+    info: () => {},
+    success: () => {},
+    warn: () => {},
+    error: () => {},
+    step: () => {},
+    debug: () => {},
+  };
+}
 
 describe("claude parseInstalledPlugins: projectPath is templated (no machine-path leak)", () => {
   const installed = {
@@ -113,7 +126,10 @@ describe("codex partitionPluginsForRestore: built-in-marketplace plugins are def
 
   it("keeps the dry-run plan aligned with deferred built-in marketplace plugins", async () => {
     const ctx = {
-      fs: { exists: async () => false },
+      fs: { exists: async () => false, statKind: async () => "missing" as const },
+      templater: createTemplater(),
+      vars: makeVariables("/home/alice", "alice", "linux", "/home/alice/.codex"),
+      log: fakeLogger(),
       toolHome: "/home/alice/.codex",
       sourceOfTruth: "repo",
     } as RestoreContext;
@@ -140,5 +156,97 @@ describe("codex partitionPluginsForRestore: built-in-marketplace plugins are def
       "Install plugin superpowers@claude-plugins-official",
       "Install plugin loner",
     ]);
+  });
+});
+
+describe("codex processConfigToml: local marketplace sources are templated", () => {
+  it("folds a [marketplaces.*] local source through the templater instead of leaking the raw machine path", () => {
+    const home = "/Users/alice";
+    const templater = createTemplater();
+    const vars = makeVariables(home, "alice", "linux", `${home}/.codex`);
+
+    const raw = [
+      `[marketplaces.openai-primary-runtime]`,
+      `source_type = "local"`,
+      `source = "${home}/.cache/codex-runtimes/codex-primary-runtime/plugins/openai-primary-runtime"`,
+      ``,
+      `[marketplaces.claude-plugins-official]`,
+      `source_type = "git"`,
+      `source = "https://github.com/anthropics/claude-plugins-official.git"`,
+      ``,
+    ].join("\n");
+
+    const result = processConfigToml(raw, templater, vars);
+
+    const local = result.marketplaces.find((m) => m.id === "openai-primary-runtime");
+    expect(local?.sourceType).toBe("local");
+    expect(local?.source).toBe(
+      "{{HOME}}/.cache/codex-runtimes/codex-primary-runtime/plugins/openai-primary-runtime",
+    );
+    // Regression guard: no raw machine path survives in the extracted manifest entry.
+    expect(result.marketplaces.some((m) => m.source.includes(home))).toBe(false);
+
+    const git = result.marketplaces.find((m) => m.id === "claude-plugins-official");
+    expect(git?.source).toBe("https://github.com/anthropics/claude-plugins-official.git");
+  });
+});
+
+describe("codex restore planning: local marketplaces missing on this machine are skipped", () => {
+  it("hydrates each marketplace source and skips a local one whose directory is absent, while still planning a github one", async () => {
+    const home = "/home/bob";
+    const toolHome = `${home}/.codex`;
+    const templater = createTemplater();
+    const vars = makeVariables(home, "bob", "linux", toolHome);
+
+    const marketplaces: MarketplaceEntry[] = [
+      {
+        id: "openai-bundled",
+        sourceType: "local",
+        source: "{{TOOL_HOME}}/.tmp/bundled-marketplaces/openai-bundled",
+      },
+      {
+        id: "claude-plugins-official",
+        sourceType: "github",
+        source: "anthropics/claude-plugins-official",
+      },
+    ];
+
+    const statKindCalls: string[] = [];
+    const ctx = {
+      fs: {
+        exists: async () => false,
+        statKind: async (p: string) => {
+          statKindCalls.push(p);
+          return "missing" as const;
+        },
+      },
+      templater,
+      vars,
+      log: fakeLogger(),
+      toolHome,
+      sourceOfTruth: "repo",
+    } as RestoreContext;
+
+    const data: RestoreData = {
+      manifest: {
+        tool: "codex",
+        plugins: [],
+        marketplaces,
+        skills: [],
+        npmGlobals: [],
+        enabledPlugins: {},
+      },
+      files: [],
+      symlinks: [],
+    };
+
+    const actions = await planActions(ctx, data);
+    const marketplaceActions = actions.filter((action) => action.type === "add-marketplace");
+
+    expect(marketplaceActions.map((action) => action.description)).toEqual([
+      "Register marketplace claude-plugins-official (anthropics/claude-plugins-official)",
+    ]);
+    // Only the local marketplace's hydrated path is ever stat'd.
+    expect(statKindCalls).toEqual([`${toolHome}/.tmp/bundled-marketplaces/openai-bundled`]);
   });
 });

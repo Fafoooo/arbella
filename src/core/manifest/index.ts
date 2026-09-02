@@ -26,6 +26,8 @@ import type {
   CapturedFile,
 } from "../../types.js";
 import { toolManifestSchema, arbellaMetaSchema, MANIFEST_SCHEMA_VERSION } from "./schema.js";
+import { isSafeToolName, mergeExternalTools } from "../externaltools/classify.js";
+import { isPlainObject } from "../../utils/object.js";
 
 /* -------------------------------------------------------------------------- */
 /* Empty / default manifest                                                    */
@@ -44,6 +46,9 @@ export function emptyManifest(tool: ToolId): ToolManifest {
     skills: [],
     npmGlobals: [],
     enabledPlugins: {},
+    mcpServers: {},
+    projectMcpServers: [],
+    externalTools: [],
   });
 }
 
@@ -55,9 +60,39 @@ export function emptyManifest(tool: ToolId): ToolManifest {
  * Validate + parse a manifest read from disk. Throws a ZodError on malformed
  * data so the restore/status caller can surface a clear "corrupt manifest"
  * message rather than silently proceeding with garbage.
+ *
+ * The ONE thing that is dropped rather than rejected is an `externalTools`
+ * entry whose name is not {@link isSafeToolName} (see the schema): a hostile or
+ * merely broken name must not make an otherwise-good repo unreadable, but it
+ * must also never reach `brew install <name>`. `onDroppedTool` is called once
+ * per dropped name so the caller can say so out loud instead of quietly
+ * restoring less than the repo lists.
  */
-export function parseManifest(json: unknown): ToolManifest {
-  return toolManifestSchema.parse(json);
+export function parseManifest(
+  json: unknown,
+  onDroppedTool?: (name: string) => void,
+): ToolManifest {
+  const manifest = toolManifestSchema.parse(json);
+  if (onDroppedTool !== undefined) {
+    for (const name of droppedExternalToolNames(json)) onDroppedTool(name);
+  }
+  return manifest;
+}
+
+/**
+ * The `externalTools` names the schema filter removed from `json` — the RAW
+ * manifest value, before parsing. Pure; used only for reporting (the parse
+ * itself has already dropped them).
+ */
+export function droppedExternalToolNames(json: unknown): string[] {
+  if (!isPlainObject(json) || !Array.isArray(json.externalTools)) return [];
+  const out: string[] = [];
+  for (const entry of json.externalTools) {
+    if (!isPlainObject(entry)) continue;
+    const name = entry.name;
+    if (typeof name === "string" && !isSafeToolName(name)) out.push(name);
+  }
+  return out;
 }
 
 /**
@@ -172,6 +207,9 @@ export function buildManifest(
     skills: ToolManifest["skills"];
     npmGlobals: ToolManifest["npmGlobals"];
     enabledPlugins: ToolManifest["enabledPlugins"];
+    mcpServers: ToolManifest["mcpServers"];
+    projectMcpServers: ToolManifest["projectMcpServers"];
+    externalTools: ToolManifest["externalTools"];
   }> = {},
 ): ToolManifest {
   return toolManifestSchema.parse({
@@ -181,8 +219,21 @@ export function buildManifest(
     skills: mergeSkills(raw.skills ?? []),
     npmGlobals: mergeNpmGlobals(raw.npmGlobals ?? []),
     enabledPlugins: raw.enabledPlugins ?? {},
+    mcpServers: raw.mcpServers ?? {},
+    projectMcpServers: raw.projectMcpServers ?? [],
+    externalTools: mergeExternalTools([raw.externalTools ?? []]),
   });
 }
+
+/**
+ * Merge external-tool lists (de-duplicated by `manager:name`, `usedBy` unioned).
+ *
+ * Re-exported, NOT reimplemented: src/core/externaltools/classify.ts owns the one
+ * implementation, and the restore command's cross-tool pass already uses it. Two
+ * copies of this merge is exactly how the manifest and the restore plan would
+ * start disagreeing about which binaries a pull has to install.
+ */
+export { mergeExternalTools };
 
 /** De-duplicate an array by a derived string key, keeping the first occurrence. */
 function dedupeBy<T>(items: readonly T[], key: (item: T) => string): T[] {
@@ -235,14 +286,6 @@ function sortKeysDeep(value: unknown): unknown {
     return sorted;
   }
   return value;
-}
-
-/** True for ordinary record objects (excludes null, arrays, class instances). */
-function isPlainObject(value: unknown): value is Record<string, unknown> {
-  if (value === null || typeof value !== "object") return false;
-  if (Array.isArray(value)) return false;
-  const proto = Object.getPrototypeOf(value);
-  return proto === Object.prototype || proto === null;
 }
 
 /* -------------------------------------------------------------------------- */

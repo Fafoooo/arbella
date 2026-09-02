@@ -35,10 +35,10 @@ import type {
   OS,
   RestoreAction,
   SecretRef,
-  ToolManifest,
 } from "../../types.js";
 
 import { denylistFor, matchesDeny } from "../../core/sanitizer/denylist.js";
+import { emptyManifest } from "../../core/manifest/index.js";
 import { cliBinaryName, detectOS, installCommandFor } from "../../platform/os.js";
 import { runInstall, which } from "../../platform/install.js";
 import { normalizeCapturedSymlinkTarget } from "../../utils/symlink.js";
@@ -138,19 +138,6 @@ function targetAbsFor(dirs: RootDirs, target: AntigravityTarget): string {
 /* -------------------------------------------------------------------------- */
 /* Small helpers                                                               */
 /* -------------------------------------------------------------------------- */
-
-/** An empty manifest for antigravity (it tracks no reinstallable plugins here —
- * the extension list is frozen as a file, not reinstalled from a manifest). */
-function emptyManifest(): ToolManifest {
-  return {
-    tool: "antigravity",
-    plugins: [],
-    marketplaces: [],
-    skills: [],
-    npmGlobals: [],
-    enabledPlugins: {},
-  };
-}
 
 /** Read mode bits best-effort so executable helper files keep their mode. */
 async function readMode(abs: string): Promise<number | undefined> {
@@ -291,7 +278,7 @@ export async function capture(ctx: CaptureContext): Promise<CaptureResult> {
   const symlinks: CapturedSymlink[] = [];
   const secrets: SecretRef[] = [];
   const warnings: string[] = [];
-  const manifest = emptyManifest();
+  const manifest = emptyManifest("antigravity");
   const deny = denylistFor("antigravity");
 
   const roots = await captureRoots(ctx);

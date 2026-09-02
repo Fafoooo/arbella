@@ -41,10 +41,10 @@ import type {
   RestoreAction,
   SecretRef,
   SkillEntry,
-  ToolManifest,
 } from "../../types.js";
 
 import { denylistFor, matchesDeny } from "../../core/sanitizer/denylist.js";
+import { emptyManifest } from "../../core/manifest/index.js";
 import { cliBinaryName, detectOS, installCommandFor } from "../../platform/os.js";
 import { runInstall, which } from "../../platform/install.js";
 import { normalizeCapturedSymlinkTarget } from "../../utils/symlink.js";
@@ -98,19 +98,6 @@ function targetAbsFor(ctx: RestoreContext, target: CursorTarget): string {
   return path.join(root, ...target.rel.split("/").filter(Boolean));
 }
 
-
-/** An empty manifest for cursor (all arrays empty). Kept inline so the adapter
- * does not depend on the manifest module's internals. */
-function emptyCursorManifest(): ToolManifest {
-  return {
-    tool: "cursor",
-    plugins: [],
-    marketplaces: [],
-    skills: [],
-    npmGlobals: [],
-    enabledPlugins: {},
-  };
-}
 
 /* -------------------------------------------------------------------------- */
 /* Secret discovery in mcp.json                                                */
@@ -457,7 +444,7 @@ export async function capture(
   const symlinks: CapturedSymlink[] = [];
   const secrets: SecretRef[] = [];
   const warnings: string[] = [];
-  const manifest = emptyCursorManifest();
+  const manifest = emptyManifest("cursor");
 
   const p = paths(ctx.toolHome);
   const userPaths = cursorUserPaths(p.home, ctx.os, ctx.env);
