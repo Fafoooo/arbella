@@ -30,6 +30,20 @@
  * steps are guarded by `which("claude")` / the npm helper and degrade to a
  * warning when the CLI is missing, rather than throwing.
  *
+ * Symlink safety (claude/files/…): a "repo" pull writes THROUGH any existing
+ * symlink component under the tool home, since `ctx.fs.write`/`writeBytes` do
+ * not re-check the path they were handed. That is exactly the behavior the
+ * skills.sh layout needs — `~/.claude/skills/<name>` is meant to be a symlink
+ * into the shared skills root `~/.agents/skills/<name>`, and writing the
+ * frozen skill through it is how the skill gets updated in place — but it is
+ * also how a symlink planted anywhere else under the tool home (e.g.
+ * `~/.claude/hooks -> /etc`) could redirect a write outside `~/.claude`. See
+ * `claudeFilesSymlinkBlock` below: it allows the write ONLY when the symlink
+ * is exactly `<toolHome>/skills/<name>` AND its realpath resolves under the
+ * shared skills root (or the tool home's own `skills/` dir); everything else
+ * is skipped with a warning, mirroring the existing `memorySymlinkBlock`
+ * treatment of `claude/memories/…` paths.
+ *
  * planActions() returns the same set of intended actions WITHOUT executing, for
  * the restore command's --dry-run output.
  */
@@ -43,7 +57,7 @@ import type { RestoreAction, CapturedFile } from "../../types.js";
 
 import { cliBinaryName } from "../../platform/os.js";
 import { which } from "../../platform/install.js";
-import { findSymlinkComponent } from "../../utils/safe-path.js";
+import { findSymlinkComponent, isPathUnder } from "../../utils/safe-path.js";
 
 import { REPO_PREFIX } from "./paths.js";
 import {
@@ -94,6 +108,53 @@ async function memorySymlinkBlock(
   return findSymlinkComponent(ctx.fs, ctx.toolHome, dest);
 }
 
+/**
+ * True when `link` is the legitimate skills.sh symlink for a `claude/files/`
+ * destination whose tool-home-relative path is `rel` — i.e. `rel` names a file
+ * under `skills/<name>/…`, `link` is exactly `<toolHome>/skills/<name>`, and
+ * that link's REAL target (not its raw relative text) resolves under the
+ * shared skills root `<toolHome's parent>/.agents/skills` or, as a fallback for
+ * a same-machine relocation, under the tool home's own `skills/` dir.
+ *
+ * Anything else — a link elsewhere under the tool home, or a `skills/<name>`
+ * link that resolves somewhere outside those two roots (a planted symlink) —
+ * returns false so the caller refuses the write.
+ */
+async function isSharedSkillsLink(
+  ctx: RestoreContext,
+  rel: string,
+  link: string,
+): Promise<boolean> {
+  const segments = rel.split("/");
+  const name = segments[1];
+  if (segments[0] !== "skills" || !name) return false;
+
+  const expectedLink = path.join(ctx.toolHome, "skills", name);
+  if (link !== expectedLink) return false;
+
+  const resolved = await ctx.fs.realPath(link);
+  const sharedSkillsRoot = path.join(path.dirname(ctx.toolHome), ".agents", "skills");
+  const ownSkillsRoot = path.join(ctx.toolHome, "skills");
+  return isPathUnder(sharedSkillsRoot, resolved) || isPathUnder(ownSkillsRoot, resolved);
+}
+
+/**
+ * The symlinked component that makes a `claude/files/…` destination unsafe, or
+ * null. See the module header for the policy: any symlink is refused UNLESS it
+ * is the shared-skills link this adapter itself is meant to write through.
+ */
+async function claudeFilesSymlinkBlock(
+  ctx: RestoreContext,
+  repoPath: string,
+  dest: string,
+): Promise<string | null> {
+  if (!repoPath.startsWith(`${REPO_PREFIX}/`)) return null;
+  const link = await findSymlinkComponent(ctx.fs, ctx.toolHome, dest);
+  if (link === null) return null;
+  if (await isSharedSkillsLink(ctx, stripPrefix(repoPath), link)) return null;
+  return link;
+}
+
 /** Human label for an action description: the path relative to its repo root. */
 function describePath(repoPath: string): string {
   if (repoPath.startsWith(`${REPO_PREFIX}/`)) return stripPrefix(repoPath);
@@ -121,11 +182,20 @@ async function writeOne(
 
   const isMemory = file.repoPath.startsWith(`${MEMORIES_REPO_PREFIX}/`);
 
-  const link = await memorySymlinkBlock(ctx, file.repoPath, dest);
-  if (link !== null) {
+  const memLink = await memorySymlinkBlock(ctx, file.repoPath, dest);
+  if (memLink !== null) {
     ctx.log.warn(
-      `claude: skipping ${file.repoPath} — ${link} is a symlink; ` +
+      `claude: skipping ${file.repoPath} — ${memLink} is a symlink; ` +
         "arbella does not write memories through links.",
+    );
+    return false;
+  }
+
+  const filesLink = await claudeFilesSymlinkBlock(ctx, file.repoPath, dest);
+  if (filesLink !== null) {
+    ctx.log.warn(
+      `claude: refusing to write ${describePath(file.repoPath)} through symlink ` +
+        `${filesLink} (not a shared-skills link)`,
     );
     return false;
   }
@@ -139,9 +209,11 @@ async function writeOne(
   // the write cannot be one operation, and a plain write follows a link that
   // appears in the gap. `rename` replaces the leaf entry instead.
   //
-  // The `claude/files/` tree deliberately does NOT: a skill there is often a
-  // symlink into ~/.agents/skills, and writing through it is the behavior the
-  // adapter exists to restore (which is also why memorySymlinkBlock exempts it).
+  // The `claude/files/` tree writes straight through (write/writeBytes, not the
+  // atomic rename pair): claudeFilesSymlinkBlock above has already vetted the
+  // path, and the one link it permits — a skill symlinked into ~/.agents/skills
+  // — is deliberately followed, since updating the canonical skill in place is
+  // the behavior the adapter exists to restore.
   if (file.binary) {
     const bytes = Buffer.from(file.content, "base64");
     if (isMemory) await ctx.fs.writeBytesAtomic(dest, bytes, file.mode);
@@ -198,9 +270,10 @@ export async function planActions(
   for (const file of data.files) {
     const dest = targetFor(ctx, file.repoPath);
     if (dest === null) continue;
-    // Mirror the write-side refusal so the dry run cannot list a memory file the
+    // Mirror the write-side refusals so the dry run cannot list a file the
     // restore will then skip.
     if ((await memorySymlinkBlock(ctx, file.repoPath, dest)) !== null) continue;
+    if ((await claudeFilesSymlinkBlock(ctx, file.repoPath, dest)) !== null) continue;
     const overwrites = await ctx.fs.exists(dest);
     if (ctx.sourceOfTruth === "local" && overwrites) continue;
     actions.push({

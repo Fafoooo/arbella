@@ -92,4 +92,19 @@ export async function findSymlinkComponent(
   return null;
 }
 
+/**
+ * True when `target` is `root` itself or a real descendant of it.
+ *
+ * Used to check a symlink's RESOLVED destination (from `fs.realPath`) against a
+ * trusted directory, e.g. "does this skill link actually land inside the
+ * shared skills root, or did it get redirected somewhere else". Goes through
+ * `path.relative` (via the same `escapesRoot` rule `findSymlinkComponent`
+ * uses) rather than a plain `startsWith`, so a sibling with a matching prefix —
+ * `<root>-evil` is not mistaken for a descendant of `<root>`.
+ */
+export function isPathUnder(root: string, target: string): boolean {
+  const rel = path.relative(root, target);
+  return rel === "" || (!escapesRoot(rel) && !path.isAbsolute(rel));
+}
+
 export default findSymlinkComponent;
