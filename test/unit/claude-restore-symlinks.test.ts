@@ -108,6 +108,7 @@ describe("claude restore: claude/files/ symlink gate", () => {
     await fsp.symlink(
       path.join("..", "..", ".agents", "skills", "foo"),
       path.join(toolHome, "skills", "foo"),
+      "dir", // Windows + Node 18 need the type for a relative dir link
     );
 
     const file = skillFile("foo", "SKILL.md", "# Foo skill\n");
@@ -130,7 +131,7 @@ describe("claude restore: claude/files/ symlink gate", () => {
     await fsp.mkdir(outside, { recursive: true });
     await fsp.mkdir(toolHome, { recursive: true });
     // Planted symlink: ~/.claude/hooks -> somewhere outside ~/.claude entirely.
-    await fsp.symlink(outside, path.join(toolHome, "hooks"));
+    await fsp.symlink(outside, path.join(toolHome, "hooks"), "dir");
 
     const file = hookFile("x.sh", "#!/bin/sh\necho pwned\n");
     await restoreClaude(restoreCtx(toolHome, home), {
@@ -151,7 +152,7 @@ describe("claude restore: claude/files/ symlink gate", () => {
     await fsp.mkdir(outside, { recursive: true });
     await fsp.mkdir(path.join(toolHome, "skills"), { recursive: true });
     // Looks like a skill link, but does NOT resolve into ~/.agents/skills.
-    await fsp.symlink(outside, path.join(toolHome, "skills", "evil"));
+    await fsp.symlink(outside, path.join(toolHome, "skills", "evil"), "dir");
 
     const file = skillFile("evil", "SKILL.md", "# should not land\n");
     await restoreClaude(restoreCtx(toolHome, home), {
@@ -174,10 +175,11 @@ describe("claude restore: claude/files/ symlink gate", () => {
     await fsp.mkdir(outside, { recursive: true });
     await fsp.mkdir(sharedSkill, { recursive: true });
     await fsp.mkdir(path.join(toolHome, "skills"), { recursive: true });
-    await fsp.symlink(outside, path.join(toolHome, "hooks"));
+    await fsp.symlink(outside, path.join(toolHome, "hooks"), "dir");
     await fsp.symlink(
       path.join("..", "..", ".agents", "skills", "foo"),
       path.join(toolHome, "skills", "foo"),
+      "dir", // Windows + Node 18 need the type for a relative dir link
     );
 
     const goodSkillFile = skillFile("foo", "SKILL.md", "# Foo skill\n");
