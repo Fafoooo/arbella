@@ -46,6 +46,32 @@ async function writeBytes(p: string, content: Buffer, mode?: number): Promise<vo
  * afterwards, so its contents are never briefly world-readable.
  */
 async function writeAtomic(p: string, content: string, mode?: number): Promise<void> {
+  await replaceViaRename(p, content, mode);
+}
+
+/**
+ * The bytes twin of {@link writeAtomic}, with identical semantics. Restores that
+ * place binary payloads (base64 in the manifest) need the same rename, for the
+ * same reasons — plus the symlink one below.
+ */
+async function writeBytesAtomic(p: string, content: Buffer, mode?: number): Promise<void> {
+  await replaceViaRename(p, content, mode);
+}
+
+/**
+ * Shared implementation of the two atomic writers.
+ *
+ * `rename(2)` REPLACES the destination entry: when the leaf is (or becomes) a
+ * symlink between the check and the write, the link itself is replaced rather
+ * than followed — so a restore cannot be redirected through a leaf planted in
+ * the gap. Intermediate directories are a different problem; see the header of
+ * src/utils/safe-path.ts.
+ */
+async function replaceViaRename(
+  p: string,
+  content: string | Buffer,
+  mode?: number,
+): Promise<void> {
   await ensureDir(path.dirname(p));
 
   let target = mode;
@@ -151,6 +177,7 @@ export const fs: FsService = {
   write,
   writeAtomic,
   writeBytes,
+  writeBytesAtomic,
   copy,
   ensureDir,
   exists,

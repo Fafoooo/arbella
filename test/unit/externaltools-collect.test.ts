@@ -29,6 +29,7 @@ import {
   installSharedExternalTools,
 } from "../../src/commands/restore.js";
 import type { Logger } from "../../src/types.js";
+import { toPosixAll } from "../helpers/platform.js";
 
 const HOME = "/Users/fab";
 
@@ -118,7 +119,10 @@ describe("capturedAbsolutePaths", () => {
       { home: HOME, toolHome: "/Users/fab/.claude", filesPrefix: "claude/files" },
     );
 
-    expect([...paths].sort()).toEqual([
+    // The helper joins with `path.join`, so on Windows it emits "\" while the
+    // POSIX-rooted fixture literals keep "/". The MAPPING is what is under test,
+    // not the separator flavor — compare normalized.
+    expect(toPosixAll(paths).sort()).toEqual([
       "/Users/fab/.agents/hooks/dispatch.sh",
       "/Users/fab/.claude/hooks/send_event.py",
     ]);

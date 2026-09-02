@@ -79,6 +79,7 @@ import {
   planActions as planCursorActions,
 } from "../../src/adapters/cursor/index.js";
 
+import { isPosixHost, itPosixHost } from "../helpers/platform.js";
 import { fs as realFs } from "../../src/utils/fs.js";
 import { createSanitizer } from "../../src/core/sanitizer/index.js";
 import { createTemplater } from "../../src/core/templater/index.js";
@@ -201,6 +202,10 @@ let tmpRoot: string;
 let srcHome: string; // the fake source $HOME
 let dstHome: string; // the fresh target $HOME
 let repoRoot: string; // the backup repo working tree
+/** The fixture's project dir under srcHome, keyed into ~/.claude.json's projects. */
+let claudeProjectDir: string;
+/** The vars the Claude capture ran with — the same ones that templated its output. */
+let claudeCaptureVars: TemplateVariables;
 
 let claudeCapture: CaptureResult;
 let codexCapture: CaptureResult;
@@ -352,7 +357,7 @@ beforeAll(async () => {
 
   // ---- WP-A: ~/.claude.json (SIBLING of the tool home) ----
   // Only mcpServers / projects.*.mcpServers may be lifted out of it.
-  const claudeProjectDir = path.join(srcHome, "programming", "arbella");
+  claudeProjectDir = path.join(srcHome, "programming", "arbella");
   await fsp.mkdir(claudeProjectDir, { recursive: true });
   await writeFile(
     srcHome,
@@ -492,6 +497,7 @@ beforeAll(async () => {
 
   // ---- Capture orchestration (mirrors the backup command's R9 wiring) ----
 	  const claudeVars = makeVariables(srcHome, "fab", "linux", claudeSrc);
+	  claudeCaptureVars = claudeVars;
 	  const codexVars = makeVariables(srcHome, "fab", "linux", codexSrc);
 	  const cursorVars = makeVariables(srcHome, "fab", "linux", cursorSrc);
 
@@ -560,12 +566,13 @@ function findFile(files: CapturedFile[], repoPath: string): CapturedFile | undef
  * content (settings.json / config.toml / agent files). The fixtures pin the
  * templater to POSIX (os: "linux") and embed "/"-style paths, so on a Windows
  * runner the native "\" separators — and config.toml paths that are only valid
- * TOML with "/" — make exactly these checks fail. They are skipped on Windows.
- * The win32 separator fold/rehydrate logic is covered host-agnostically by the
- * "capture+restore with win32 vars" suite below and by the templater unit tests,
- * which DO run on Windows. Everything else here runs on every OS.
+ * TOML with "/" — make exactly these checks fail. They are skipped on Windows
+ * via the shared `itPosixHost` (test/helpers/platform.ts), which also guards the
+ * POSIX-mode assertions below. The win32 separator fold/rehydrate logic is
+ * covered host-agnostically by the "capture+restore with win32 vars" suite below
+ * and by the templater unit tests, which DO run on Windows. Everything else here
+ * runs on every OS.
  */
-const itPosixHost = process.platform === "win32" ? it.skip : it;
 
 /* -------------------------------------------------------------------------- */
 /* CAPTURE assertions                                                           */
@@ -650,8 +657,15 @@ describe("capture: secrets never leave the machine", () => {
     expect((serena.env as Record<string, unknown>).SERENA_TOKEN).toBe("{{REDACTED}}");
     expect(blob).not.toContain(GLOBAL_MCP_ENV_SECRET);
 
+    // The expected key is DERIVED from the fixture dir through the same
+    // toTemplate the capture used. Hard-coding "{{HOME}}/programming/arbella"
+    // asserted a POSIX separator the fixture never produced on Windows, where
+    // `path.join` yields "{{HOME}}\programming\arbella".
     expect(claudeCapture.manifest.projectMcpServers).toEqual([
-      { projectPath: "{{HOME}}/programming/arbella", servers: { local: { command: "local-mcp" } } },
+      {
+        projectPath: createTemplater().toTemplate(claudeProjectDir, claudeCaptureVars),
+        servers: { local: { command: "local-mcp" } },
+      },
     ]);
   });
 });
@@ -739,7 +753,9 @@ describe("capture: the wider Claude frozen set (WP-A)", () => {
 
     const script = findFile(claudeCapture.files, "claude/files/scripts/dispatch.sh");
     expect(script).toBeDefined();
-    expect(script!.mode).toBe(0o755);
+    // Windows has no POSIX mode bits: chmod(0o755) is a near no-op and every
+    // file reads back 0o666, so only the exec-bit CLAIM is host-specific here.
+    if (isPosixHost) expect(script!.mode).toBe(0o755);
 
     const keys = findFile(claudeCapture.files, "claude/files/keybindings.json");
     expect(keys).toBeDefined();
@@ -774,7 +790,7 @@ describe("capture: linked $HOME files land in shared/home (WP-B)", () => {
   it("carries the hook dispatcher settings.json points at, redacted and executable", () => {
     const script = homeFile(".agents/hooks/dispatch.sh");
     expect(script).toBeDefined();
-    expect(script!.mode).toBe(0o755);
+    if (isPosixHost) expect(script!.mode).toBe(0o755);
     // The inline token is gone; the machine paths are placeholders.
     expect(script!.content).not.toContain(HOME_SCRIPT_TOKEN);
     expect(script!.content).toContain("{{REDACTED}}");
@@ -787,7 +803,7 @@ describe("capture: linked $HOME files land in shared/home (WP-B)", () => {
   it("carries the MCP launcher ~/.claude.json points at", () => {
     const launcher = homeFile(".local/bin/serena-mcp-start");
     expect(launcher).toBeDefined();
-    expect(launcher!.mode).toBe(0o755);
+    if (isPosixHost) expect(launcher!.mode).toBe(0o755);
   });
 
   it("carries a codex hook script from hooks.json", () => {

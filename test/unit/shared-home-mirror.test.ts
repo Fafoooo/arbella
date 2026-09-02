@@ -23,6 +23,7 @@ import {
 } from "../../src/core/homefiles/home-index.js";
 import { SHARED_HOME_REPO_PREFIX } from "../../src/core/homefiles/capture.js";
 import type { CapturedFile, ToolId } from "../../src/types.js";
+import { itPosixHost } from "../helpers/platform.js";
 
 let repoRoot: string;
 
@@ -189,7 +190,9 @@ describe("status agrees with push about what is removed", () => {
 });
 
 describe("loadHomeFiles: the mode a restore reads back", () => {
-  it("keeps the executable bit but never a setuid bit from the working tree", async () => {
+  // POSIX-only by construction: Windows implements neither the setuid bit this
+  // strips nor the 0o755 it must leave behind.
+  itPosixHost("keeps the executable bit but never a setuid bit from the working tree", async () => {
     // git stores only +x, so anything above 0o777 in a checkout was put there by
     // something else — and a restore must not hand a $HOME script that mode.
     await push([entry(CLAUDE_REL, "claude")], ["claude"]);
@@ -198,5 +201,32 @@ describe("loadHomeFiles: the mode a restore reads back", () => {
     const [file] = await loadHomeFiles(repoRoot);
 
     expect(file!.mode).toBe(0o755);
+  });
+
+  it("reads a NUL-free binary back as binary, byte-for-byte", async () => {
+    // The repo walker used a NUL-only heuristic while CAPTURE used
+    // decodeForCapture, so the two disagreed on any invalid-UTF-8 blob with no
+    // NUL in its first 8 KiB — a small icon or thumbnail under `extraPaths`.
+    // The pull read it as "text", decoded it leniently (every bad byte becomes
+    // U+FFFD) and wrote those replacement characters back to $HOME.
+    const bytes = Buffer.from([0xff, 0xfe, 0x01, 0x80, 0x81]);
+    await push([entry(CLAUDE_REL, "claude")], ["claude"]);
+    await fsp.writeFile(abs("icon.bin"), bytes);
+
+    const restored = await loadHomeFiles(repoRoot);
+    const blob = restored.find((f) => f.repoPath.endsWith("/icon.bin"));
+
+    expect(blob).toBeDefined();
+    expect(blob!.binary).toBe(true);
+    expect(Buffer.from(blob!.content, "base64")).toEqual(bytes);
+  });
+
+  it("still reads an ordinary UTF-8 script back as text", async () => {
+    await push([entry(CLAUDE_REL, "claude", "#!/bin/sh\nexec \"$@\"\n")], ["claude"]);
+
+    const [file] = await loadHomeFiles(repoRoot);
+
+    expect(file!.binary).toBeUndefined();
+    expect(file!.content).toBe('#!/bin/sh\nexec "$@"\n');
   });
 });

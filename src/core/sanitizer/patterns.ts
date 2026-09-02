@@ -209,14 +209,51 @@ const CREDENTIAL_QUERY_PARAMS_EXTRA: ReadonlySet<string> = new Set([
   "credentials",
 ]);
 
+/**
+ * Credential stems matched as a normalized SUBSTRING of a parameter name, so a
+ * VENDOR-PREFIXED parameter is caught too. AWS presigned URLs are the case that
+ * forced this: `X-Amz-Credential` / `X-Amz-Signature` normalize to
+ * "xamzcredential" / "xamzsignature", which equal nothing in the exact set above
+ * and match no rule in {@link isSecretKey} either — so a presigned S3 URL under
+ * an `url:` key used to be stored verbatim, signature and all.
+ *
+ * Kept deliberately short and specific: these three read as credentials wherever
+ * they appear in a query-parameter name, unlike a bare "key" or "auth" (already
+ * handled exactly above, where a false positive would be noisier).
+ */
+const CREDENTIAL_PARAM_STEMS: readonly string[] = [
+  "credential",
+  "signature",
+  "securitytoken",
+];
+
+/**
+ * The parameter name as the SERVER will read it: percent-decoded, lowercased,
+ * with "-"/"_" removed. Decoding matters because `?api%5Fkey=…` and `?api_key=…`
+ * are the same parameter, and only the second one is recognizable as text.
+ * A malformed escape (`%zz`) makes decodeURIComponent throw — that is not a
+ * reason to skip the pair, so the raw name is normalized instead.
+ */
+function normalizeParamName(rawName: string): string {
+  let decoded = rawName;
+  try {
+    decoded = decodeURIComponent(rawName);
+  } catch {
+    // Malformed percent-escape: fall back to the raw name.
+  }
+  return decoded.toLowerCase().replace(/[-_]/g, "");
+}
+
 /** True if any `k=v` pair (split on "&"/";") names a credential parameter. */
 function hasCredentialParam(pairs: string): boolean {
   if (pairs === "") return false;
   for (const part of pairs.split(/[&;]/)) {
     const rawName = (part.split("=")[0] ?? "").trim();
     if (rawName === "") continue;
-    const normalized = rawName.toLowerCase().replace(/[-_]/g, "");
-    if (isSecretKey(rawName) || CREDENTIAL_QUERY_PARAMS_EXTRA.has(normalized)) return true;
+    const normalized = normalizeParamName(rawName);
+    if (isSecretKey(rawName) || isSecretKey(normalized)) return true;
+    if (CREDENTIAL_QUERY_PARAMS_EXTRA.has(normalized)) return true;
+    if (CREDENTIAL_PARAM_STEMS.some((stem) => normalized.includes(stem))) return true;
   }
   return false;
 }

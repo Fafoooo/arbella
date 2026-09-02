@@ -26,6 +26,21 @@
  * over time and both `aau_26S_Logik` and `aau-26S-Logik` dirs exist in the wild.
  * Preserving the tail keeps whichever spelling the local Claude actually uses.
  *
+ * HOME-PREFIX MATCHING is on a SEGMENT boundary: a slug is home-scoped only when
+ * it IS the home slug or starts with `<homeSlug>-`. A bare `startsWith` would
+ * claim `/Users/aliceX` (slug `-Users-aliceX`) for a home of `/Users/alice`
+ * (slug `-Users-alice`) and restore that unrelated project's memories into
+ * `<newHome>X`.
+ *
+ * RESIDUAL AMBIGUITY, by construction of the slug and not fixable here: slugging
+ * is lossy, so `/home/alice/work` and `/home/alice-work` BOTH slug to
+ * `-home-alice-work`. With a home of `/home/alice`, the boundary rule reads that
+ * slug as the home-scoped project `<home>/work` — which is right for the first
+ * path and wrong for the second. Claude Code's own project dirs collide the same
+ * way (both projects share one `projects/<slug>` directory), so there is no
+ * information left in the slug to tell them apart; the fold is documented rather
+ * than guessed at.
+ *
  * All fs access goes through the injected context; the path helpers are pure.
  */
 
@@ -58,22 +73,43 @@ export function slugifyPath(p: string): string {
 }
 
 /**
+ * True when `slug` names $HOME itself or a project BELOW it — i.e. the home
+ * prefix ends on a slug-segment boundary. `-Users-aliceX` is NOT under
+ * `-Users-alice`; `-Users-alice-work` is. See the module header for the
+ * (unavoidable) `/home/alice-work` ambiguity this rule inherits. Pure.
+ */
+function isHomeScopedSlug(slug: string, homeSlug: string): boolean {
+  return slug === homeSlug || slug.startsWith(`${homeSlug}-`);
+}
+
+/**
  * The repo path for one memory file.
  * @param slug       the on-disk project dir name under ~/.claude/projects
  * @param homeSlug   slugifyPath(vars.HOME)
  * @param relPosix   path of the file relative to the project's memory/ dir
  */
 export function memoryRepoPath(slug: string, homeSlug: string, relPosix: string): string {
-  if (slug.startsWith(homeSlug)) {
+  if (isHomeScopedSlug(slug, homeSlug)) {
     const rest = slug.slice(homeSlug.length);
     return `${MEMORIES_REPO_PREFIX}/${HOME_SCOPE}/${rest === "" ? ROOT_SENTINEL : rest}/${relPosix}`;
   }
   return `${MEMORIES_REPO_PREFIX}/${ABS_SCOPE}/${slug}/${relPosix}`;
 }
 
-/** Path segments that must never appear in a repo-supplied path component. */
+/**
+ * Path segments that must never appear in a repo-supplied path component.
+ *
+ * A BACKSLASH is rejected along with the `..` family: on Windows `path.join`
+ * treats "\" as a separator, so a single repo segment of `..\..\Startup` walks
+ * two levels out of ~/.claude while passing every `=== ".."` check. On POSIX a
+ * backslash is a legal filename character, but a memory path can never
+ * legitimately need one (slugs are alphanumeric-or-dash by construction, and the
+ * tail comes from a real directory walk), so one rule holds on both.
+ */
 function isTraversalSegment(segment: string): boolean {
-  return segment === "" || segment === "." || segment === "..";
+  return (
+    segment === "" || segment === "." || segment === ".." || segment.includes("\\")
+  );
 }
 
 /**
@@ -81,10 +117,11 @@ function isTraversalSegment(segment: string): boolean {
  * the repo path is not a well-formed memory path (caller logs + skips).
  *
  * Every component that comes from the REPO — the project key and each file
- * segment — is rejected when it is "", "." or "..": the result is joined onto
- * the tool home, and a single `..` would walk a pull's write straight out of
- * ~/.claude. (A slug cannot legitimately contain a dot at all: slugifyPath maps
- * every non-alphanumeric character to "-".)
+ * segment — is rejected when it is "", "." or ".." OR contains a backslash: the
+ * result is joined onto the tool home, and a single `..` (or, on Windows, a
+ * `..\..\Startup` hiding inside ONE segment) would walk a pull's write straight
+ * out of ~/.claude. (A slug cannot legitimately contain a dot or a backslash at
+ * all: slugifyPath maps every non-alphanumeric character to "-".)
  *
  * Pure: everything it needs (the target tool home and the target machine's home
  * slug) is passed in.

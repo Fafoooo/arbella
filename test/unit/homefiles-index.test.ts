@@ -76,20 +76,59 @@ describe("mergeHomeIndex: a tool that did not run keeps its files", () => {
     expect(merged.expected).toEqual([CLAUDE_FILE]);
   });
 
-  it("keeps a file only when EVERY origin was absent", () => {
+  it("deletes a shared file only when the LAST origin withdraws its claim", () => {
     const shared = parseHomeIndex({
       version: 1,
       files: { [CLAUDE_FILE]: ["claude", "codex"] },
     });
 
-    // Codex ran and no longer produces it, so the deletion is real even though
-    // Claude (the other origin) was absent.
-    const merged = mergeHomeIndex(shared, [], new Set(["codex"]));
-    expect(merged.kept).toEqual([]);
+    // Codex ran and no longer produces it: its claim expires, but Claude was
+    // absent and cannot have withdrawn anything, so the file stays — with the
+    // surviving claim recorded, and codex's gone.
+    const codexOnly = mergeHomeIndex(shared, [], new Set(["codex"]));
+    expect(codexOnly.kept).toEqual([CLAUDE_FILE]);
+    expect(codexOnly.index.files[CLAUDE_FILE]).toEqual(["claude"]);
 
-    // Neither ran: the file survives untouched.
+    // Neither ran: the file survives untouched, both claims intact.
     const untouched = mergeHomeIndex(shared, [], new Set([EXTRA_PATHS_ORIGIN]));
     expect(untouched.kept).toEqual([CLAUDE_FILE]);
+    expect(untouched.index.files[CLAUDE_FILE]).toEqual(["claude", "codex"]);
+
+    // Both ran and neither produces it any more: the last claim is gone.
+    const bothRan = mergeHomeIndex(shared, [], new Set(["claude", "codex"]));
+    expect(bothRan.kept).toEqual([]);
+    expect(bothRan.index.files).toEqual({});
+  });
+
+  it("a produced file keeps the claims of the origins that did NOT run", () => {
+    // The regression: a partial push used to rewrite the entry with only its own
+    // origins, forgetting the absent tool's claim. The NEXT push — from the
+    // machine where THIS tool stops producing the file — then saw one expired
+    // claim and deleted a file the absent tool still needs.
+    const p1 = mergeHomeIndex(
+      emptyHomeIndex(),
+      [
+        { repoPath: CLAUDE_FILE, origin: "claude" },
+        { repoPath: CLAUDE_FILE, origin: "codex" },
+      ],
+      new Set(["claude", "codex", EXTRA_PATHS_ORIGIN]),
+    );
+    expect(p1.index.files[CLAUDE_FILE]).toEqual(["claude", "codex"]);
+
+    // Push 2: only Claude is installed here, and it still produces the file.
+    const p2 = mergeHomeIndex(
+      p1.index,
+      [{ repoPath: CLAUDE_FILE, origin: "claude" }],
+      new Set(["claude", EXTRA_PATHS_ORIGIN]),
+    );
+    expect(p2.index.files[CLAUDE_FILE]).toEqual(["claude", "codex"]);
+
+    // Push 3: only Codex is installed here, and it no longer produces the file.
+    // Claude's claim is untouched, so the file must survive.
+    const p3 = mergeHomeIndex(p2.index, [], new Set(["codex", EXTRA_PATHS_ORIGIN]));
+    expect(p3.kept).toEqual([CLAUDE_FILE]);
+    expect(p3.expected).toEqual([CLAUDE_FILE]);
+    expect(p3.index.files[CLAUDE_FILE]).toEqual(["claude"]);
   });
 
   it("unions the origins of a file two tools both reference", () => {

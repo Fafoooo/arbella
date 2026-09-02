@@ -249,4 +249,104 @@ describe("codex restore planning: local marketplaces missing on this machine are
     // Only the local marketplace's hydrated path is ever stat'd.
     expect(statKindCalls).toEqual([`${toolHome}/.tmp/bundled-marketplaces/openai-bundled`]);
   });
+
+  it("does not advertise a plugin whose local marketplace was just skipped", async () => {
+    // The plan skipped `openai-bundled` two lines earlier because its bundled
+    // runtime is absent here — then handed the FULL manifest marketplace list to
+    // the partition, which duly declared its plugin installable. A dry run that
+    // promises `Install plugin x@openai-bundled` is promising a `codex plugin
+    // add` that cannot resolve its marketplace and fails every time.
+    const home = "/home/bob";
+    const toolHome = `${home}/.codex`;
+    const templater = createTemplater();
+    const vars = makeVariables(home, "bob", "linux", toolHome);
+
+    const marketplaces: MarketplaceEntry[] = [
+      {
+        id: "openai-bundled",
+        sourceType: "local",
+        source: "{{TOOL_HOME}}/.tmp/bundled-marketplaces/openai-bundled",
+      },
+      {
+        id: "claude-plugins-official",
+        sourceType: "git",
+        source: "https://github.com/anthropics/claude-plugins-official.git",
+      },
+    ];
+    const plugins: PluginEntry[] = [
+      {
+        id: "bundled-thing@openai-bundled",
+        name: "bundled-thing",
+        enabled: true,
+        scope: "user",
+        marketplace: "openai-bundled",
+      },
+      {
+        id: "superpowers@claude-plugins-official",
+        name: "superpowers",
+        enabled: true,
+        scope: "user",
+        marketplace: "claude-plugins-official",
+      },
+    ];
+
+    const ctx = {
+      // Every local path is missing on this machine.
+      fs: { exists: async () => false, statKind: async () => "missing" as const },
+      templater,
+      vars,
+      log: fakeLogger(),
+      toolHome,
+      sourceOfTruth: "repo",
+    } as RestoreContext;
+    const data: RestoreData = {
+      manifest: {
+        tool: "codex",
+        plugins,
+        marketplaces,
+        skills: [],
+        npmGlobals: [],
+        enabledPlugins: {},
+      },
+      files: [],
+      symlinks: [],
+    };
+
+    const actions = await planActions(ctx, data);
+
+    expect(
+      actions.filter((a) => a.type === "add-marketplace").map((a) => a.description),
+    ).toEqual([
+      "Register marketplace claude-plugins-official " +
+        "(https://github.com/anthropics/claude-plugins-official.git)",
+    ]);
+    expect(
+      actions.filter((a) => a.type === "install-plugin").map((a) => a.description),
+    ).toEqual(["Install plugin superpowers@claude-plugins-official"]);
+  });
+
+  it("partitions against the REGISTERED marketplaces, not the manifest's list", async () => {
+    // The pure half of the same rule: `marketplaces` is whatever survived the
+    // restore's own marketplace pass, so a skipped (or failed) one defers its
+    // plugins exactly like an uncaptured built-in does.
+    const bundled: MarketplaceEntry = {
+      id: "openai-bundled",
+      sourceType: "local",
+      source: "{{TOOL_HOME}}/.tmp/bundled-marketplaces/openai-bundled",
+    };
+    const plugin: PluginEntry = {
+      id: "bundled-thing@openai-bundled",
+      name: "bundled-thing",
+      enabled: true,
+      scope: "user",
+      marketplace: "openai-bundled",
+    };
+
+    expect(partitionPluginsForRestore([bundled], [plugin]).installable.map((p) => p.id)).toEqual([
+      "bundled-thing@openai-bundled",
+    ]);
+    expect(partitionPluginsForRestore([], [plugin]).deferred.map((p) => p.id)).toEqual([
+      "bundled-thing@openai-bundled",
+    ]);
+  });
 });

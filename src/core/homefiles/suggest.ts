@@ -22,7 +22,7 @@ import path from "node:path";
 import { parse as parseToml } from "smol-toml";
 
 import type { FsService } from "../../types.js";
-import { isPlainObject } from "../../utils/object.js";
+import { isPlainObject, isUnsafeObjectKey } from "../../utils/object.js";
 
 import type { CommandRef } from "./scan.js";
 import {
@@ -90,6 +90,11 @@ function claudeGlobalStateRefs(parsed: unknown): CommandRef[] {
   if (isPlainObject(parsed.projects)) {
     const projects: Record<string, unknown> = {};
     for (const [absPath, project] of Object.entries(parsed.projects)) {
+      // `projects["__proto__"] = …` rewrites this record's PROTOTYPE instead of
+      // adding a key, and ~/.claude.json is parsed JSON, which can carry exactly
+      // that key. A project directory can never legitimately be named one of
+      // these, so skipping them loses nothing.
+      if (isUnsafeObjectKey(absPath)) continue;
       if (isPlainObject(project) && isPlainObject(project.mcpServers)) {
         projects[absPath] = { mcpServers: project.mcpServers };
       }

@@ -125,6 +125,12 @@ export const HOME_DENY: readonly string[] = [
   ".env",
   ".env.*",
   "*.env",
+  // direnv: `.envrc` is a SHELL SCRIPT that routinely exports credentials
+  // inline (`export AWS_SECRET_ACCESS_KEY=…`), and `.direnv/` is the cache of
+  // the environment it produced. Neither is matched by the ".env" patterns
+  // above — ".env.*" needs a dot after "env", "*.env" needs the suffix.
+  ".envrc",
+  ".direnv/",
   // Keys, certificates and key stores.
   "*.pem",
   "*.key",

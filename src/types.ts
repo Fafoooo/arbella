@@ -278,6 +278,8 @@ export interface FsService {
    * ~/.claude.json. When `mode` is omitted an EXISTING file keeps its mode.
    */
   writeAtomic(path: string, content: string, mode?: number): Promise<void>;
+  /** {@link writeAtomic} for binary payloads. Same rename, same mode rules. */
+  writeBytesAtomic(path: string, content: Buffer, mode?: number): Promise<void>;
   copy(from: string, to: string): Promise<void>;
   ensureDir(path: string): Promise<void>;
   exists(path: string): Promise<boolean>;

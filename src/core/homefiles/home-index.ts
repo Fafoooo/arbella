@@ -20,9 +20,16 @@
  * The rule the index buys, implemented once in {@link mergeHomeIndex} and used
  * by BOTH `push` (what to delete) and `status` (what to report as removed):
  *
- *     keep a previously-indexed file when EVERY origin that produced it was
- *     absent from this run — i.e. that tool is not installed here, or its
- *     capture failed. Anything else is this run's business to rewrite or drop.
+ *     a CLAIM is dropped only by the origin that made it. An origin that RAN
+ *     this run and no longer produces the file loses its claim; an origin that
+ *     was ABSENT keeps it. The file survives while any claim survives, and is
+ *     deleted only when the last one is gone.
+ *
+ * That per-origin accounting is why a produced file also merges the ABSENT
+ * origins of its previous entry back in. Rewriting the entry with only this
+ * run's origins would silently forget the other tool's claim, and the NEXT push
+ * — from a machine where this tool no longer produces the file — would then see
+ * a single expired claim and delete a file the absent tool still needs.
  *
  * `extraPaths` counts as present on every push: its files are recomputed from
  * the live config each time, so a file it no longer produces is a file the user
@@ -95,7 +102,10 @@ export function parseHomeIndex(json: unknown): HomeIndex {
 export interface HomeIndexMerge {
   /** The index this push should commit. */
   index: HomeIndex;
-  /** Previously-committed repoPaths to KEEP untouched (no origin captured here). */
+  /**
+   * Previously-committed repoPaths this run did not produce but must KEEP
+   * untouched, because an origin that did not run here still claims them.
+   */
   kept: string[];
   /** Every repoPath the merged tree should contain (produced ∪ kept), sorted. */
   expected: string[];
@@ -124,13 +134,22 @@ export function mergeHomeIndex(
 
   const kept: string[] = [];
   for (const [repoPath, origins] of Object.entries(previous.files)) {
-    if (repoPath in files) continue;
-    // "Every origin was absent" — a file also claimed by a tool that DID run
-    // this time and no longer produces it was genuinely deleted locally, and the
-    // mirror must reflect that.
-    if (origins.some((origin) => capturedOrigins.has(origin))) continue;
+    // Claims of origins that did NOT run this time. They cannot have been
+    // withdrawn — the tool is not installed here, or its capture failed — so
+    // they carry over verbatim whether or not this run produced the file.
+    const absentClaims = origins.filter((origin) => !capturedOrigins.has(origin));
+
+    if (repoPath in files) {
+      // Produced here: this run's origins are authoritative for the tools that
+      // ran, and the absent tools keep the claims they made earlier.
+      files[repoPath] = uniqueSorted([...(files[repoPath] ?? []), ...absentClaims]);
+      continue;
+    }
+    // Not produced here. Every origin that RAN has withdrawn its claim; the
+    // file survives only while an absent origin still claims it.
+    if (absentClaims.length === 0) continue;
     kept.push(repoPath);
-    files[repoPath] = uniqueSorted(origins);
+    files[repoPath] = uniqueSorted(absentClaims);
   }
 
   return {

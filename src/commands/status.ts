@@ -136,6 +136,7 @@ export interface ManifestDrift {
     | "npmGlobals"
     | "enabledPlugins"
     | "mcpServers"
+    | "projectMcpServers"
     | "externalTools";
   /** Items present locally but not in the committed manifest. */
   added: string[];
@@ -639,8 +640,14 @@ function expectedRepoPathsForTool(
 /* Manifest diffing                                                            */
 /* -------------------------------------------------------------------------- */
 
-/** Diff a freshly-captured manifest against the committed manifest.json. */
-async function diffManifest(
+/**
+ * Diff a freshly-captured manifest against the committed manifest.json.
+ *
+ * Exported for the drift regression test (like {@link diffSharedHome}): every
+ * manifest collection has to appear here or `status` reports "no drift" for a
+ * change the next push will happily make.
+ */
+export async function diffManifest(
   repoRoot: string,
   tool: ToolId,
   local: ToolManifest,
@@ -709,6 +716,19 @@ async function diffManifest(
     (m) => serialize(m.def),
   );
   if (hasDrift(mcpDrift)) drifts.push(mcpDrift);
+
+  // Project-scope servers live in a SEPARATE manifest collection, so the
+  // user-scope diff above never sees them: adding, removing or re-pointing a
+  // `projects.<dir>.mcpServers` entry used to be an invisible change that
+  // `status` reported as "no drift" right up until the next push rewrote it.
+  const projectMcpDrift = diffKeyed(
+    "projectMcpServers",
+    committed?.projectMcpServers ?? [],
+    local.projectMcpServers,
+    (e) => e.projectPath,
+    (e) => serialize(e.servers),
+  );
+  if (hasDrift(projectMcpDrift)) drifts.push(projectMcpDrift);
 
   const externalDrift = diffKeyed(
     "externalTools",

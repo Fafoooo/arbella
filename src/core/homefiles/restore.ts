@@ -193,11 +193,16 @@ export async function restoreHomeFiles(
     }
 
     try {
+      // Rename-based (see FsService.writeAtomic): the symlink check above and
+      // the write below cannot be made one operation, and a plain writeFile
+      // FOLLOWS a link that appears in that gap. `rename` replaces the leaf
+      // entry instead, so the worst case is a clobbered link, never a write
+      // through one to somewhere outside $HOME.
       if (file.binary === true) {
-        await ctx.fs.writeBytes(dest, Buffer.from(file.content, "base64"), file.mode);
+        await ctx.fs.writeBytesAtomic(dest, Buffer.from(file.content, "base64"), file.mode);
       } else {
         const hydrated = ctx.templater.fromTemplate(file.content, ctx.vars);
-        await ctx.fs.write(dest, hydrated, file.mode);
+        await ctx.fs.writeAtomic(dest, hydrated, file.mode);
       }
       written++;
       ctx.log.debug(`home: wrote ~/${rel}`);

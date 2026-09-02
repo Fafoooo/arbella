@@ -35,6 +35,7 @@ import { makeVariables } from "../../src/core/templater/variables.js";
 import { emptyManifest } from "../../src/core/manifest/index.js";
 import type { ToolManifest } from "../../src/types.js";
 import type { CaptureContext, RestoreContext } from "../../src/adapters/adapter.interface.js";
+import { isPosixHost, toPosix, toPosixAll } from "../helpers/platform.js";
 
 /* -------------------------------------------------------------------------- */
 /* Sentinels that must never reach the repo                                    */
@@ -134,9 +135,19 @@ function globalStateFixture() {
   };
 }
 
-/** Write the fixture with the real home substituted into its paths. */
+/**
+ * Write the fixture with the real home substituted into its paths.
+ *
+ * The splice happens INSIDE a JSON document, so the home has to be inserted in
+ * its JSON-ESCAPED form: on Windows the raw value is `C:\Users\…`, and every
+ * backslash spliced in verbatim becomes an invalid escape ("Bad escaped
+ * character in JSON") the moment JSON.parse reads it back. `JSON.stringify(home)
+ * .slice(1, -1)` is the same string with its backslashes doubled and its quotes
+ * left off — a valid JSON string BODY.
+ */
 async function writeGlobalState(extraProjects: Record<string, unknown> = {}) {
-  const raw = JSON.stringify(globalStateFixture()).split(HOME_PLACEHOLDER).join(home);
+  const homeInJson = JSON.stringify(home).slice(1, -1);
+  const raw = JSON.stringify(globalStateFixture()).split(HOME_PLACEHOLDER).join(homeInJson);
   const obj = JSON.parse(raw) as Record<string, unknown>;
   obj.projects = { ...(obj.projects as Record<string, unknown>), ...extraProjects };
   await fsp.writeFile(path.join(home, ".claude.json"), JSON.stringify(obj, null, 2), {
@@ -228,11 +239,14 @@ describe("claude mcp capture: nothing but mcpServers leaves ~/.claude.json", () 
     await writeGlobalState({ [projectDir]: { mcpServers: { local: { command: "x" } } } });
 
     const result = await captureMcpServers(captureCtx());
+    // The project key came from `path.join`, so the templated tail keeps the
+    // host's separators ("{{HOME}}\programming\arbella" on Windows). The FOLD is
+    // what is under test, not the separator flavor — compare POSIX-normalized.
     const entry = result.projectMcpServers.find((e) =>
-      e.projectPath.endsWith("programming/arbella"),
+      toPosix(e.projectPath).endsWith("programming/arbella"),
     );
     expect(entry).toBeDefined();
-    expect(entry!.projectPath).toBe("{{HOME}}/programming/arbella");
+    expect(toPosix(entry!.projectPath)).toBe("{{HOME}}/programming/arbella");
     expect(Object.keys(entry!.servers)).toEqual(["local"]);
     // A project with no servers at all is not carried; the fixture's ghost entry
     // HAS one, so it survives capture (restore is where existence is checked).
@@ -281,8 +295,12 @@ describe("claude mcp restore: key-wise merge into ~/.claude.json", () => {
   it("creates the file with mode 0600 when it does not exist", async () => {
     await restoreMcpServers(restoreCtx(), manifestWith());
 
-    const stat = await fsp.stat(path.join(home, ".claude.json"));
-    expect(stat.mode & 0o777).toBe(0o600);
+    // Windows has no POSIX mode bits (every file reads back 0o666), so only the
+    // 0600 claim is host-specific; the creation itself is asserted everywhere.
+    if (isPosixHost) {
+      const stat = await fsp.stat(path.join(home, ".claude.json"));
+      expect(stat.mode & 0o777).toBe(0o600);
+    }
     const obj = await readGlobalState();
     expect(Object.keys(obj)).toEqual(["mcpServers"]);
   });
@@ -353,8 +371,12 @@ describe("claude mcp restore: key-wise merge into ~/.claude.json", () => {
     await restoreMcpServers(restoreCtx(), manifest);
 
     const projects = (await readGlobalState()).projects as Record<string, any>;
-    expect(Object.keys(projects)).toEqual([present]);
-    expect(projects[present].mcpServers.here).toEqual({ command: "a" });
+    // The written key is the HYDRATED manifest path (`<home>/programming/…`,
+    // "/"-separated because the stored template is), while `present` comes from
+    // `path.join`. They name the same directory; compare separator-blind.
+    expect(toPosixAll(Object.keys(projects))).toEqual([toPosix(present)]);
+    const key = Object.keys(projects)[0]!;
+    expect(projects[key].mcpServers.here).toEqual({ command: "a" });
     expect(debugs.some((d) => d.includes("does not exist here"))).toBe(true);
   });
 
@@ -490,8 +512,11 @@ describe("claude mcp: reserved keys and atomic writes", () => {
     });
     const onDisk = await fsp.readFile(path.join(home, ".claude.json"), "utf8");
     expect(onDisk).toBe(JSON.stringify(after, null, 2) + "\n");
-    // An existing file keeps its mode across the rename.
-    expect((await fsp.stat(path.join(home, ".claude.json"))).mode & 0o777).toBe(0o600);
+    // An existing file keeps its mode across the rename. (POSIX only: Windows
+    // does not implement the bits, so there is nothing to carry.)
+    if (isPosixHost) {
+      expect((await fsp.stat(path.join(home, ".claude.json"))).mode & 0o777).toBe(0o600);
+    }
   });
 });
 
@@ -517,11 +542,17 @@ describe("claude mcp: dry-run planning", () => {
     // The description names WHAT will be launched: a dry run whose only line is
     // "Register MCP server serena" hides the command a repo just talked this
     // machine into running.
-    expect(actions[0]!.description).toBe(
-      `Register MCP server serena (user scope): ${home}/.agents/bin/serena.sh`,
+    //
+    // Descriptions embed HYDRATED paths, whose separator flavor follows the
+    // stored template ("/") while `present` follows `path.join` — so both sides
+    // are POSIX-normalized before comparing.
+    expect(toPosix(actions[0]!.description)).toBe(
+      `Register MCP server serena (user scope): ${toPosix(home)}/.agents/bin/serena.sh`,
     );
-    expect(actions[0]!.targetPath).toBe(path.join(home, ".claude.json"));
-    expect(actions[1]!.description).toBe(`Register MCP server here for ${present}: a`);
+    expect(toPosix(actions[0]!.targetPath!)).toBe(toPosix(path.join(home, ".claude.json")));
+    expect(toPosix(actions[1]!.description)).toBe(
+      `Register MCP server here for ${toPosix(present)}: a`,
+    );
     // Planning is side-effect free: no file was created.
     expect(await realFs.exists(path.join(home, ".claude.json"))).toBe(false);
   });
@@ -562,9 +593,9 @@ describe("claude mcp: dry-run planning", () => {
 
     const plan = await planMcpMerge(restoreCtx({ sourceOfTruth: "repo" }), planningManifest());
 
-    expect(plan.actions.map((a) => a.description)).toEqual([
-      `Register MCP server serena (user scope): ${home}/.agents/bin/serena.sh`,
-      `Register MCP server here for ${present}: a`,
+    expect(plan.actions.map((a) => toPosix(a.description))).toEqual([
+      `Register MCP server serena (user scope): ${toPosix(home)}/.agents/bin/serena.sh`,
+      `Register MCP server here for ${toPosix(present)}: a`,
       // playwright lives in the fixture only, not in the manifest.
     ]);
     expect(plan.needsEnv).toEqual([{ name: "serena", key: "SERENA_TOKEN" }]);

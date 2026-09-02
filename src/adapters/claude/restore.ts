@@ -119,6 +119,8 @@ async function writeOne(
     return false;
   }
 
+  const isMemory = file.repoPath.startsWith(`${MEMORIES_REPO_PREFIX}/`);
+
   const link = await memorySymlinkBlock(ctx, file.repoPath, dest);
   if (link !== null) {
     ctx.log.warn(
@@ -133,11 +135,21 @@ async function writeOne(
     return false;
   }
 
+  // Memories go through the RENAME-based writers: the symlink check above and
+  // the write cannot be one operation, and a plain write follows a link that
+  // appears in the gap. `rename` replaces the leaf entry instead.
+  //
+  // The `claude/files/` tree deliberately does NOT: a skill there is often a
+  // symlink into ~/.agents/skills, and writing through it is the behavior the
+  // adapter exists to restore (which is also why memorySymlinkBlock exempts it).
   if (file.binary) {
-    await ctx.fs.writeBytes(dest, Buffer.from(file.content, "base64"), file.mode);
+    const bytes = Buffer.from(file.content, "base64");
+    if (isMemory) await ctx.fs.writeBytesAtomic(dest, bytes, file.mode);
+    else await ctx.fs.writeBytes(dest, bytes, file.mode);
   } else {
     const hydrated = ctx.templater.fromTemplate(file.content, ctx.vars);
-    await ctx.fs.write(dest, hydrated, file.mode);
+    if (isMemory) await ctx.fs.writeAtomic(dest, hydrated, file.mode);
+    else await ctx.fs.write(dest, hydrated, file.mode);
   }
   return true;
 }

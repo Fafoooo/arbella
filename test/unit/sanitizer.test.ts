@@ -316,6 +316,41 @@ describe("sanitizer: credential-bearing URLs", () => {
     expect(urlAfter(`https://mcp.example.com/sse?X-API-Key=${TOKEN}`)).toBe(REDACTED);
   });
 
+  it("redacts a presigned AWS URL (vendor-PREFIXED credential params)", () => {
+    // A presigned S3 URL is a complete, working credential in a link. Its
+    // parameters are vendor-prefixed — "X-Amz-Credential" normalizes to
+    // "xamzcredential" and "X-Amz-Signature" to "xamzsignature", which match
+    // nothing in the URL-specific extra set and nothing in isSecretKey either —
+    // so this whole URL used to be stored verbatim under an `url:` key.
+    const presigned =
+      "https://my-bucket.s3.eu-central-1.amazonaws.com/artifacts/mcp.tar.gz" +
+      "?X-Amz-Algorithm=AWS4-HMAC-SHA256" +
+      "&X-Amz-Credential=AKIAIOSFODNN7EXAMPLE%2F20260902%2Feu-central-1%2Fs3%2Faws4_request" +
+      "&X-Amz-Date=20260902T101500Z&X-Amz-Expires=3600&X-Amz-SignedHeaders=host" +
+      `&X-Amz-Signature=${TOKEN}`;
+    expect(urlAfter(presigned)).toBe(REDACTED);
+
+    // Each of the three stems is enough on its own.
+    for (const param of ["X-Amz-Credential", "X-Amz-Signature", "X-Amz-Security-Token"]) {
+      expect({ param, url: urlAfter(`https://s3.example.com/o?${param}=${TOKEN}`) }).toEqual({
+        param,
+        url: REDACTED,
+      });
+    }
+  });
+
+  it("redacts a credential param whose NAME is percent-encoded", () => {
+    // `?api%5Fkey=…` is `?api_key=…` as far as the server is concerned; only the
+    // decoded form is recognizable as a credential name.
+    expect(urlAfter(`https://mcp.example.com/sse?api%5Fkey=${TOKEN}`)).toBe(REDACTED);
+    expect(urlAfter(`https://mcp.example.com/sse?X-Amz-Credential%2Dv4=${TOKEN}`)).toBe(REDACTED);
+    // A malformed escape must not throw — it falls back to the raw name.
+    expect(urlAfter(`https://mcp.example.com/sse?%zz=1&signature=${TOKEN}`)).toBe(REDACTED);
+    expect(urlAfter("https://mcp.example.com/sse?%zz=1&version=2")).toBe(
+      "https://mcp.example.com/sse?%zz=1&version=2",
+    );
+  });
+
   it("redacts a credential carried in the URL FRAGMENT, not just the query", () => {
     expect(urlAfter(`https://mcp.example.com/callback#access_token=${TOKEN}`)).toBe(REDACTED);
     // A fragment credential must be caught even when the query itself is benign.

@@ -36,6 +36,7 @@ import { createTemplater } from "../../src/core/templater/index.js";
 import { makeVariables } from "../../src/core/templater/variables.js";
 import { emptyManifest } from "../../src/core/manifest/index.js";
 import type { CaptureResult } from "../../src/types.js";
+import { isPosixHost, toPosixAll } from "../helpers/platform.js";
 
 /* -------------------------------------------------------------------------- */
 /* Fixture                                                                     */
@@ -107,7 +108,9 @@ describe("captureHomeFile: placement", () => {
 
     expect(out.files).toHaveLength(1);
     expect(out.files[0]!.repoPath).toBe(`${SHARED_HOME_REPO_PREFIX}/.agents/hooks/dispatch.sh`);
-    expect(out.files[0]!.mode).toBe(0o755);
+    // Windows has no POSIX mode bits — chmod(0o755) is a near no-op there and
+    // every file lstats back as 0o666 — so only this claim is host-specific.
+    if (isPosixHost) expect(out.files[0]!.mode).toBe(0o755);
     expect(isSharedHomePath(out.files[0]!.repoPath)).toBe(true);
   });
 
@@ -290,7 +293,7 @@ describe("captureHomeFile: secrets never leave the machine", () => {
     expect(out.secrets.length).toBeGreaterThan(0);
     expect(JSON.stringify(out.secrets)).not.toContain(TOKEN);
     // The reason it was captured is still an ordinary executable script.
-    expect(out.files[0]!.mode).toBe(0o755);
+    if (isPosixHost) expect(out.files[0]!.mode).toBe(0o755);
     expect(abs.endsWith("dispatch.sh")).toBe(true);
   });
 
@@ -338,6 +341,13 @@ describe("captureHomeFile: secrets never leave the machine", () => {
       ".pgpass",
       ".my.cnf",
       "projects/gsc.env", // "*.env": the prefixed spelling ".env*" rules miss
+      // direnv: `.envrc` is a shell script that routinely `export`s live
+      // credentials, and `.direnv/` caches the environment it produced. Neither
+      // is matched by ".env" / ".env.*" / "*.env".
+      ".envrc",
+      "code/project/.envrc",
+      ".direnv/bin/x",
+      "code/project/.direnv/python-3.12/bin/activate",
       ".zsh_history",
       ".node_repl_history",
       "work/server.crt",
@@ -401,6 +411,8 @@ describe("captureHomeFile: secrets never leave the machine", () => {
       "id_ecdsa_sk*",
       ".git-credentials",
       "*.pem",
+      ".envrc",
+      ".direnv/",
     ]) {
       expect(HOME_DENY).toContain(pattern);
     }
@@ -695,12 +707,14 @@ describe("computeAlreadyCaptured", () => {
 
     const out = computeAlreadyCaptured(results, toolHomeFor);
 
-    expect(out).toEqual(
-      new Set([
+    // `path.join` emits "\" on Windows while the POSIX-rooted fixture literals
+    // keep "/". Compare normalized: the routing is the subject, not separators.
+    expect(toPosixAll(out).sort()).toEqual(
+      [
         "/Users/fab/.claude/settings.json",
         "/Users/fab/.claude/agents/x.md",
         "/Users/fab/.claude/skills/y",
-      ]),
+      ].sort(),
     );
   });
 

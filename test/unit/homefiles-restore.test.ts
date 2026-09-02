@@ -23,6 +23,7 @@ import { createSanitizer } from "../../src/core/sanitizer/index.js";
 import { createTemplater } from "../../src/core/templater/index.js";
 import { makeVariables } from "../../src/core/templater/variables.js";
 import type { CapturedFile, SourceOfTruth } from "../../src/types.js";
+import { isPosixHost } from "../helpers/platform.js";
 
 let root: string;
 let home: string;
@@ -116,8 +117,44 @@ describe("restoreHomeFiles: refuses to write through a symlink", () => {
     expect(written).toBe(1);
     const dest = path.join(home, ".agents", "hooks", "dispatch.sh");
     expect(await fsp.readFile(dest, "utf8")).toBe('#!/bin/sh\nexec "$@"\n');
-    expect((await fsp.stat(dest)).mode & 0o777).toBe(0o755);
+    // Windows has no POSIX mode bits; the write itself is asserted everywhere.
+    if (isPosixHost) expect((await fsp.stat(dest)).mode & 0o777).toBe(0o755);
     expect(warnings).toEqual([]);
+  });
+
+  it("writes through a RENAME, never a plain write (text AND bytes)", async () => {
+    // The symlink walk above and the write cannot be one syscall. The leaf is
+    // mitigated at the write instead: `rename` REPLACES the destination entry,
+    // where a plain `writeFile` would FOLLOW a link that appeared in the gap.
+    // The fs here refuses both truncating writers, so this test fails the moment
+    // the home restore stops going through the atomic ones.
+    const refuse = (): Promise<void> => {
+      throw new Error("a home file must be replaced atomically, not truncated");
+    };
+    const noTruncate = { ...realFs, write: refuse, writeBytes: refuse };
+
+    const written = await restoreHomeFiles(
+      { ...ctx(), fs: noTruncate },
+      [
+        file(".agents/hooks/dispatch.sh", "#!/bin/sh\n", 0o755),
+        {
+          repoPath: `${SHARED_HOME_REPO_PREFIX}/.agents/icon.bin`,
+          content: Buffer.from([0xff, 0xfe, 0x01, 0x80, 0x81]).toString("base64"),
+          binary: true,
+        },
+      ],
+      { safetyDir },
+    );
+
+    expect(written).toBe(2);
+    expect(warnings).toEqual([]);
+    const dir = path.join(home, ".agents");
+    expect(await fsp.readFile(path.join(dir, "hooks", "dispatch.sh"), "utf8")).toBe("#!/bin/sh\n");
+    expect(await fsp.readFile(path.join(dir, "icon.bin"))).toEqual(
+      Buffer.from([0xff, 0xfe, 0x01, 0x80, 0x81]),
+    );
+    // The temp siblings the renames consumed leave nothing behind.
+    expect((await fsp.readdir(dir)).sort()).toEqual(["hooks", "icon.bin"]);
   });
 
   it("plans exactly what it would write — a blocked file is not advertised", async () => {

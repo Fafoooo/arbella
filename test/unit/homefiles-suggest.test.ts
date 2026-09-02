@@ -94,6 +94,28 @@ describe("suggestExtraPaths", () => {
     expect(await suggest()).toEqual(["~/.agents/bin"]);
   });
 
+  it("survives a reserved project key in ~/.claude.json without losing the real projects", async () => {
+    // `projects["__proto__"] = …` is not a key assignment: it invokes the
+    // prototype SETTER and re-parents the record being built. The rebuilt map
+    // then fails `isPlainObject`, so the SCANNER skips the whole subtree — and
+    // the legitimate project's linked script silently stops being suggested.
+    // JSON.parse produces such a key as a real own property, so a hand-edited
+    // (or merely weird) ~/.claude.json is enough to trigger it. Written as raw
+    // JSON text: an object literal here would set the prototype instead.
+    const projectKey = JSON.stringify(path.join(home, "programming", "arbella")).slice(1, -1);
+    await write(
+      ".claude.json",
+      '{"projects":{' +
+        '"__proto__":{"mcpServers":{"evil":{"command":"~/.agents/evil/x.sh"}}},' +
+        `"${projectKey}":{"mcpServers":{"ok":{"command":"~/.agents/good/x.sh"}}}` +
+        "}}",
+    );
+
+    expect(await suggest()).toEqual(["~/.agents/good"]);
+    // Nothing was grafted onto a shared prototype on the way through.
+    expect(({} as Record<string, unknown>).mcpServers).toBeUndefined();
+  });
+
   it("never suggests a tool home or $HOME itself", async () => {
     await write(
       ".claude/settings.json",

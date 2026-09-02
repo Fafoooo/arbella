@@ -184,6 +184,47 @@ describe("memories: repo path <-> target path round-trip", () => {
     expect(dest).toContain(path.join("projects", "-home-other-uni-aau_26S_Logik", "memory"));
   });
 
+  it("matches the home prefix on a SEGMENT boundary, not as a bare substring", () => {
+    // `/Users/alice` and `/Users/aliceX` are unrelated directories whose slugs
+    // share a prefix. A bare `startsWith` filed aliceX's memories as "home
+    // scope, tail X", and a restore under a different home then wrote them into
+    // `<newHome>X` — a project the target machine never had.
+    const homeSlug = slugifyPath("/Users/alice"); // "-Users-alice"
+
+    const neighbour = memoryRepoPath(`${homeSlug}X`, homeSlug, "MEMORY.md");
+    expect(neighbour).toBe(`${MEMORIES_REPO_PREFIX}/abs/-Users-aliceX/MEMORY.md`);
+
+    // ...while a genuine child still folds, and so does $HOME itself.
+    expect(memoryRepoPath(`${homeSlug}-work`, homeSlug, "MEMORY.md")).toBe(
+      `${MEMORIES_REPO_PREFIX}/home/-work/MEMORY.md`,
+    );
+    expect(memoryRepoPath(homeSlug, homeSlug, "MEMORY.md")).toBe(
+      `${MEMORIES_REPO_PREFIX}/home/ROOT/MEMORY.md`,
+    );
+
+    // The neighbour restores under its verbatim slug, NOT under the new home.
+    expect(memoryTargetPath("/home/other/.claude", slugifyPath("/home/other"), neighbour)).toBe(
+      path.join("/home/other/.claude", "projects", "-Users-aliceX", "memory", "MEMORY.md"),
+    );
+  });
+
+  it("rejects a repo segment that hides a WINDOWS traversal", () => {
+    // `path.join` treats "\" as a separator on Windows, so a single repo segment
+    // of "..\..\Startup" climbs two levels out of ~/.claude while passing every
+    // `=== ".."` check. The rule holds on both hosts, so the assertion does too.
+    const homeSlug = slugifyPath("/Users/fab");
+    for (const repoPath of [
+      `${MEMORIES_REPO_PREFIX}/abs/..\\..\\Startup/x.md`,
+      `${MEMORIES_REPO_PREFIX}/home/ROOT/..\\..\\..\\Startup/evil.md`,
+      `${MEMORIES_REPO_PREFIX}/home/ROOT/sub/..\\evil.md`,
+    ]) {
+      expect({ repoPath, dest: memoryTargetPath("/h/.claude", homeSlug, repoPath) }).toEqual({
+        repoPath,
+        dest: null,
+      });
+    }
+  });
+
   it("rejects paths that are not well-formed memory paths", () => {
     const homeSlug = slugifyPath("/Users/fab");
     expect(memoryTargetPath("/h/.claude", homeSlug, "claude/files/settings.json")).toBeNull();
@@ -407,6 +448,46 @@ describe("memories: adapter capture/restore round-trip", () => {
     });
 
     expect(await realFs.exists(path.join(elsewhere, "memory", "MEMORY.md"))).toBe(false);
+  });
+
+  it("writes a memory through a RENAME, never a plain write", async () => {
+    // The symlink check and the write cannot be one syscall, so the leaf is
+    // mitigated at the write instead: `rename` REPLACES the destination entry,
+    // where a plain `writeFile` would FOLLOW a link that appeared in the gap.
+    // The fs here refuses the truncating write, so this test fails the moment
+    // the memory restore stops going through writeAtomic.
+    const { result } = await captureSourceHome(true);
+    const mem = result.files.find((f) => f.repoPath.startsWith(MEMORIES_REPO_PREFIX))!;
+
+    const dstHome = path.join(tmpRoot, "dst-atomic");
+    const dstTool = path.join(dstHome, ".claude");
+    const noTruncate = {
+      ...realFs,
+      async write(): Promise<void> {
+        throw new Error("a memory must be replaced atomically, not truncated");
+      },
+      async writeBytes(): Promise<void> {
+        throw new Error("a memory must be replaced atomically, not truncated");
+      },
+    };
+
+    await restoreClaude(restoreCtx(dstTool, dstHome, { fs: noTruncate }), {
+      manifest: emptyManifest("claude"),
+      files: [mem],
+      symlinks: [],
+    });
+
+    const memoryDir = path.join(
+      dstTool,
+      "projects",
+      `${slugifyPath(dstHome)}-code-thing`,
+      "memory",
+    );
+    expect(await fsp.readFile(path.join(memoryDir, "MEMORY.md"), "utf8")).toContain(
+      `${dstHome}/code/thing/log.txt`,
+    );
+    // The temp sibling the rename consumed leaves nothing behind.
+    expect(await fsp.readdir(memoryDir)).toEqual(["MEMORY.md"]);
   });
 
   it("ignores repo roots it does not own instead of dumping them in ~/.claude", async () => {

@@ -72,6 +72,7 @@ import type {
 
 import { fs } from "../utils/fs.js";
 import { log } from "../utils/log.js";
+import { decodeForCapture } from "../utils/capture-bytes.js";
 import {
   cliBinaryName,
   dataDir,
@@ -251,19 +252,6 @@ function buildHomeRestoreServices(args: {
 /* -------------------------------------------------------------------------- */
 
 /**
- * Heuristic binary detection (mirrors the adapters): a file is treated as binary
- * when its first chunk contains a NUL byte. Binary files round-trip as base64;
- * text files round-trip as UTF-8 + templater rehydration on the adapter side.
- */
-function looksBinary(buf: Buffer): boolean {
-  const n = Math.min(buf.length, 8000);
-  for (let i = 0; i < n; i++) {
-    if (buf[i] === 0) return true;
-  }
-  return false;
-}
-
-/**
  * Recursively walk frozen roots inside the cloned repo and reconstruct the
  * CapturedFile[] / CapturedSymlink[] the adapter expects. `repoPath` is rebuilt
  * with the root's canonical prefix (POSIX separators), e.g. "claude/files/..."
@@ -344,7 +332,14 @@ async function readRepoRoots(
       // exposes it; harmless on Windows. Captured as the POSIX mode.
       const mode = await fileMode(abs);
 
-      if (looksBinary(bytes)) {
+      // The SAME classifier capture used (src/utils/capture-bytes.ts), so a pull
+      // reads a repo file back exactly as the push wrote it. A NUL-only
+      // heuristic disagrees with it on two shapes that really occur: a small
+      // NUL-free binary (a favicon, a tiny PNG under `extraPaths`) would be read
+      // as "text" and rewritten as mangled UTF-8, and a UTF-16 config would be
+      // stored as opaque base64 instead of rehydrated text.
+      const decoded = decodeForCapture(bytes);
+      if (decoded.kind === "binary") {
         files.push({
           repoPath,
           content: bytes.toString("base64"),
@@ -354,7 +349,7 @@ async function readRepoRoots(
       } else {
         files.push({
           repoPath,
-          content: bytes.toString("utf8"),
+          content: decoded.text,
           ...(mode !== undefined ? { mode } : {}),
         });
       }
