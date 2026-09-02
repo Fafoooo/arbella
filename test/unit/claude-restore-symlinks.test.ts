@@ -118,7 +118,9 @@ describe("claude restore: claude/files/ symlink gate", () => {
     });
 
     expect(await fsp.readFile(path.join(sharedSkill, "SKILL.md"), "utf8")).toBe("# Foo skill\n");
-    expect(warnings).toEqual([]);
+    // Only the symlink gate matters here; an unrelated "claude CLI not found"
+    // warning appears on CI runners that have no `claude` binary on PATH.
+    expect(warnings.filter((w) => w.includes("symlink"))).toEqual([]);
   });
 
   it("refuses to write through a planted symlink elsewhere under the tool home", async () => {
