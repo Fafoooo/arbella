@@ -75,6 +75,7 @@ import {
   homeExcludeRoots,
   isSharedHomePath,
 } from "../core/homefiles/capture.js";
+import type { HomeIndexEntry } from "../core/homefiles/home-index.js";
 import {
   EXTRA_PATHS_ORIGIN,
   HOME_INDEX_REPO_PATH,
@@ -452,8 +453,21 @@ export async function diffSharedHome(
     for (const warning of out.warnings) log.warn(warning);
   }
 
+  // Every claim this run made, BEFORE dedupe: one (repoPath, origin) pair per
+  // adapter file plus extraPaths file. Two origins (e.g. claude and codex) can
+  // both claim the same repoPath in one run — mergeHomeIndex must see BOTH, or
+  // the losing origin's provenance vanishes from the index a run early, and a
+  // LATER run missing the winning origin (with the losing one now absent too)
+  // sees a single expired claim and reports a deletion the push would also
+  // wrongly make. This mirrors exactly what backup.ts's captureSharedHome does.
+  const claims: HomeIndexEntry[] = [
+    ...adapterFiles.map((entry) => ({ repoPath: entry.file.repoPath, origin: entry.origin })),
+    ...out.files.map((file) => ({ repoPath: file.repoPath, origin: EXTRA_PATHS_ORIGIN })),
+  ];
+
   // First wins, exactly as the push merges them: adapters (in capture order),
-  // then extraPaths.
+  // then extraPaths. This DEDUPED list is only for the file-content diff below
+  // (added/changed/unchanged) — it must NOT be what feeds mergeHomeIndex.
   const seen = new Set<string>();
   const produced: Array<{ file: CapturedFile; origin: string }> = [];
   for (const entry of [
@@ -476,7 +490,7 @@ export async function diffSharedHome(
   // whose every origin is a tool absent from this run is kept, not removed.
   const merge = mergeHomeIndex(
     parseHomeIndex(await readJsonIfExists(repoAbsPath(repoRoot, HOME_INDEX_REPO_PATH))),
-    produced.map((entry) => ({ repoPath: entry.file.repoPath, origin: entry.origin })),
+    claims,
     new Set<string>([...captureResults.map((r) => r.tool), EXTRA_PATHS_ORIGIN]),
   );
   const expectedPaths = new Set(merge.expected);

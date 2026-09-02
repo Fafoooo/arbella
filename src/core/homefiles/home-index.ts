@@ -35,6 +35,16 @@
  * the live config each time, so a file it no longer produces is a file the user
  * removed on purpose.
  *
+ * `mergeHomeIndex`'s `produced` argument must be fed CLAIMS — every
+ * (repoPath, origin) pair a run produced, INCLUDING duplicates where two
+ * origins claim the same repoPath — not the deduped FILE list a caller writes
+ * to disk. `mergeHomeIndex` already unions duplicate claims for one repoPath
+ * (see the "unions the origins" test below), so pre-dedupe input is exactly
+ * what it expects; feeding it the first-wins-deduped file list instead would
+ * silently drop every claim but the winning one, right when two origins
+ * produce the same file in the same run — the case this module exists to get
+ * right.
+ *
  * Pure module: no fs, no clock. The command layer reads/writes the file.
  */
 

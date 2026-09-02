@@ -21,6 +21,7 @@ import {
   HOME_INDEX_REPO_PATH,
   parseHomeIndex,
 } from "../../src/core/homefiles/home-index.js";
+import type { HomeIndexEntry } from "../../src/core/homefiles/home-index.js";
 import { SHARED_HOME_REPO_PREFIX } from "../../src/core/homefiles/capture.js";
 import type { CapturedFile, ToolId } from "../../src/types.js";
 import { itPosixHost } from "../helpers/platform.js";
@@ -29,6 +30,7 @@ let repoRoot: string;
 
 const CLAUDE_REL = ".agents/hooks/claude-dispatch.sh";
 const CODEX_REL = ".agents/hooks/codex-dispatch.sh";
+const DISPATCH_REL = ".agents/hooks/dispatch.sh";
 
 /** A shared/home entry as the push assembles it: the file plus its origin. */
 function entry(rel: string, origin: string, content = "#!/bin/sh\n") {
@@ -44,12 +46,23 @@ async function readIndex(): Promise<Record<string, string[]>> {
   return parseHomeIndex(JSON.parse(raw)).files;
 }
 
-/** One push: capture `entries` on a machine where `tools` are installed. */
+/**
+ * One push: write the (already first-wins-deduped) `entries` on a machine
+ * where `tools` are installed, feeding `mergeHomeIndex` the provenance
+ * `claims` for this run. When the caller does not pass `claims` explicitly
+ * (the common case: one origin per repoPath), they are derived 1:1 from
+ * `entries` — exactly what `captureSharedHome` does when no two origins
+ * collide on the same path.
+ */
 async function push(
   entries: ReturnType<typeof entry>[],
   tools: readonly ToolId[],
+  claims: readonly HomeIndexEntry[] = entries.map((e) => ({
+    repoPath: e.file.repoPath,
+    origin: e.origin,
+  })),
 ): Promise<void> {
-  await writeSharedHome(repoRoot, entries, tools);
+  await writeSharedHome(repoRoot, entries, claims, tools);
 }
 
 beforeEach(async () => {
@@ -125,6 +138,52 @@ describe("writeSharedHome: a partial push does not wipe the other machine's file
     expect(restored.map((f) => f.repoPath)).toEqual([
       `${SHARED_HOME_REPO_PREFIX}/${CLAUDE_REL}`,
     ]);
+  });
+});
+
+describe("writeSharedHome: a file two origins both produce in the same run", () => {
+  // The bug this pins: captureSharedHome used to dedupe shared/home entries by
+  // repoPath first-wins BEFORE feeding them to mergeHomeIndex, so a file two
+  // origins both produce in one run (e.g. ~/.agents/hooks/dispatch.sh linked
+  // by both claude and codex) was indexed with only the winning origin. A
+  // later push from a machine where that origin no longer produces the file,
+  // and the OTHER origin is absent (not installed), then saw a single expired
+  // claim and deleted a file the absent origin still needed.
+  it("keeps the file across a run where the losing origin is absent and the winning origin stops", async () => {
+    // Run 1: both claude and codex produce dispatch.sh in the SAME run. Only
+    // one entry is written to disk (first-wins content), but BOTH origins must
+    // be recorded as claims.
+    await push(
+      [entry(DISPATCH_REL, "claude")],
+      ["claude", "codex"],
+      [
+        { repoPath: `${SHARED_HOME_REPO_PREFIX}/${DISPATCH_REL}`, origin: "claude" },
+        { repoPath: `${SHARED_HOME_REPO_PREFIX}/${DISPATCH_REL}`, origin: "codex" },
+      ],
+    );
+    expect(await readIndex()).toEqual({
+      [`${SHARED_HOME_REPO_PREFIX}/${DISPATCH_REL}`]: ["claude", "codex"],
+    });
+
+    // Run 2: only claude is present here, and it no longer produces the file
+    // (e.g. its config stopped referencing the script). Codex is not
+    // installed on this machine, so it cannot have withdrawn its claim.
+    await push([], ["claude"]);
+
+    expect(await fsp.readFile(abs(DISPATCH_REL), "utf8")).toBe("#!/bin/sh\n");
+    expect(await readIndex()).toEqual({
+      [`${SHARED_HOME_REPO_PREFIX}/${DISPATCH_REL}`]: ["codex"],
+    });
+
+    // Run 3: both claude and codex are present and neither produces the file
+    // any more — the last claim is gone, so the mirror finally deletes it (and
+    // an index with nothing left in it is removed entirely, not left empty).
+    await push([], ["claude", "codex"]);
+
+    await expect(fsp.readFile(abs(DISPATCH_REL), "utf8")).rejects.toThrow();
+    await expect(
+      fsp.readFile(path.join(repoRoot, ...HOME_INDEX_REPO_PATH.split("/")), "utf8"),
+    ).rejects.toThrow();
   });
 });
 

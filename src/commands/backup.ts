@@ -19,9 +19,14 @@
  *      BEFORE anything is written.
  *   5b. Assemble the CROSS-TOOL `shared/home` root: the linked scripts each
  *      adapter discovered in $HOME (outside every tool home) plus the user's
- *      `config.extraPaths`, merged and deduped by repoPath (adapters first).
- *      Mirrored via `shared/home-index.json` rather than wiped, so a push from a
- *      machine missing one of the tools does not delete that tool's files.
+ *      `config.extraPaths`. Two lists come out of this: the FILES actually
+ *      written (deduped by repoPath, adapters first) and the provenance
+ *      CLAIMS — every (repoPath, origin) pair before that dedupe, so a file
+ *      two origins both produce keeps BOTH origins in the index even though
+ *      only one origin's content is written. Mirrored via
+ *      `shared/home-index.json` (claims in, atomically written) rather than
+ *      wiped, so a push from a machine missing one of the tools does not
+ *      delete that tool's files.
  *   6. Materialize the repo working tree: per-tool frozen files + symlinks +
  *      manifest.json, the merged shared/home files, the shared instructions file
  *      (when sharing), the top-level arbella.json, a generated README.md, and a
@@ -90,6 +95,7 @@ import {
   homeExcludeRoots,
   isSharedHomePath,
 } from "../core/homefiles/capture.js";
+import type { HomeIndexEntry } from "../core/homefiles/home-index.js";
 import {
   EXTRA_PATHS_ORIGIN,
   HOME_INDEX_REPO_PATH,
@@ -260,8 +266,22 @@ interface HomeEntry {
 interface HomeCapture {
   /** The tool results with their shared/home files removed. */
   toolResults: CaptureResult[];
-  /** The merged, deduped shared/home file list (adapters first, then extraPaths). */
+  /**
+   * The deduped shared/home FILE list (adapters first, then extraPaths) — what
+   * actually gets written to disk this run. When two origins produce the same
+   * repoPath, only the first-wins entry's content is written; see `claims` for
+   * the provenance of BOTH.
+   */
   entries: HomeEntry[];
+  /**
+   * Every (repoPath, origin) CLAIM this run made, BEFORE the first-wins dedupe
+   * above. A file two origins both produce (e.g. a linked script both claude
+   * and codex reference) must feed `mergeHomeIndex` with both claims — deduping
+   * before indexing would silently drop the second origin's provenance, and a
+   * later run missing the first-wins origin (with the second absent) would then
+   * see a single expired claim and delete a file the absent origin still needs.
+   */
+  claims: HomeIndexEntry[];
   /** SecretRefs produced while sanitizing extraPaths content. */
   secrets: SecretRef[];
 }
@@ -272,8 +292,12 @@ interface HomeCapture {
  * The adapters emit the scripts their own configs point at inside their normal
  * CaptureResult; those are lifted out here (so `replaceToolFiles` only ever sees
  * files under the tool's own roots) and merged with the user's `extraPaths`.
- * Dedupe is first-wins in that order: an adapter-discovered file keeps the
- * provenance that explains WHY it is in the backup at all.
+ * Dedupe (for the FILES actually written) is first-wins in that order: an
+ * adapter-discovered file keeps the provenance that explains WHY it is in the
+ * backup at all. The provenance CLAIMS themselves — every (repoPath, origin)
+ * pair, including duplicates dedupe would have dropped — are returned
+ * separately as `claims` so the caller can feed them to `mergeHomeIndex`
+ * un-thinned; see {@link HomeCapture.claims}.
  *
  * `extraPaths` is allowed to reach INSIDE a tool home (e.g. `~/.claude/.agents`,
  * the `status` "not backed up" hint), so the extraPaths pass below is handed an
@@ -285,12 +309,13 @@ async function captureSharedHome(
   results: CaptureResult[],
   config: ArbellaConfig,
 ): Promise<HomeCapture> {
-  const entries: HomeEntry[] = [];
+  // Raw, un-deduped: one entry per (repoPath, origin) pair this run produced.
+  const rawEntries: HomeEntry[] = [];
 
   const toolResults = results.map((result) => {
     const homeFiles = result.files.filter((f) => isSharedHomePath(f.repoPath));
     if (homeFiles.length === 0) return result;
-    for (const file of homeFiles) entries.push({ file, origin: result.tool });
+    for (const file of homeFiles) rawEntries.push({ file, origin: result.tool });
     return {
       ...result,
       files: result.files.filter((f) => !isSharedHomePath(f.repoPath)),
@@ -312,19 +337,26 @@ async function captureSharedHome(
         alreadyCaptured: computeAlreadyCaptured(results, toolHomeDir),
       },
     );
-    for (const file of out.files) entries.push({ file, origin: EXTRA_PATHS_ORIGIN });
+    for (const file of out.files) rawEntries.push({ file, origin: EXTRA_PATHS_ORIGIN });
     for (const warning of out.warnings) log.warn(warning);
   }
 
-  // First wins: adapters (in capture order), then extraPaths.
+  // First wins: adapters (in capture order), then extraPaths. Decides which
+  // origin's content is actually written when two origins produce one path.
   const seen = new Set<string>();
-  const merged = entries.filter((entry) => {
+  const entries = rawEntries.filter((entry) => {
     if (seen.has(entry.file.repoPath)) return false;
     seen.add(entry.file.repoPath);
     return true;
   });
 
-  return { toolResults, entries: merged, secrets: out.secrets };
+  // Every claim, pre-dedupe — see HomeCapture.claims.
+  const claims: HomeIndexEntry[] = rawEntries.map((entry) => ({
+    repoPath: entry.file.repoPath,
+    origin: entry.origin,
+  }));
+
+  return { toolResults, entries, claims, secrets: out.secrets };
 }
 
 /* -------------------------------------------------------------------------- */
@@ -457,7 +489,7 @@ export async function run(opts: BackupOptions = {}): Promise<void> {
   for (const result of toolResults) {
     await replaceToolFiles(repoRoot, result);
   }
-  await writeSharedHome(repoRoot, home.entries, capturedTools);
+  await writeSharedHome(repoRoot, home.entries, home.claims, capturedTools);
 
   // Shared instructions (R9): write once when sharing, otherwise ensure a stale
   // shared file from a previous (sharing) backup is removed.
@@ -592,18 +624,28 @@ async function replaceToolFiles(repoRoot: string, result: CaptureResult): Promis
  * mirror's to delete (see core/homefiles/home-index.ts). `extraPaths` always
  * counts as having run — its files are recomputed from the live config.
  *
+ * `entries` and `claims` are deliberately two different shapes of "what this
+ * run produced": `entries` is the DEDUPED file list — what actually gets
+ * written to shared/home/ — while `claims` is every (repoPath, origin) pair
+ * BEFORE that dedupe, fed to `mergeHomeIndex` un-thinned. A file two origins
+ * both produce in the same run (e.g. a hook script both claude and codex
+ * reference) has exactly one entry (whichever origin won first-wins) but TWO
+ * claims; indexing only the winning claim would make the losing origin's
+ * provenance vanish on the spot, one run early.
+ *
  * Exported for the mirror regression test: the property that matters is what
  * SURVIVES on disk, which no amount of testing the pure merge can show.
  */
 export async function writeSharedHome(
   repoRoot: string,
   entries: readonly HomeEntry[],
+  claims: readonly HomeIndexEntry[],
   capturedTools: readonly ToolId[],
 ): Promise<void> {
   const indexPath = repoJoin(repoRoot, HOME_INDEX_REPO_PATH);
   const merge = mergeHomeIndex(
     parseHomeIndex(await readJsonIfExists(indexPath)),
-    entries.map((entry) => ({ repoPath: entry.file.repoPath, origin: entry.origin })),
+    claims,
     new Set<string>([...capturedTools, EXTRA_PATHS_ORIGIN]),
   );
 
@@ -625,7 +667,9 @@ export async function writeSharedHome(
   if (Object.keys(merge.index.files).length === 0) {
     await fs.rmrf(indexPath);
   } else {
-    await fs.write(indexPath, serialize(merge.index));
+    // Atomic: an interrupted plain write here would truncate the index and
+    // lose every origin's provenance in one stroke, not just this run's.
+    await fs.writeAtomic(indexPath, serialize(merge.index));
   }
 
   if (entries.length > 0) {
