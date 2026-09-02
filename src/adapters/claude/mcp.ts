@@ -33,6 +33,8 @@
  * pure.
  */
 
+import path from "node:path";
+
 import type { CaptureContext, RestoreContext } from "../adapter.interface.js";
 import type { RestoreAction, SecretRef, ToolManifest } from "../../types.js";
 
@@ -323,9 +325,42 @@ interface PlannedServer {
 
 /** The servers a merge would write into one project scope. */
 interface PlannedProject {
-  /** Hydrated, existing-on-this-machine project directory. */
+  /**
+   * The `projects` key this project's servers will be written under. This is
+   * the EXISTING key in ~/.claude.json when {@link findProjectKey} finds one
+   * naming the same directory (reused verbatim, so a separator-flavor
+   * mismatch never creates a second entry for one directory) — otherwise the
+   * normalized, hydrated project path.
+   */
   dir: string;
   servers: PlannedServer[];
+}
+
+/**
+ * Find the key in `projects` that names the SAME directory as `projectDir`,
+ * comparing under `normalize` rather than by raw string equality.
+ *
+ * ~/.claude.json's `projects` keys are written by Claude Code itself with
+ * NATIVE separators (`path.join`) — backslashes on Windows. A manifest's
+ * project path is stored "/"-joined (`{{HOME}}/programming/arbella`), so
+ * hydrating it by splicing in a native-backslash `{{HOME}}` on Windows yields
+ * a MIXED-separator string (`C:\Users\…\home/programming/arbella`) that never
+ * equals the native-backslash key by plain `===`, even though both name the
+ * same directory. That mismatch used to make `planProjectScope` treat an
+ * already-registered project as unregistered — re-planning (and, on merge,
+ * duplicating) it under a second, differently-spelled key.
+ *
+ * `normalize` is injectable (default `path.normalize`, a no-op for POSIX
+ * paths) so this can be exercised with `path.win32.normalize` from any host,
+ * including a POSIX CI runner. Pure — no fs, no host detection.
+ */
+export function findProjectKey(
+  projects: Record<string, unknown>,
+  projectDir: string,
+  normalize: (p: string) => string = path.normalize,
+): string | undefined {
+  const target = normalize(projectDir);
+  return Object.keys(projects).find((key) => normalize(key) === target);
 }
 
 /**
@@ -434,12 +469,22 @@ async function planProjectScope(
   const planned: PlannedProject[] = [];
 
   for (const entry of manifest.projectMcpServers) {
-    const dir = hydrateProjectPath(ctx, entry.projectPath);
+    // Normalized so a manifest path that mixes separators (the stored
+    // template is "/"-joined; splicing a native-backslash {{HOME}} into it on
+    // Windows yields "C:\Users\…\home/programming/arbella") lines up with a
+    // directory path.join built natively. A no-op on POSIX.
+    const dir = path.normalize(hydrateProjectPath(ctx, entry.projectPath));
     if ((await ctx.fs.statKind(dir)) !== "dir") {
       ctx.log.debug(`claude: skip project MCP servers — ${dir} does not exist here`);
       continue;
     }
-    const project = projects[dir];
+    // The on-disk key may still be spelled differently (Claude Code wrote it
+    // with `path.join`, which can disagree with our normalized `dir` in edge
+    // cases `path.normalize` alone doesn't cover) — find it by normalized
+    // comparison and REUSE that exact key, so the merge never writes a
+    // second key for the same directory.
+    const key = findProjectKey(projects, dir) ?? dir;
+    const project = key in projects ? projects[key] : undefined;
     const localServers = isPlainObject(project) ? project.mcpServers : undefined;
 
     const servers: PlannedServer[] = [];
@@ -449,12 +494,12 @@ async function planProjectScope(
         continue;
       }
       if (keepsLocal(ctx, localServers, name)) {
-        ctx.log.debug(`claude: keep local MCP server ${name} (${dir}, sourceOfTruth=local)`);
+        ctx.log.debug(`claude: keep local MCP server ${name} (${key}, sourceOfTruth=local)`);
         continue;
       }
       servers.push({ name, def: hydrateDef(ctx, entry.servers[name]!) });
     }
-    if (servers.length > 0) planned.push({ dir, servers });
+    if (servers.length > 0) planned.push({ dir: key, servers });
   }
 
   return planned;

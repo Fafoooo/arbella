@@ -24,6 +24,7 @@ import path from "node:path";
 import {
   captureMcpServers,
   describeServerLaunch,
+  findProjectKey,
   MAX_LAUNCH_SUMMARY,
   planMcpMerge,
   restoreMcpServers,
@@ -220,8 +221,14 @@ describe("claude mcp capture: nothing but mcpServers leaves ~/.claude.json", () 
     expect(JSON.stringify(stored)).not.toContain(home);
     // `commandRefs` is the ONE deliberately raw field: WP-B follows those paths
     // on THIS machine to capture the linked scripts, so it must keep the real
-    // absolute path — it is never serialized into the repo.
-    expect(JSON.stringify(commandRefs)).toContain(home);
+    // absolute path — it is never serialized into the repo. Asserted on the
+    // PARSED structure, not `JSON.stringify`: on Windows the serialized JSON
+    // escapes the path's backslashes (`C:\\Users\\…`), so a raw `home` string
+    // (single backslashes) would never be found by `toContain` even though the
+    // ref legitimately carries it.
+    expect(
+      commandRefs.some((r) => [r.command, ...(r.args ?? [])].some((v) => v.startsWith(home))),
+    ).toBe(true);
   });
 
   it("carries env values verbatim when includeSecrets is ON", async () => {
@@ -378,6 +385,30 @@ describe("claude mcp restore: key-wise merge into ~/.claude.json", () => {
     const key = Object.keys(projects)[0]!;
     expect(projects[key].mcpServers.here).toEqual({ command: "a" });
     expect(debugs.some((d) => d.includes("does not exist here"))).toBe(true);
+  });
+
+  it("reuses the existing project key instead of duplicating it (path.join key vs '/' manifest path)", async () => {
+    // The regression this guards: a pre-existing `projects` key written with
+    // native separators (Claude Code's own `path.join`) must be REUSED, not
+    // shadowed by a second, differently-spelled key for the same directory
+    // once the manifest's "/"-joined path is hydrated onto this machine.
+    const present = path.join(home, "programming", "arbella");
+    await fsp.mkdir(present, { recursive: true });
+    await writeGlobalState({ [present]: { mcpServers: { here: { command: "local-here" } } } });
+
+    const manifest = manifestWith({
+      projectMcpServers: [
+        { projectPath: "{{HOME}}/programming/arbella", servers: { here: { command: "a" } } },
+      ],
+    });
+    await restoreMcpServers(restoreCtx({ sourceOfTruth: "repo" }), manifest);
+
+    const projects = (await readGlobalState()).projects as Record<string, any>;
+    // The fixture's untouched "/tmp/does-not-exist-here" ghost project survives
+    // alongside it; what matters is that `present` was never ALSO written under
+    // a second, differently-spelled key for the same directory.
+    expect(Object.keys(projects).sort()).toEqual(["/tmp/does-not-exist-here", present].sort());
+    expect(projects[present].mcpServers.here).toEqual({ command: "a" });
   });
 
   it("warns once per redacted env key the user must re-supply", async () => {
@@ -628,5 +659,46 @@ describe("claude mcp: dry-run planning", () => {
     expect(plan.invalid).toBe(true);
     expect(plan.actions).toEqual([]);
     expect(plan.needsEnv).toEqual([]);
+  });
+});
+
+/* -------------------------------------------------------------------------- */
+/* findProjectKey (pure — the fix for cross-platform project-key drift)        */
+/* -------------------------------------------------------------------------- */
+
+describe("findProjectKey: matches an existing project key regardless of separator flavor", () => {
+  it("finds a path.join-built key from a '/'-joined hydrated path (default normalizer)", () => {
+    // The stored template is always "/"-joined; on POSIX this is byte-identical
+    // to a path.join key, and on an actual Windows host the default normalizer
+    // (path.normalize) folds both to the same native form — this is exactly the
+    // comparison planProjectScope performs.
+    const dir = path.join("tmp-root", "home", "programming", "arbella");
+    const hydrated = "tmp-root/home/programming/arbella";
+    expect(findProjectKey({ [dir]: {} }, hydrated)).toBe(dir);
+  });
+
+  it("returns undefined when no key names the same directory", () => {
+    expect(findProjectKey({ "/tmp/other": {} }, "/tmp/programming/arbella")).toBeUndefined();
+  });
+
+  // THE regression this helper exists for: on Windows, hydrating
+  // "{{HOME}}/programming/arbella" by splicing a native-backslash $HOME into a
+  // "/"-joined template tail produces a MIXED-separator string that never
+  // `===`s the native-backslash key Claude Code wrote via `path.join` — even
+  // though both name the same directory. Exercised with `path.win32.normalize`
+  // (an injected normalizer) so this proves the fix on every host, including
+  // this POSIX CI runner.
+  it("matches a native win32 key against a mixed-separator hydrated path", () => {
+    const projects = { "C:\\Users\\runner\\programming\\arbella": {} };
+    const hydrated = "C:\\Users\\runner/programming/arbella";
+    expect(findProjectKey(projects, hydrated, path.win32.normalize)).toBe(
+      "C:\\Users\\runner\\programming\\arbella",
+    );
+  });
+
+  it("does not fold two genuinely different win32 directories together", () => {
+    const projects = { "C:\\Users\\runner\\programming\\arbella": {} };
+    const hydrated = "C:\\Users\\runner\\programming\\other-repo";
+    expect(findProjectKey(projects, hydrated, path.win32.normalize)).toBeUndefined();
   });
 });
