@@ -193,18 +193,24 @@ describe("claude restore: enabledPlugins honors sourceOfTruth", () => {
 
 /**
  * deploySharedInstructions resolves its destinations through `toolHomeDir()`,
- * i.e. from the real $HOME. Point $HOME at a temp dir for the duration.
+ * i.e. `os.homedir()`. Point it at a temp dir for the duration: HOME on POSIX,
+ * USERPROFILE on Windows (both set, so the test never touches the real home).
  */
+const HOME_ENV_KEYS = ["HOME", "USERPROFILE"] as const;
+
 async function withTempHome<T>(name: string, fn: (home: string) => Promise<T>): Promise<T> {
   const home = path.join(tmpRoot, name);
   await fsp.mkdir(home, { recursive: true });
-  const original = process.env.HOME;
-  process.env.HOME = home;
+  const original = new Map(HOME_ENV_KEYS.map((k) => [k, process.env[k]] as const));
+  for (const k of HOME_ENV_KEYS) process.env[k] = home;
   try {
     return await fn(home);
   } finally {
-    if (original === undefined) delete process.env.HOME;
-    else process.env.HOME = original;
+    for (const k of HOME_ENV_KEYS) {
+      const value = original.get(k);
+      if (value === undefined) delete process.env[k];
+      else process.env[k] = value;
+    }
   }
 }
 
