@@ -233,6 +233,158 @@ describe("sanitizer: sanitizeFile is the key-name-aware production path (§0.6)"
   });
 });
 
+describe("sanitizer: credential-bearing URLs", () => {
+  const TOKEN = "s3cr3t-signed-value-0123456789";
+
+  /** Sanitize one MCP-shaped server def and hand back its `url`. */
+  function urlAfter(url: string, key = "url"): unknown {
+    const { value } = sanitizer.sanitizeJson(
+      { mcpServers: { remote: { type: "sse", [key]: url } } },
+      "claude",
+      ".claude.json#mcpServers",
+    );
+    const servers = (value as Record<string, Record<string, Record<string, unknown>>>).mcpServers;
+    return servers.remote![key];
+  }
+
+  it("redacts a URL carrying userinfo", () => {
+    // Neither rule that exists would see this: "url" is not a secret KEY, and a
+    // URL matches no token SHAPE — the credential is a substring of the value.
+    expect(urlAfter(`https://svc:${TOKEN}@mcp.example.com/sse`)).toBe(REDACTED);
+    expect(urlAfter(`https://${TOKEN}@mcp.example.com/sse`)).toBe(REDACTED);
+  });
+
+  it("redacts a URL whose query names a credential parameter", () => {
+    for (const param of [
+      "key",
+      "token",
+      "access_token",
+      "secret",
+      "sig",
+      "signature",
+      "apikey",
+      "api_key",
+      "auth",
+      "password",
+    ]) {
+      expect({ param, url: urlAfter(`https://mcp.example.com/sse?${param}=${TOKEN}`) }).toEqual({
+        param,
+        url: REDACTED,
+      });
+    }
+  });
+
+  it("applies to every URL-shaped key name", () => {
+    for (const key of ["url", "URL", "uri", "endpoint", "href"]) {
+      expect({ key, url: urlAfter(`https://u:p@mcp.example.com/sse`, key) }).toEqual({
+        key,
+        url: REDACTED,
+      });
+    }
+  });
+
+  it("leaves a plain endpoint URL alone — that is what a backup is FOR", () => {
+    for (const url of [
+      "https://mcp.example.com/sse",
+      "https://mcp.example.com/sse?version=2&region=eu",
+      "http://localhost:8080/mcp",
+      "https://user.example.com/path/token/readme",
+    ]) {
+      expect({ url, after: urlAfter(url) }).toEqual({ url, after: url });
+    }
+  });
+
+  it("leaves a non-URL value under a url-ish key alone", () => {
+    expect(urlAfter("localhost:8080", "endpoint")).toBe("localhost:8080");
+  });
+
+  it("redacts a URL whose query names a credential param isSecretKey alone misses (session-shaped)", () => {
+    // Bare "session"/"sid"/"code" etc. are not secret JSON KEY names (too
+    // noisy there), but they are exactly how services hand back a live
+    // credential in a URL query string.
+    for (const param of ["session", "sessionid", "session_id", "sid", "code", "jwt", "assertion"]) {
+      expect({ param, url: urlAfter(`https://mcp.example.com/sse?${param}=${TOKEN}`) }).toEqual({
+        param,
+        url: REDACTED,
+      });
+    }
+  });
+
+  it("redacts a URL whose query names a credential param only isSecretKey catches (vendor-shaped)", () => {
+    // "X-API-Key" is not in the URL-specific extra set at all — only
+    // isSecretKey's fuzzy vendor-prefix matching catches it.
+    expect(urlAfter(`https://mcp.example.com/sse?X-API-Key=${TOKEN}`)).toBe(REDACTED);
+  });
+
+  it("redacts a presigned AWS URL (vendor-PREFIXED credential params)", () => {
+    // A presigned S3 URL is a complete, working credential in a link. Its
+    // parameters are vendor-prefixed — "X-Amz-Credential" normalizes to
+    // "xamzcredential" and "X-Amz-Signature" to "xamzsignature", which match
+    // nothing in the URL-specific extra set and nothing in isSecretKey either —
+    // so this whole URL used to be stored verbatim under an `url:` key.
+    const presigned =
+      "https://my-bucket.s3.eu-central-1.amazonaws.com/artifacts/mcp.tar.gz" +
+      "?X-Amz-Algorithm=AWS4-HMAC-SHA256" +
+      "&X-Amz-Credential=AKIAIOSFODNN7EXAMPLE%2F20260902%2Feu-central-1%2Fs3%2Faws4_request" +
+      "&X-Amz-Date=20260902T101500Z&X-Amz-Expires=3600&X-Amz-SignedHeaders=host" +
+      `&X-Amz-Signature=${TOKEN}`;
+    expect(urlAfter(presigned)).toBe(REDACTED);
+
+    // Each of the three stems is enough on its own.
+    for (const param of ["X-Amz-Credential", "X-Amz-Signature", "X-Amz-Security-Token"]) {
+      expect({ param, url: urlAfter(`https://s3.example.com/o?${param}=${TOKEN}`) }).toEqual({
+        param,
+        url: REDACTED,
+      });
+    }
+  });
+
+  it("redacts a credential param whose NAME is percent-encoded", () => {
+    // `?api%5Fkey=…` is `?api_key=…` as far as the server is concerned; only the
+    // decoded form is recognizable as a credential name.
+    expect(urlAfter(`https://mcp.example.com/sse?api%5Fkey=${TOKEN}`)).toBe(REDACTED);
+    expect(urlAfter(`https://mcp.example.com/sse?X-Amz-Credential%2Dv4=${TOKEN}`)).toBe(REDACTED);
+    // A malformed escape must not throw — it falls back to the raw name.
+    expect(urlAfter(`https://mcp.example.com/sse?%zz=1&signature=${TOKEN}`)).toBe(REDACTED);
+    expect(urlAfter("https://mcp.example.com/sse?%zz=1&version=2")).toBe(
+      "https://mcp.example.com/sse?%zz=1&version=2",
+    );
+  });
+
+  it("redacts a credential carried in the URL FRAGMENT, not just the query", () => {
+    expect(urlAfter(`https://mcp.example.com/callback#access_token=${TOKEN}`)).toBe(REDACTED);
+    // A fragment credential must be caught even when the query itself is benign.
+    expect(urlAfter(`https://mcp.example.com/callback?state=abc#access_token=${TOKEN}`)).toBe(
+      REDACTED,
+    );
+  });
+
+  it("leaves ordinary query-only URLs alone (regression: no false positives)", () => {
+    for (const url of [
+      "https://api.example.com/v1?version=2&format=json",
+      "http://localhost:8000",
+      "https://mcp.x/sse?transport=sse",
+    ]) {
+      expect(urlAfter(url)).toBe(url);
+    }
+  });
+
+  it("reports the redaction as a credential-bearing URL", () => {
+    const { found } = sanitizer.sanitizeJson(
+      { url: `https://mcp.example.com/sse?api_key=${TOKEN}` },
+      "claude",
+      ".claude.json#mcpServers.remote",
+    );
+
+    expect(found).toHaveLength(1);
+    expect(found[0]!.kind).toBe("value");
+    expect(found[0]!.key).toBe("url");
+    expect(found[0]!.description).toContain("credential-bearing URL");
+    // Metadata only: the SecretRef never carries the value.
+    expect(JSON.stringify(found)).not.toContain(TOKEN);
+  });
+});
+
 describe("sanitizer: env/environment/headers containers (E2E leak regression)", () => {
   // Found by a live end-to-end push: an opencode MCP env var named just "KEY"
   // (no api/token/secret stem, opaque value) sailed through the JSON pass while

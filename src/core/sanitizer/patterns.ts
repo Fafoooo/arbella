@@ -166,6 +166,135 @@ export function isSecretContainerKey(key: string): boolean {
   return SECRET_CONTAINER_KEYS.includes(key.toLowerCase());
 }
 
+/* -------------------------------------------------------------------------- */
+/* Credential-bearing URLs                                                     */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Key names whose value is a URL. A URL is not itself a secret — `url:
+ * "https://mcp.example.com/sse"` is exactly the kind of value a backup exists to
+ * carry — so these keys are NOT in SECRET_KEY_NAMES. They only matter as the
+ * gate for {@link isCredentialBearingUrl}.
+ */
+const URL_KEY_NAMES: ReadonlySet<string> = new Set(["url", "uri", "endpoint", "href"]);
+
+/** True when a key names a URL value. Case-insensitive. */
+export function isUrlKey(key: string): boolean {
+  return URL_KEY_NAMES.has(key.toLowerCase());
+}
+
+/**
+ * Query/fragment parameter names that carry a credential but are NOT reliably
+ * caught by {@link isSecretKey} — which is tuned for JSON/TOML key names and
+ * deliberately excludes bare endings like "key" (VS Code `keybindings.json`
+ * entries are literally `{"key": "cmd+k"}`) or short tokens like "sig"/"auth"
+ * that would be noisy in that context. In a URL query/fragment those same bare
+ * names are exactly what real services use: Google Maps `?key=`, OAuth implicit
+ * grants `#access_token=`/`#code=`, SSE session URLs `?session=`. Compared in
+ * NORMALIZED form (lowercased, `-`/`_` removed), so `session_id`/`sessionId`
+ * both collapse to `sessionid`.
+ */
+const CREDENTIAL_QUERY_PARAMS_EXTRA: ReadonlySet<string> = new Set([
+  "session",
+  "sessionid",
+  "sid",
+  "code",
+  "jwt",
+  "assertion",
+  "sig",
+  "signature",
+  "key",
+  "auth",
+  "credential",
+  "credentials",
+]);
+
+/**
+ * Credential stems matched as a normalized SUBSTRING of a parameter name, so a
+ * VENDOR-PREFIXED parameter is caught too. AWS presigned URLs are the case that
+ * forced this: `X-Amz-Credential` / `X-Amz-Signature` normalize to
+ * "xamzcredential" / "xamzsignature", which equal nothing in the exact set above
+ * and match no rule in {@link isSecretKey} either — so a presigned S3 URL under
+ * an `url:` key used to be stored verbatim, signature and all.
+ *
+ * Kept deliberately short and specific: these three read as credentials wherever
+ * they appear in a query-parameter name, unlike a bare "key" or "auth" (already
+ * handled exactly above, where a false positive would be noisier).
+ */
+const CREDENTIAL_PARAM_STEMS: readonly string[] = [
+  "credential",
+  "signature",
+  "securitytoken",
+];
+
+/**
+ * The parameter name as the SERVER will read it: percent-decoded, lowercased,
+ * with "-"/"_" removed. Decoding matters because `?api%5Fkey=…` and `?api_key=…`
+ * are the same parameter, and only the second one is recognizable as text.
+ * A malformed escape (`%zz`) makes decodeURIComponent throw — that is not a
+ * reason to skip the pair, so the raw name is normalized instead.
+ */
+function normalizeParamName(rawName: string): string {
+  let decoded = rawName;
+  try {
+    decoded = decodeURIComponent(rawName);
+  } catch {
+    // Malformed percent-escape: fall back to the raw name.
+  }
+  return decoded.toLowerCase().replace(/[-_]/g, "");
+}
+
+/** True if any `k=v` pair (split on "&"/";") names a credential parameter. */
+function hasCredentialParam(pairs: string): boolean {
+  if (pairs === "") return false;
+  for (const part of pairs.split(/[&;]/)) {
+    const rawName = (part.split("=")[0] ?? "").trim();
+    if (rawName === "") continue;
+    const normalized = normalizeParamName(rawName);
+    if (isSecretKey(rawName) || isSecretKey(normalized)) return true;
+    if (CREDENTIAL_QUERY_PARAMS_EXTRA.has(normalized)) return true;
+    if (CREDENTIAL_PARAM_STEMS.some((stem) => normalized.includes(stem))) return true;
+  }
+  return false;
+}
+
+/**
+ * True when a URL carries a credential IN THE URL ITSELF — the shapes that hide
+ * a secret from every key-name and token-shape rule the sanitizer has:
+ *
+ *   userinfo          `https://user:pa55@host/…`, `https://ghp_xxx@host/…`
+ *   query parameter   `https://host/sse?api_key=…`, `…?session=…`
+ *   fragment          `https://host/cb#access_token=…` (OAuth implicit grant)
+ *
+ * All three are routine in MCP server definitions (a hosted server
+ * authenticated by a signed URL, or an OAuth callback URL) and would otherwise
+ * be stored verbatim: the KEY is `url`, which is not secret, and the VALUE is a
+ * URL, which matches no token pattern. The whole value is redacted rather than
+ * the credential inside it — a URL with a hole in it restores to something
+ * broken either way, and the surviving half would still describe the account.
+ *
+ * A plain `https://mcp.example.com/sse?version=2&format=json` is not
+ * credential-bearing and survives. Pure.
+ */
+export function isCredentialBearingUrl(value: string): boolean {
+  // Must actually look like a URL; `endpoint: "localhost:8080"` is not one.
+  if (!/^[A-Za-z][A-Za-z0-9+.-]*:\/\//.test(value)) return false;
+
+  // userinfo: anything between "://" and an "@" that precedes the host.
+  if (/:\/\/[^/?#\s@]+@/.test(value)) return true;
+
+  const queryStart = value.indexOf("?");
+  const hashStart = value.indexOf("#");
+
+  const query =
+    queryStart === -1
+      ? ""
+      : value.slice(queryStart + 1, hashStart > queryStart ? hashStart : undefined);
+  const fragment = hashStart === -1 ? "" : value.slice(hashStart + 1);
+
+  return hasCredentialParam(query) || hasCredentialParam(fragment);
+}
+
 /**
  * Normalize a key for fuzzy matching against SECRET_KEY_NAMES: lowercased with
  * separators (-, _, space) stripped, so "ANTHROPIC_API_KEY" -> "anthropicapikey".

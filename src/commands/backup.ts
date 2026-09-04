@@ -17,10 +17,20 @@
  *      refs). All sanitizing/templating happens inside capture via the injected
  *      CoreServices, so secrets are redacted and machine paths are placeheld
  *      BEFORE anything is written.
+ *   5b. Assemble the CROSS-TOOL `shared/home` root: the linked scripts each
+ *      adapter discovered in $HOME (outside every tool home) plus the user's
+ *      `config.extraPaths`. Two lists come out of this: the FILES actually
+ *      written (deduped by repoPath, adapters first) and the provenance
+ *      CLAIMS — every (repoPath, origin) pair before that dedupe, so a file
+ *      two origins both produce keeps BOTH origins in the index even though
+ *      only one origin's content is written. Mirrored via
+ *      `shared/home-index.json` (claims in, atomically written) rather than
+ *      wiped, so a push from a machine missing one of the tools does not
+ *      delete that tool's files.
  *   6. Materialize the repo working tree: per-tool frozen files + symlinks +
- *      manifest.json, the shared instructions file (when sharing), the top-level
- *      arbella.json, a generated README.md, and a defensive .gitignore that
- *      bakes in the secret denylist.
+ *      manifest.json, the merged shared/home files, the shared instructions file
+ *      (when sharing), the top-level arbella.json, a generated README.md, and a
+ *      defensive .gitignore that bakes in the secret denylist.
  *   7. Commit + push (R3). Returns quietly with "nothing changed" when the tree
  *      is already up to date.
  *   8. Print a clear summary, including every secret that was deliberately
@@ -48,12 +58,14 @@ import process from "node:process";
 import type { Command } from "commander";
 
 import type {
+  ArbellaMeta,
   CaptureResult,
   CapturedFile,
   ArbellaConfig,
   SecretRef,
   ToolId,
 } from "../types.js";
+import { TOOL_IDS } from "../types.js";
 import type { CaptureContext, CoreServices } from "../adapters/adapter.interface.js";
 
 import { detectOS, toolHomeDir } from "../platform/os.js";
@@ -62,12 +74,15 @@ import { log } from "../utils/log.js";
 
 import { loadConfig } from "../core/config/index.js";
 import { ensureLocalClone, commitAndPush } from "../core/repo/index.js";
+import { status as gitStatus } from "../core/repo/git.js";
 import { maybeRunBackup } from "../core/autobackup/index.js";
 import { buildRepoAuthHooks } from "./_context.js";
 import { ensureDeps } from "./setup.js";
 import {
   serialize,
   buildArbellaMeta,
+  decideSharedInstructionsUpdate,
+  parseMeta,
   shouldShareInstructions,
   buildSharedInstructionsFile,
   SHARED_INSTRUCTIONS_REPO_PATH,
@@ -76,6 +91,22 @@ import { sanitizer } from "../core/sanitizer/index.js";
 import { templater } from "../core/templater/index.js";
 import { buildVariables } from "../core/templater/variables.js";
 import { denylistFor } from "../core/sanitizer/denylist.js";
+import type { HomeCaptureContext, HomeCaptureOut } from "../core/homefiles/capture.js";
+import {
+  HOME_DENY,
+  SHARED_HOME_REPO_PREFIX,
+  captureExtraPaths,
+  computeAlreadyCaptured,
+  homeExcludeRoots,
+  isSharedHomePath,
+} from "../core/homefiles/capture.js";
+import type { HomeIndexEntry } from "../core/homefiles/home-index.js";
+import {
+  EXTRA_PATHS_ORIGIN,
+  HOME_INDEX_REPO_PATH,
+  mergeHomeIndex,
+  parseHomeIndex,
+} from "../core/homefiles/home-index.js";
 
 // R9 note: capture(ctx, { skipInstructions }) lives on the capture modules, NOT
 // on the Adapter interface (Adapter.capture(ctx) takes no opts). We therefore
@@ -216,6 +247,123 @@ function buildCaptureContext(
   };
 }
 
+/**
+ * Context for the `extraPaths` pass. Built with NO tool home: shared/home files
+ * live outside every tool, so their content must fold to {{HOME}}/{{USER}} only
+ * (a {{TOOL_HOME}} token there would be ambiguous on restore).
+ */
+function buildHomeCaptureContext(config: ArbellaConfig): HomeCaptureContext {
+  return { ...buildCoreServices(""), includeSecrets: config.includeSecrets };
+}
+
+/* -------------------------------------------------------------------------- */
+/* shared/home assembly (WP-B)                                                 */
+/* -------------------------------------------------------------------------- */
+
+/** One carried $HOME file plus where it came from (for the report). */
+interface HomeEntry {
+  file: CapturedFile;
+  /** "claude" / "codex" (a linked script or companion) or "extraPaths". */
+  origin: string;
+}
+
+/** The shared/home half of a capture run, split out of the per-tool results. */
+interface HomeCapture {
+  /** The tool results with their shared/home files removed. */
+  toolResults: CaptureResult[];
+  /**
+   * The deduped shared/home FILE list (adapters first, then extraPaths) — what
+   * actually gets written to disk this run. When two origins produce the same
+   * repoPath, only the first-wins entry's content is written; see `claims` for
+   * the provenance of BOTH.
+   */
+  entries: HomeEntry[];
+  /**
+   * Every (repoPath, origin) CLAIM this run made, BEFORE the first-wins dedupe
+   * above. A file two origins both produce (e.g. a linked script both claude
+   * and codex reference) must feed `mergeHomeIndex` with both claims — deduping
+   * before indexing would silently drop the second origin's provenance, and a
+   * later run missing the first-wins origin (with the second absent) would then
+   * see a single expired claim and delete a file the absent origin still needs.
+   */
+  claims: HomeIndexEntry[];
+  /** SecretRefs produced while sanitizing extraPaths content. */
+  secrets: SecretRef[];
+}
+
+/**
+ * Collect every `shared/home/*` file for this run.
+ *
+ * The adapters emit the scripts their own configs point at inside their normal
+ * CaptureResult; those are lifted out here (so `replaceToolFiles` only ever sees
+ * files under the tool's own roots) and merged with the user's `extraPaths`.
+ * Dedupe (for the FILES actually written) is first-wins in that order: an
+ * adapter-discovered file keeps the provenance that explains WHY it is in the
+ * backup at all. The provenance CLAIMS themselves — every (repoPath, origin)
+ * pair, including duplicates dedupe would have dropped — are returned
+ * separately as `claims` so the caller can feed them to `mergeHomeIndex`
+ * un-thinned; see {@link HomeCapture.claims}.
+ *
+ * `extraPaths` is allowed to reach INSIDE a tool home (e.g. `~/.claude/.agents`,
+ * the `status` "not backed up" hint), so the extraPaths pass below is handed an
+ * `alreadyCaptured` set — every absolute path this run's tool CaptureResults
+ * already froze — so it does not re-capture (and thus double) a file the tool
+ * itself already carries.
+ */
+async function captureSharedHome(
+  results: CaptureResult[],
+  config: ArbellaConfig,
+): Promise<HomeCapture> {
+  // Raw, un-deduped: one entry per (repoPath, origin) pair this run produced.
+  const rawEntries: HomeEntry[] = [];
+
+  const toolResults = results.map((result) => {
+    const homeFiles = result.files.filter((f) => isSharedHomePath(f.repoPath));
+    if (homeFiles.length === 0) return result;
+    for (const file of homeFiles) rawEntries.push({ file, origin: result.tool });
+    return {
+      ...result,
+      files: result.files.filter((f) => !isSharedHomePath(f.repoPath)),
+    };
+  });
+
+  const out: HomeCaptureOut = { files: [], secrets: [], warnings: [] };
+  if (config.extraPaths.length > 0) {
+    // SecretRef.tool is a ToolId (there is no "system" member), so extraPaths
+    // findings are labelled "claude" — the file paths in the ref make the real
+    // origin obvious, and inventing a tool id would break the manifest schema.
+    await captureExtraPaths(
+      buildHomeCaptureContext(config),
+      config.extraPaths,
+      "claude",
+      out,
+      {
+        excludeRoots: homeExcludeRoots(),
+        alreadyCaptured: computeAlreadyCaptured(results, toolHomeDir),
+      },
+    );
+    for (const file of out.files) rawEntries.push({ file, origin: EXTRA_PATHS_ORIGIN });
+    for (const warning of out.warnings) log.warn(warning);
+  }
+
+  // First wins: adapters (in capture order), then extraPaths. Decides which
+  // origin's content is actually written when two origins produce one path.
+  const seen = new Set<string>();
+  const entries = rawEntries.filter((entry) => {
+    if (seen.has(entry.file.repoPath)) return false;
+    seen.add(entry.file.repoPath);
+    return true;
+  });
+
+  // Every claim, pre-dedupe — see HomeCapture.claims.
+  const claims: HomeIndexEntry[] = rawEntries.map((entry) => ({
+    repoPath: entry.file.repoPath,
+    origin: entry.origin,
+  }));
+
+  return { toolResults, entries, claims, secrets: out.secrets };
+}
+
 /* -------------------------------------------------------------------------- */
 /* Main entry                                                                  */
 /* -------------------------------------------------------------------------- */
@@ -309,12 +457,17 @@ export async function run(opts: BackupOptions = {}): Promise<void> {
     return;
   }
 
-  const capturedTools = results.map((r) => r.tool);
-  const allSecrets = results.flatMap((r) => r.secrets);
+  // --- shared/home (WP-B): lift the adapters' linked scripts out of the tool
+  //     results and merge them with config.extraPaths into ONE mirrored root. --
+  const home = await captureSharedHome(results, config);
+  const toolResults = home.toolResults;
+
+  const capturedTools = toolResults.map((r) => r.tool);
+  const allSecrets = [...toolResults.flatMap((r) => r.secrets), ...home.secrets];
 
   // --- Dry run: report + stop (no clone, no writes, no commit) -------------
   if (dryRun) {
-    reportDryRun(results, sharedContent !== undefined, config);
+    reportDryRun(toolResults, home.entries, sharedContent !== undefined, config, allSecrets);
     return;
   }
 
@@ -331,36 +484,95 @@ export async function run(opts: BackupOptions = {}): Promise<void> {
   await ensureLocalClone(config.repo, authHooks);
   const repoRoot = config.repo.localPath;
 
+  // What the repo already says about itself, read BEFORE this run overwrites it:
+  // the previous tool list (a push from a machine missing a tool must not drop
+  // that tool from meta.tools), the previous sharedInstructions flag, and the raw
+  // bytes of the two files every push rewrites (so a no-op push can put them
+  // back byte-for-byte instead of committing a pure timestamp churn).
+  const previous = await readPreviousGenerated(repoRoot);
+
   // Mirror semantics: for each tool we captured, replace its `<tool>/files`
   // subtree wholesale so local deletions propagate to the repo. We deliberately
   // do NOT touch subtrees for tools we did not capture this run.
-  for (const result of results) {
+  //
+  // shared/home is a CROSS-TOOL root, so it is mirrored exactly ONCE here (not
+  // per tool) — and NOT by wiping it: a machine that lacks Codex would otherwise
+  // delete every file only the Codex capture knows about. See home-index.ts.
+  for (const result of toolResults) {
     await replaceToolFiles(repoRoot, result);
   }
+  await writeSharedHome(repoRoot, home.entries, home.claims, capturedTools);
 
-  // Shared instructions (R9): write once when sharing, otherwise ensure a stale
-  // shared file from a previous (sharing) backup is removed.
-  if (sharedContent !== undefined) {
+  // Shared instructions (R9): write once when sharing, remove a stale file when
+  // this run saw BOTH producers and they are no longer identical — and otherwise
+  // (a producer missing here) keep whatever is committed, because the shared file
+  // is the only copy of the absent tool's instructions. See
+  // decideSharedInstructionsUpdate.
+  const sharedUpdate = decideSharedInstructionsUpdate({
+    share: sharedContent !== undefined,
+    capturedTools,
+    configuredTools: config.tools,
+  });
+  if (sharedUpdate === "write" && sharedContent !== undefined) {
     const shared = buildSharedInstructionsFile(sharedContent);
     await writeCapturedFile(repoRoot, shared);
     log.step(`Wrote ${SHARED_INSTRUCTIONS_REPO_PATH} (shared CLAUDE.md == AGENTS.md)`);
-  } else {
+  } else if (sharedUpdate === "remove") {
     await fs.rmrf(repoJoin(repoRoot, SHARED_INSTRUCTIONS_REPO_PATH));
   }
+  // "keep" carries the previously recorded flag forward with the kept file.
+  const sharedInstructions =
+    sharedUpdate === "keep"
+      ? (previous.meta?.sharedInstructions ?? false)
+      : sharedUpdate === "write";
+
+  // The tool list this backup CLAIMS to carry. NOT `capturedTools`: a push from a
+  // machine that lacks one configured tool leaves that tool's subtree untouched
+  // in the repo, so dropping it from meta.tools would make the next pull skip a
+  // still-present backup (restore constrains itself to meta.tools).
+  const metaTools = resolveMetaTools({
+    capturedTools,
+    previousTools: previous.meta?.tools ?? [],
+    configuredTools: config.tools,
+    toolsWithRepoSubtree: await toolsWithRepoSubtree(repoRoot, previous.meta?.tools ?? []),
+  });
 
   // Top-level metadata (arbella.json) — createdAt supplied here (clock).
   const meta = buildArbellaMeta({
     arbellaVersion: ARBELLA_VERSION,
-    tools: capturedTools,
+    tools: metaTools,
     config,
     createdAt: nowIso,
-    sharedInstructions: sharedContent !== undefined,
+    sharedInstructions,
   });
   await fs.write(repoJoin(repoRoot, "arbella.json"), serialize(meta));
 
   // Generated repo scaffolding: restore README + defensive .gitignore.
   await fs.write(repoJoin(repoRoot, "README.md"), renderRepoReadme(meta, nowIso));
-  await fs.write(repoJoin(repoRoot, ".gitignore"), renderRepoGitignore(capturedTools));
+  await fs.write(repoJoin(repoRoot, ".gitignore"), renderRepoGitignore(metaTools));
+
+  // Both files above are rewritten on EVERY push (createdAt / "Generated:"), so a
+  // run that changed nothing else would still produce a commit — and `status`,
+  // which ignores those two files, would have called the repo clean. Put them
+  // back and stop instead.
+  const changedPaths = await changedRepoPaths(repoRoot);
+  if (
+    changedPaths !== undefined &&
+    (await skipUnchangedPush({ repoRoot, changedPaths, meta, previous }))
+  ) {
+    log.info("Nothing changed since the last push.");
+    printSummary({
+      changed: false,
+      repoRoot,
+      capturedTools,
+      results: toolResults,
+      homeFiles: home.entries,
+      secrets: allSecrets,
+      sharing: sharedInstructions,
+      includeSecrets: config.includeSecrets,
+    });
+    return;
+  }
 
   // --- Commit + push (auth-aware: sign in on a private-repo push failure) --
   const message = opts.message ?? `arbella push ${nowIso}`;
@@ -375,11 +587,156 @@ export async function run(opts: BackupOptions = {}): Promise<void> {
     changed,
     repoRoot,
     capturedTools,
-    results,
+    results: toolResults,
+    homeFiles: home.entries,
     secrets: allSecrets,
-    sharing: sharedContent !== undefined,
+    sharing: sharedInstructions,
     includeSecrets: config.includeSecrets,
   });
+}
+
+/* -------------------------------------------------------------------------- */
+/* What the repo already said (previous arbella.json + README)                 */
+/* -------------------------------------------------------------------------- */
+
+/** The generated repo files as they were BEFORE this run rewrote them. */
+export interface PreviousGenerated {
+  /** Raw bytes of the committed arbella.json (undefined on a first push). */
+  metaRaw?: string;
+  /** The parsed committed meta (undefined when absent, corrupt or too new). */
+  meta?: ArbellaMeta;
+  /** Raw bytes of the committed README.md (undefined when it has none). */
+  readme?: string;
+}
+
+/** Read the committed arbella.json + README.md. Never throws. */
+async function readPreviousGenerated(repoRoot: string): Promise<PreviousGenerated> {
+  const metaRaw = await readIfExists(repoJoin(repoRoot, "arbella.json"));
+  const readme = await readIfExists(repoJoin(repoRoot, "README.md"));
+  let meta: ArbellaMeta | undefined;
+  if (metaRaw !== undefined) {
+    try {
+      meta = parseMeta(JSON.parse(metaRaw));
+    } catch {
+      // A corrupt/unknown arbella.json must not abort the push — this run simply
+      // has no previous state to carry forward.
+      meta = undefined;
+    }
+  }
+  return { metaRaw, meta, readme };
+}
+
+/**
+ * The tool list stamped into arbella.json (and used for the generated
+ * .gitignore): every tool captured HERE, plus every tool the previous backup
+ * recorded that is still configured AND still has a `<tool>/` subtree in the
+ * repo — in canonical {@link TOOL_IDS} order.
+ *
+ * The bug this pins: `meta.tools` used to be the tools present on the pushing
+ * machine. A push from a laptop without Codex shrank it to ["claude"] while
+ * leaving `codex/files/` in the repo — and `selectToolsForRestore` constrains a
+ * pull to `meta.tools`, so that still-committed subtree was never restored
+ * again. A tool the user REMOVES from `config.tools` (or whose subtree is gone)
+ * is still dropped, so the list cannot grow stale forever.
+ *
+ * Pure; the caller supplies `toolsWithRepoSubtree` because that check is fs work.
+ */
+export function resolveMetaTools(args: {
+  /** Tools whose capture ran this run. */
+  capturedTools: readonly ToolId[];
+  /** `tools` from the previous arbella.json ([] on a first push). */
+  previousTools: readonly ToolId[];
+  /** `config.tools` — a tool the user removed is dropped from the list. */
+  configuredTools: readonly ToolId[];
+  /** Previous tools whose `<tool>/` repo subtree still exists. */
+  toolsWithRepoSubtree: readonly ToolId[];
+}): ToolId[] {
+  const configured = new Set<ToolId>(args.configuredTools);
+  const onDisk = new Set<ToolId>(args.toolsWithRepoSubtree);
+  const keep = new Set<ToolId>(args.capturedTools);
+  for (const tool of args.previousTools) {
+    if (configured.has(tool) && onDisk.has(tool)) keep.add(tool);
+  }
+  return TOOL_IDS.filter((tool) => keep.has(tool));
+}
+
+/** Which of `tools` still have a `<tool>/` directory in the repo working copy. */
+async function toolsWithRepoSubtree(
+  repoRoot: string,
+  tools: readonly ToolId[],
+): Promise<ToolId[]> {
+  const out: ToolId[] = [];
+  for (const tool of tools) {
+    if ((await fs.statKind(repoJoin(repoRoot, tool))) === "dir") out.push(tool);
+  }
+  return out;
+}
+
+/* -------------------------------------------------------------------------- */
+/* No-op push detection                                                        */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * The repo files EVERY push rewrites even when nothing else changed: arbella.json
+ * carries `createdAt` and README.md carries the "Generated:" line. They are the
+ * two paths a no-op check has to look past.
+ */
+const TIMESTAMP_ONLY_PATHS: ReadonlySet<string> = new Set(["arbella.json", "README.md"]);
+
+/**
+ * Paths that differ from the last commit, or `undefined` when git could not say.
+ * "Cannot tell" must never be read as "nothing changed", so the caller commits.
+ */
+async function changedRepoPaths(repoRoot: string): Promise<string[] | undefined> {
+  try {
+    return (await gitStatus(repoRoot)).map((entry) => entry.path);
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Decide whether this push would only churn the two timestamp-bearing files —
+ * and if so, restore them so the working tree matches HEAD again and the caller
+ * can skip the commit entirely.
+ *
+ * The bug this pins: `status` reports "clean" (it ignores arbella.json and
+ * README.md) and the very next `push` commits anyway, because both files are
+ * rewritten unconditionally. A first push (no previous arbella.json), a version
+ * bump, a tool-list change and any content change all still commit — only a run
+ * whose meta is identical apart from `createdAt`, with no other path touched,
+ * is skipped.
+ *
+ * Exported for the no-op regression test: what matters is that the two files end
+ * up byte-identical to what was committed, which no pure predicate can show.
+ */
+export async function skipUnchangedPush(args: {
+  repoRoot: string;
+  /** Working-tree paths that differ from the last commit (git status). */
+  changedPaths: readonly string[];
+  /** The meta this run just wrote. */
+  meta: ArbellaMeta;
+  /** The generated files as they were before this run. */
+  previous: PreviousGenerated;
+}): Promise<boolean> {
+  const { repoRoot, changedPaths, meta, previous } = args;
+  if (previous.metaRaw === undefined || previous.meta === undefined) return false;
+  if (changedPaths.some((p) => !TIMESTAMP_ONLY_PATHS.has(p))) return false;
+  if (!sameMetaIgnoringCreatedAt(meta, previous.meta)) return false;
+
+  await fs.write(repoJoin(repoRoot, "arbella.json"), previous.metaRaw);
+  const readmePath = repoJoin(repoRoot, "README.md");
+  if (previous.readme === undefined) {
+    await fs.rmrf(readmePath);
+  } else {
+    await fs.write(readmePath, previous.readme);
+  }
+  return true;
+}
+
+/** Compare two metas ignoring the one field every push necessarily changes. */
+function sameMetaIgnoringCreatedAt(a: ArbellaMeta, b: ArbellaMeta): boolean {
+  return serialize({ ...a, createdAt: "" }) === serialize({ ...b, createdAt: "" });
 }
 
 /* -------------------------------------------------------------------------- */
@@ -430,9 +787,10 @@ function toolFilesPrefix(tool: ToolId): string {
  * Antigravity owns `antigravity/user` + `antigravity/gemini` alongside its
  * `antigravity/files` root.
  *
- * NOTE: memories (when included) are emitted by the codex adapter under
- * `codex/files/memories/...`, so they live inside the same subtree and are
- * covered by this replace.
+ * NOTE: memories are emitted by BOTH memory-capable adapters when
+ * `includeMemories` is on — codex under `codex/files/memories/...` (inside its
+ * existing subtree) and claude under its own `claude/memories/...` root, which is
+ * listed in toolRepoDataRoots below so it is mirrored like any other root.
  */
 async function replaceToolFiles(repoRoot: string, result: CaptureResult): Promise<void> {
   for (const root of toolRepoDataRoots(result.tool)) {
@@ -456,6 +814,112 @@ async function replaceToolFiles(repoRoot: string, result: CaptureResult): Promis
 }
 
 /**
+ * Materialize the cross-tool `shared/home` root and its provenance index.
+ *
+ * Deliberately NOT a wipe-and-rewrite. The per-tool roots can be wiped because
+ * `replaceToolFiles` only touches roots belonging to a tool this run actually
+ * captured; shared/home is fed by every adapter at once, so wiping it on a
+ * machine that lacks one of them deletes that tool's carried scripts from the
+ * repo — a push from the laptop quietly amputating the desktop's setup.
+ *
+ * So the mirror is computed instead: `home-index.json` records which capture
+ * produced each file, and only files whose origins ALL ran this time are the
+ * mirror's to delete (see core/homefiles/home-index.ts). `extraPaths` always
+ * counts as having run — its files are recomputed from the live config.
+ *
+ * `entries` and `claims` are deliberately two different shapes of "what this
+ * run produced": `entries` is the DEDUPED file list — what actually gets
+ * written to shared/home/ — while `claims` is every (repoPath, origin) pair
+ * BEFORE that dedupe, fed to `mergeHomeIndex` un-thinned. A file two origins
+ * both produce in the same run (e.g. a hook script both claude and codex
+ * reference) has exactly one entry (whichever origin won first-wins) but TWO
+ * claims; indexing only the winning claim would make the losing origin's
+ * provenance vanish on the spot, one run early.
+ *
+ * Exported for the mirror regression test: the property that matters is what
+ * SURVIVES on disk, which no amount of testing the pure merge can show.
+ */
+export async function writeSharedHome(
+  repoRoot: string,
+  entries: readonly HomeEntry[],
+  claims: readonly HomeIndexEntry[],
+  capturedTools: readonly ToolId[],
+): Promise<void> {
+  const indexPath = repoJoin(repoRoot, HOME_INDEX_REPO_PATH);
+  const merge = mergeHomeIndex(
+    parseHomeIndex(await readJsonIfExists(indexPath)),
+    claims,
+    new Set<string>([...capturedTools, EXTRA_PATHS_ORIGIN]),
+  );
+
+  const expected = new Set(merge.expected);
+  const committed = await listRepoFiles(
+    repoJoin(repoRoot, SHARED_HOME_REPO_PREFIX),
+    SHARED_HOME_REPO_PREFIX,
+  );
+  for (const repoPath of committed) {
+    if (expected.has(repoPath)) continue;
+    await fs.rmrf(repoJoin(repoRoot, repoPath));
+  }
+
+  for (const entry of entries) {
+    await writeCapturedFile(repoRoot, entry.file);
+  }
+
+  // An index with nothing in it is noise in the repo root; remove a stale one.
+  if (Object.keys(merge.index.files).length === 0) {
+    await fs.rmrf(indexPath);
+  } else {
+    // Atomic: an interrupted plain write here would truncate the index and
+    // lose every origin's provenance in one stroke, not just this run's.
+    await fs.writeAtomic(indexPath, serialize(merge.index));
+  }
+
+  if (entries.length > 0) {
+    log.step(`Wrote ${entries.length} shared home file(s) under ${SHARED_HOME_REPO_PREFIX}/`);
+  }
+  if (merge.kept.length > 0) {
+    log.step(
+      `Kept ${merge.kept.length} shared home file(s) captured by tool(s) not present here.`,
+    );
+  }
+}
+
+/** Every repo-relative POSIX file path under `absRoot`. [] when it is absent. */
+async function listRepoFiles(absRoot: string, repoPrefix: string): Promise<string[]> {
+  if ((await fs.statKind(absRoot)) !== "dir") return [];
+  const out: string[] = [];
+
+  const walk = async (absDir: string, relParts: string[]): Promise<void> => {
+    const entries = await fs.list(absDir);
+    entries.sort();
+    for (const name of entries) {
+      const abs = path.join(absDir, name);
+      const next = [...relParts, name];
+      if ((await fs.statKind(abs)) === "dir") {
+        await walk(abs, next);
+        continue;
+      }
+      out.push(`${repoPrefix}/${next.join("/")}`);
+    }
+  };
+
+  await walk(absRoot, []);
+  return out;
+}
+
+/** Parse a JSON file, or undefined when absent/unreadable/invalid. Never throws. */
+async function readJsonIfExists(abs: string): Promise<unknown | undefined> {
+  const raw = await readIfExists(abs);
+  if (raw === undefined) return undefined;
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return undefined;
+  }
+}
+
+/**
  * Every repo data root a tool's capture OWNS (and the backup therefore mirrors:
  * each is wiped before fresh capture output is written, and each anchors the
  * generated .gitignore's scoped rules). Multi-root adapters MUST be listed here —
@@ -464,6 +928,7 @@ async function replaceToolFiles(repoRoot: string, result: CaptureResult): Promis
  */
 export function toolRepoDataRoots(tool: ToolId): string[] {
   const roots = [toolFilesPrefix(tool)];
+  if (tool === "claude") roots.push("claude/memories");
   if (tool === "cursor") roots.push("cursor/user");
   if (tool === "antigravity") roots.push("antigravity/user", "antigravity/gemini");
   return roots;
@@ -559,6 +1024,14 @@ ${cursorUserLine}
 - \`<tool>/manifest.json\` — what to reinstall (plugins, marketplaces, skills,
   npm globals) and which plugins to re-enable.
 
+\`shared/home/…\` holds the files that live in your \`$HOME\` but outside every
+tool home: the hook dispatchers, statusline scripts and MCP launchers your
+configs point at, plugin companion configs, and anything you listed in
+\`extraPaths\`. They restore to the same place relative to the new machine's home.
+\`shared/home-index.json\` records which tool's capture found each of those files,
+so a push from a machine that is missing one of your tools keeps that tool's
+files instead of deleting them.
+
 \`arbella.json\` at the root records the schema version, the tools captured, the
 options that were active, and when this backup was made.
 
@@ -603,8 +1076,12 @@ The blob never touches git and is never printed.
  *
  * We translate the per-tool denylist into ignore globs scoped under each tool's
  * `files/` dir, and add a small set of universal cruft rules.
+ *
+ * Exported for the denylist regression test: every HOME_DENY pattern has to
+ * survive the trip into a gitignore line, and a multi-segment directory rule
+ * (".config/gh/") is the one that could silently stop matching.
  */
-function renderRepoGitignore(tools: ToolId[]): string {
+export function renderRepoGitignore(tools: ToolId[]): string {
   const lines: string[] = [
     "# Auto-generated by arbella. Do not commit secrets or machine cruft.",
     "",
@@ -637,6 +1114,18 @@ function renderRepoGitignore(tools: ToolId[]): string {
   ];
   for (const name of secretBasenames) lines.push(name);
 
+  // shared/home carries files from the user's HOME, so the credential-shaped
+  // basenames matter far more there than anywhere else. `a/**/b` also matches
+  // `a/b` in gitignore, so one scoped line covers every depth.
+  lines.push("", "# Carried $HOME files: credentials + machine junk can never be committed");
+  const homeSeen = new Set<string>();
+  for (const pattern of HOME_DENY) {
+    const scoped = `${SHARED_HOME_REPO_PREFIX}/**/${pattern.replace(/^\//, "")}`;
+    if (homeSeen.has(scoped)) continue;
+    homeSeen.add(scoped);
+    lines.push(scoped);
+  }
+
   // Scope each tool's denylist directory patterns under owned data roots so noise
   // dirs (sessions/, cache/, …) cannot sneak in if someone copies raw data in.
   lines.push("", "# Per-tool excluded directories (scoped under owned data roots)");
@@ -646,8 +1135,12 @@ function renderRepoGitignore(tools: ToolId[]): string {
       // Only directory patterns are useful to scope here; loose globs are already
       // covered by the universal rules above.
       if (!pattern.endsWith("/")) continue;
+      // A root-anchored pattern ("/ecc/") loses its leading slash here: scoping it
+      // under an owned data root already anchors it (git treats a pattern with an
+      // inner "/" as relative to the .gitignore's directory).
+      const scopedPattern = pattern.replace(/^\//, "");
       for (const root of toolRepoDataRoots(tool)) {
-        const scoped = `${root}/${pattern}`;
+        const scoped = `${root}/${scopedPattern}`;
         if (seen.has(scoped)) continue;
         seen.add(scoped);
         lines.push(scoped);
@@ -669,8 +1162,10 @@ function renderRepoGitignore(tools: ToolId[]): string {
  */
 function reportDryRun(
   results: CaptureResult[],
+  homeFiles: HomeEntry[],
   sharing: boolean,
   config: ArbellaConfig,
+  secrets: SecretRef[],
 ): void {
   log.info("Dry run — the following would be backed up (no files written, no commit):");
 
@@ -689,13 +1184,27 @@ function reportDryRun(
     );
   }
 
+  reportHomeFiles(homeFiles);
+
   if (sharing) {
     log.step(`+ ${SHARED_INSTRUCTIONS_REPO_PATH} (shared CLAUDE.md == AGENTS.md)`);
   }
   log.step("+ arbella.json, README.md, .gitignore");
 
-  reportSecrets(results.flatMap((r) => r.secrets), config.includeSecrets);
+  reportSecrets(secrets, config.includeSecrets);
   log.info("Dry run complete. Re-run without --dry-run to write + push.");
+}
+
+/**
+ * List the carried $HOME files with the origin that put each one in the backup
+ * (which tool's config linked it, or `extraPaths`). Quiet when there are none.
+ */
+function reportHomeFiles(homeFiles: HomeEntry[]): void {
+  if (homeFiles.length === 0) return;
+  log.step("Shared home files:");
+  for (const entry of homeFiles) {
+    log.step(`  + ${entry.file.repoPath} (${entry.origin})`);
+  }
 }
 
 /**
@@ -707,19 +1216,27 @@ function printSummary(args: {
   repoRoot: string;
   capturedTools: ToolId[];
   results: CaptureResult[];
+  homeFiles: HomeEntry[];
   secrets: SecretRef[];
   sharing: boolean;
   includeSecrets: boolean;
 }): void {
-  const { changed, repoRoot, capturedTools, results, secrets, sharing, includeSecrets } = args;
+  const { changed, repoRoot, capturedTools, results, homeFiles, secrets, sharing, includeSecrets } =
+    args;
 
   const totalFiles = results.reduce((n, r) => n + r.files.length, 0);
   const totalLinks = results.reduce((n, r) => n + r.symlinks.length, 0);
 
+  // Home files are captured OUTSIDE the per-tool results (they belong to no tool
+  // home), so the headline has to add them explicitly or it under-reports what
+  // the push actually carried.
+  const homeCount =
+    homeFiles.length > 0 ? ` + ${homeFiles.length} shared home file(s)` : "";
+
   if (changed) {
     log.success(
       `Backed up ${capturedTools.map(toolLabel).join(", ")} ` +
-        `(${totalFiles} file(s), ${totalLinks} symlink(s)) and pushed to your repo.`,
+        `(${totalFiles} file(s), ${totalLinks} symlink(s)${homeCount}) and pushed to your repo.`,
     );
   } else {
     log.success("Backup is already up to date — nothing changed, nothing pushed.");
@@ -727,6 +1244,7 @@ function printSummary(args: {
   if (sharing) {
     log.step("Shared instructions stored once (CLAUDE.md == AGENTS.md).");
   }
+  reportHomeFiles(homeFiles);
   log.step(`Local clone: ${repoRoot}`);
 
   reportSecrets(secrets, includeSecrets);

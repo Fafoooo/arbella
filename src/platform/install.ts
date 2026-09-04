@@ -32,6 +32,7 @@ import {
   type LinuxPackageManager,
 } from "./os.js";
 import { log } from "../utils/log.js";
+import { isSafeToolName, type ExternalToolManager } from "../core/externaltools/classify.js";
 
 /* -------------------------------------------------------------------------- */
 /* PATH probing                                                                */
@@ -64,6 +65,143 @@ export async function which(bin: string): Promise<boolean> {
   } catch {
     // `which`/`where` itself missing, timeout, or any spawn error => not found.
     return false;
+  }
+}
+
+/**
+ * Resolve a command name/path to an absolute binary path (WP-C).
+ *
+ *  - Already absolute -> returned as-is when it exists on disk, else `null`.
+ *    We never "correct" a stale absolute path to something else on PATH — the
+ *    config said exactly where the binary is, so either it's there or it isn't.
+ *  - A bare name -> resolved through the shell lookup that mirrors how it
+ *    would actually be spawned:
+ *      POSIX:  `sh -c 'command -v -- "$1"' _ <name>` — `command -v` is a shell
+ *              builtin (unlike the standalone `which` executable used by
+ *              {@link which} above) and matches aliases/functions/PATH the
+ *              same way a real spawn would resolve the name.
+ *      win32:  `where <name>` — first line of stdout.
+ *
+ * Never throws: any spawn failure, timeout, non-zero exit, or empty output
+ * resolves to `null`.
+ */
+export async function resolveBinaryPath(name: string): Promise<string | null> {
+  if (!name) return null;
+
+  if (path.isAbsolute(name)) {
+    try {
+      await fsp.access(name, fsConstants.F_OK);
+      return name;
+    } catch {
+      return null;
+    }
+  }
+
+  try {
+    const result =
+      detectOS() === "win32"
+        ? await execa("where", [name], { reject: false, stdio: "pipe", timeout: 10_000 })
+        : await execa("sh", ["-c", 'command -v -- "$1"', "_", name], {
+            reject: false,
+            stdio: "pipe",
+            timeout: 10_000,
+          });
+    if (result.exitCode !== 0) return null;
+    const firstLine = (result.stdout ?? "").split(/\r?\n/, 1)[0]?.trim();
+    return firstLine ? firstLine : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * `node:fs/promises.realpath`, falling back to the input path on any error
+ * (missing file, permission denied, not a symlink to resolve, ...). Used to
+ * resolve a binary's real install location before classifying it (WP-C) —
+ * never throws, since "couldn't resolve" just means "classify the path as
+ * given".
+ */
+export async function realPathOrSelf(p: string): Promise<string> {
+  try {
+    return await fsp.realpath(p);
+  } catch {
+    return p;
+  }
+}
+
+/**
+ * The command that installs an external tool for its manager (WP-C). `null`
+ * for `manager: "unknown"` — arbella has no install path for a tool it
+ * couldn't attribute to a known package manager; the caller falls back to a
+ * manual-install reminder.
+ *
+ *   brew    -> `brew install <name>`
+ *   uv      -> `uv tool install <name>`
+ *   pipx    -> `pipx install <name>`
+ *   unknown -> null
+ */
+export function externalToolInstallCommand(ref: {
+  manager: ExternalToolManager;
+  name: string;
+}): InstallCommand | null {
+  switch (ref.manager) {
+    case "brew":
+      return { cmd: "brew", args: ["install", ref.name] };
+    case "uv":
+      return { cmd: "uv", args: ["tool", "install", ref.name] };
+    case "pipx":
+      return { cmd: "pipx", args: ["install", ref.name] };
+    case "unknown":
+      return null;
+  }
+}
+
+/** Injectable collaborators for {@link installExternalTool} (tests only). */
+export interface InstallExternalToolOptions {
+  /** Checks whether the MANAGER binary (e.g. "brew") is on PATH. Default: {@link which}. */
+  which?: (bin: string) => Promise<boolean>;
+  /** Runs the resolved install command. Default: {@link runInstall}. */
+  run?: (cmd: InstallCommand) => Promise<void>;
+}
+
+/**
+ * Install one external tool (WP-C restore planning), via the injected `which`
+ * / `run` collaborators (defaulting to this module's own {@link which} and
+ * {@link runInstall}) so tests never actually shell out.
+ *
+ *  - `name` is not {@link isSafeToolName} -> `"rejected-name"`. The manifest
+ *    schema already drops such entries on parse; this is the SECOND line, right
+ *    at the spawn, so no future caller can hand a repo-supplied `--cask` or
+ *    `git+https://…` to a package manager as a package name.
+ *  - `manager: "unknown"` -> `"unsupported"` (no install command exists).
+ *  - The manager binary itself (`brew`/`uv`/`pipx`) is not on PATH ->
+ *    `"skipped-manager-missing"` (installing the manager is out of scope here).
+ *  - Otherwise runs the install command and resolves `"installed"`.
+ *
+ * Does not swallow a failing `run`: its error is caught and re-thrown with a
+ * `external tool <name>: ` prefix so the caller can report which tool failed
+ * without losing the underlying reason.
+ */
+export async function installExternalTool(
+  ref: { manager: ExternalToolManager; name: string },
+  opts: InstallExternalToolOptions = {},
+): Promise<"installed" | "skipped-manager-missing" | "unsupported" | "rejected-name"> {
+  if (!isSafeToolName(ref.name)) return "rejected-name";
+
+  const cmd = externalToolInstallCommand(ref);
+  if (cmd === null) return "unsupported";
+
+  const whichFn = opts.which ?? which;
+  const runFn = opts.run ?? runInstall;
+
+  if (!(await whichFn(cmd.cmd))) return "skipped-manager-missing";
+
+  try {
+    await runFn(cmd);
+    return "installed";
+  } catch (err) {
+    const reason = err instanceof Error ? err.message : String(err);
+    throw new Error(`external tool ${ref.name}: ${reason}`);
   }
 }
 

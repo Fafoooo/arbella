@@ -168,6 +168,8 @@ export interface RestoreAction {
     | "install-skill"
     | "install-npm-global"
     | "enable-plugin"
+    | "register-mcp-server"
+    | "install-external-tool"
     | "run-command";
   /** Owning tool, or "system" for cross-cutting actions (CLI/npm installs). */
   tool: ToolId | "system";
@@ -196,6 +198,14 @@ export interface RestorePlan {
   missingClis: ToolId[];
   /** Whether a pre-restore safety backup of existing homes will be taken (R14). */
   willBackupExisting: boolean;
+  /**
+   * Claude project-scope MCP server groups skipped because their directory
+   * does not exist on this machine (see McpMergePlan.skippedProjectDirs in
+   * src/adapters/claude/mcp.ts). Carried on the plan so the dry-run printer and
+   * the post-restore reminder can both warn about it exactly once, without any
+   * state living outside this one plan.
+   */
+  skippedProjectDirs: string[];
 }
 
 /* -------------------------------------------------------------------------- */
@@ -268,6 +278,16 @@ export interface FsService {
   readBytes(path: string): Promise<Buffer>;
   write(path: string, content: string, mode?: number): Promise<void>;
   writeBytes(path: string, content: Buffer, mode?: number): Promise<void>;
+  /**
+   * Replace a file's contents in ONE step: write a sibling temp file, then
+   * rename it over `path`. A crash (or a concurrent reader) therefore sees
+   * either the old file or the new one, never a half-written mix — which
+   * matters for files another program owns and reads continuously, above all
+   * ~/.claude.json. When `mode` is omitted an EXISTING file keeps its mode.
+   */
+  writeAtomic(path: string, content: string, mode?: number): Promise<void>;
+  /** {@link writeAtomic} for binary payloads. Same rename, same mode rules. */
+  writeBytesAtomic(path: string, content: Buffer, mode?: number): Promise<void>;
   copy(from: string, to: string): Promise<void>;
   ensureDir(path: string): Promise<void>;
   exists(path: string): Promise<boolean>;
@@ -283,6 +303,14 @@ export interface FsService {
   symlink(target: string, linkPath: string): Promise<void>;
   /** Stat helper: classify a path. Returns "missing" when absent. */
   statKind(path: string): Promise<"file" | "dir" | "symlink" | "missing">;
+  /**
+   * Fully resolved path with every symlink (including in the PARENT components)
+   * followed. Falls back to the input when the path cannot be resolved, so it is
+   * safe to call on anything. Capture uses it to answer "where does this file
+   * REALLY live", which a per-component `statKind` cannot: `~/link/x` is an
+   * ordinary file whose parent leaves $HOME entirely.
+   */
+  realPath(path: string): Promise<string>;
 }
 
 /**
@@ -338,6 +366,9 @@ export type {
   MarketplaceEntry,
   SkillEntry,
   NpmGlobalEntry,
+  McpServerDef,
+  ProjectMcpServers,
+  ExternalToolEntry,
   ArbellaMeta,
 } from "./core/manifest/schema.js";
 
