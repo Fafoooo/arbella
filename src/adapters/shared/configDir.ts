@@ -33,6 +33,8 @@ import { denylistFor, matchesDeny } from "../../core/sanitizer/denylist.js";
 import { emptyManifest } from "../../core/manifest/index.js";
 import { normalizeCapturedSymlinkTarget } from "../../utils/symlink.js";
 import { binaryScanViews, decodeForCapture } from "../../utils/capture-bytes.js";
+import { resolveContainedTarget } from "../../utils/safe-path.js";
+import type { ContainedTarget, ContainedTargetOptions } from "../../utils/safe-path.js";
 
 /** What a config-dir adapter must declare for the shared engine to do its work. */
 export interface ConfigDirSpec {
@@ -235,11 +237,27 @@ export async function captureConfigDir(
 /* Restore                                                                     */
 /* -------------------------------------------------------------------------- */
 
-/** Resolve a frozen file's repoPath onto the target machine's config home. */
-function destFor(ctx: RestoreContext, tool: ToolId, repoPath: string): string | undefined {
+/**
+ * Resolve a frozen artifact's repoPath onto a CHECKED destination under the
+ * target machine's config home, or undefined when the repoPath belongs to
+ * another tool.
+ *
+ * The tail is repo-supplied, so it goes through the shared containment gate
+ * rather than a bare `path.join`: `opencode/files/..\escape` normalizes to
+ * `../escape` and would otherwise resolve outside the config home entirely, and
+ * a planted `<home>/agents -> /elsewhere` would silently receive the write.
+ * Callers decide what a refusal means — the planner drops the action, the
+ * writers warn — so plan and execution cannot disagree.
+ */
+async function destFor(
+  ctx: RestoreContext,
+  tool: ToolId,
+  repoPath: string,
+  opts: ContainedTargetOptions = {},
+): Promise<{ rel: string; target: ContainedTarget } | undefined> {
   const rel = relFromRepoPath(tool, repoPath);
   if (rel === undefined) return undefined;
-  return path.join(ctx.toolHome, ...rel.split("/").filter(Boolean));
+  return { rel, target: await resolveContainedTarget(ctx.fs, ctx.toolHome, rel, opts) };
 }
 
 /**
@@ -255,29 +273,31 @@ export async function planConfigDirActions(
   const actions: RestoreAction[] = [];
 
   for (const file of data.files) {
-    const dest = destFor(ctx, spec.tool, file.repoPath);
-    if (dest === undefined) continue;
+    const resolved = await destFor(ctx, spec.tool, file.repoPath);
+    if (resolved === undefined || !resolved.target.ok) continue;
+    const dest = resolved.target.path;
     const overwrites = await ctx.fs.exists(dest);
     if (ctx.sourceOfTruth === "local" && overwrites) continue;
     actions.push({
       type: "write-file",
       tool: spec.tool,
       targetPath: dest,
-      description: `Write ${relFromRepoPath(spec.tool, file.repoPath)}`,
+      description: `Write ${resolved.rel}`,
       overwrites,
     });
   }
 
   for (const link of data.symlinks) {
-    const dest = destFor(ctx, spec.tool, link.repoPath);
-    if (dest === undefined) continue;
+    const resolved = await destFor(ctx, spec.tool, link.repoPath, { allowLeafSymlink: true });
+    if (resolved === undefined || !resolved.target.ok) continue;
+    const dest = resolved.target.path;
     const overwrites = (await ctx.fs.statKind(dest)) !== "missing";
     if (ctx.sourceOfTruth === "local" && overwrites) continue;
     actions.push({
       type: "write-symlink",
       tool: spec.tool,
       targetPath: dest,
-      description: `Link ${relFromRepoPath(spec.tool, link.repoPath)} -> ${link.target}`,
+      description: `Link ${resolved.rel} -> ${link.target}`,
       overwrites,
     });
   }
@@ -291,21 +311,29 @@ async function writeRestoredFile(
   tool: ToolId,
   file: CapturedFile,
 ): Promise<void> {
-  const dest = destFor(ctx, tool, file.repoPath);
-  if (dest === undefined) {
+  const resolved = await destFor(ctx, tool, file.repoPath);
+  if (resolved === undefined) {
     ctx.log.debug(`${tool}: ignoring foreign repoPath ${file.repoPath}`);
     return;
   }
+  if (!resolved.target.ok) {
+    ctx.log.warn(`${tool}: refusing to write ${file.repoPath} — ${resolved.target.reason}`);
+    return;
+  }
+  const dest = resolved.target.path;
   if (ctx.sourceOfTruth === "local" && (await ctx.fs.exists(dest))) {
     ctx.log.debug(`${tool}: keep local ${file.repoPath} (sourceOfTruth=local)`);
     return;
   }
+  // Rename-based writers: the containment check and the write cannot be one
+  // operation, and a plain write follows a link that appears at the leaf in the
+  // gap. `rename` replaces that entry instead.
   if (file.binary) {
-    await ctx.fs.writeBytes(dest, Buffer.from(file.content, "base64"), file.mode);
+    await ctx.fs.writeBytesAtomic(dest, Buffer.from(file.content, "base64"), file.mode);
     return;
   }
   const expanded = ctx.templater.fromTemplate(file.content, ctx.vars);
-  await ctx.fs.write(dest, expanded, file.mode);
+  await ctx.fs.writeAtomic(dest, expanded, file.mode);
 }
 
 /** Recreate one captured symlink under the target config home. */
@@ -314,11 +342,16 @@ async function writeRestoredSymlink(
   tool: ToolId,
   link: CapturedSymlink,
 ): Promise<void> {
-  const dest = destFor(ctx, tool, link.repoPath);
-  if (dest === undefined) {
+  const resolved = await destFor(ctx, tool, link.repoPath, { allowLeafSymlink: true });
+  if (resolved === undefined) {
     ctx.log.debug(`${tool}: ignoring foreign symlink ${link.repoPath}`);
     return;
   }
+  if (!resolved.target.ok) {
+    ctx.log.warn(`${tool}: refusing to link ${link.repoPath} — ${resolved.target.reason}`);
+    return;
+  }
+  const dest = resolved.target.path;
   if (ctx.sourceOfTruth === "local" && (await ctx.fs.statKind(dest)) !== "missing") {
     ctx.log.debug(`${tool}: keep local symlink ${link.repoPath} (sourceOfTruth=local)`);
     return;

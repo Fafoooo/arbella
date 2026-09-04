@@ -73,6 +73,7 @@ import type {
 import { fs } from "../utils/fs.js";
 import { log } from "../utils/log.js";
 import { decodeForCapture } from "../utils/capture-bytes.js";
+import { resolveContainedTarget } from "../utils/safe-path.js";
 import {
   cliBinaryName,
   dataDir,
@@ -637,18 +638,30 @@ export function safetySourcesForTool(
  *
  * Respects `dryRun` (reports only). Best-effort + graceful: a missing shared
  * file is logged, not fatal. Only deploys to a target whose tool is in scope.
+ *
+ * Two guards, both applied BEFORE the dry-run branch so `--dry-run` cannot
+ * promise a write this pass will not make:
+ *   - the destination goes through the shared containment gate (a symlinked
+ *     component below the tool home refuses the write instead of following it
+ *     out of the tree), and lands via the rename-based writer so a link at the
+ *     leaf is replaced rather than followed;
+ *   - `sourceOfTruth: "local"` keeps an instructions file that is already here,
+ *     exactly as every other restore write does. Without it the R9 step was the
+ *     one place a "local wins" pull still overwrote the user's own CLAUDE.md.
  */
-async function deploySharedInstructions(
+export async function deploySharedInstructions(
   repoRoot: string,
   toolsInScope: ToolId[],
   dryRun: boolean,
+  sourceOfTruth: "local" | "repo",
+  l: Logger = log,
 ): Promise<void> {
   const sharedAbs = path.join(
     repoRoot,
     ...SHARED_INSTRUCTIONS_REPO_PATH.split("/"),
   );
   if (!(await fs.exists(sharedAbs))) {
-    log.warn(
+    l.warn(
       "restore: meta.sharedInstructions is set but " +
         `${SHARED_INSTRUCTIONS_REPO_PATH} is missing from the repo; skipping ` +
         "shared-instructions deployment.",
@@ -661,16 +674,28 @@ async function deploySharedInstructions(
 
   for (const target of sharedInstructionsTargets()) {
     if (!inScope.has(target.tool)) continue;
-    const dest = path.join(toolHomeDir(target.tool), target.relPath);
+    const toolHome = toolHomeDir(target.tool);
+    const resolved = await resolveContainedTarget(fs, toolHome, target.relPath);
+    if (!resolved.ok) {
+      l.warn(
+        `restore: refusing to deploy shared instructions into ${toolHome}: ${resolved.reason}`,
+      );
+      continue;
+    }
+    const dest = resolved.path;
+    if (sourceOfTruth === "local" && (await fs.exists(dest))) {
+      l.debug(`restore: keep local ${dest} (sourceOfTruth=local)`);
+      continue;
+    }
     if (dryRun) {
-      log.step(`Would deploy shared instructions -> ${dest}`);
+      l.step(`Would deploy shared instructions -> ${dest}`);
       continue;
     }
     try {
-      await fs.write(dest, content);
-      log.step(`Deployed shared instructions -> ${dest}`);
+      await fs.writeAtomic(dest, content);
+      l.step(`Deployed shared instructions -> ${dest}`);
     } catch (err) {
-      log.warn(
+      l.warn(
         `restore: failed to deploy shared instructions to ${dest}: ${errMsg(err)}`,
       );
     }
@@ -764,13 +789,41 @@ function externalToolLabel(tool: ExternalToolRef): string {
     : `install ${tool.name} manually${usedBy}`;
 }
 
-/** Build the system-level install-external-tool plan actions (one per tool). */
-export function externalToolActions(tools: readonly ExternalToolRef[]): RestoreAction[] {
-  return tools.map((tool) => ({
-    type: "install-external-tool" as const,
-    tool: "system" as const,
-    description: externalToolLabel(tool),
-  }));
+/**
+ * True when this machine ALREADY has the tool's binary on PATH, whichever
+ * manager put it there — the single skip decision the plan and the install pass
+ * both consult, so `--dry-run` cannot advertise an install the pass then skips.
+ *
+ * Probed by the BINARY behind the command, not the package name: `serena-agent`
+ * ships `serena`.
+ */
+export async function externalToolOnPath(
+  tool: ExternalToolRef,
+  whichFn: (bin: string) => Promise<boolean>,
+): Promise<boolean> {
+  const binary = commandBaseName(tool.command);
+  return binary !== "" && (await whichFn(binary));
+}
+
+/**
+ * Build the system-level install-external-tool plan actions, one per tool that
+ * is NOT already on this machine's PATH.
+ */
+export async function externalToolActions(
+  tools: readonly ExternalToolRef[],
+  opts: Pick<ExternalToolPassOptions, "which"> = {},
+): Promise<RestoreAction[]> {
+  const whichFn = opts.which ?? which;
+  const actions: RestoreAction[] = [];
+  for (const tool of tools) {
+    if (await externalToolOnPath(tool, whichFn)) continue;
+    actions.push({
+      type: "install-external-tool" as const,
+      tool: "system" as const,
+      description: externalToolLabel(tool),
+    });
+  }
+  return actions;
 }
 
 /** Injectable collaborators for {@link installSharedExternalTools} (tests only). */
@@ -813,9 +866,10 @@ export async function installSharedExternalTools(
 
   l.info(`Checking ${tools.length} external tool(s) behind MCP/hook commands…`);
   for (const tool of tools) {
-    const binary = commandBaseName(tool.command);
-    if (binary !== "" && (await whichFn(binary))) {
-      l.debug(`restore: ${binary} is already on PATH; skipping ${tool.name}`);
+    if (await externalToolOnPath(tool, whichFn)) {
+      l.debug(
+        `restore: ${commandBaseName(tool.command)} is already on PATH; skipping ${tool.name}`,
+      );
       continue;
     }
     try {
@@ -1017,10 +1071,10 @@ async function buildPlan(args: {
 
   // WP-C: the binaries behind MCP/hook commands that npm does NOT own (brew/uv/
   // pipx, or unattributable). Planned like the npm pass so --dry-run shows every
-  // install a real pull would attempt; the PATH probe that skips already-present
-  // tools happens at execution time, on the target machine.
+  // install a real pull would attempt — through the SAME PATH probe the install
+  // pass uses, so a tool this machine already has is missing from both.
   const externalTools = dedupeExternalTools(prepared);
-  actions.push(...externalToolActions(externalTools));
+  actions.push(...(await externalToolActions(externalTools)));
 
   const plan: RestorePlan = {
     tools: args.tools,
@@ -1415,7 +1469,7 @@ export async function run(
   // ---- 9. Deploy shared instructions (R9) to both tools -------------------
   if (meta.sharedInstructions) {
     log.info("Deploying shared instructions to Claude + Codex (R9)…");
-    await deploySharedInstructions(repoRoot, tools, false);
+    await deploySharedInstructions(repoRoot, tools, false, sourceOfTruth);
   }
 
   // ---- 10. Re-auth reminder ----------------------------------------------

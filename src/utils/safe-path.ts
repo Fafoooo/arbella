@@ -107,4 +107,78 @@ export function isPathUnder(root: string, target: string): boolean {
   return rel === "" || (!escapesRoot(rel) && !path.isAbsolute(rel));
 }
 
+/**
+ * The outcome of {@link resolveContainedTarget}: an absolute destination that is
+ * safe to write, or the reason it was refused (for the caller's warning line).
+ */
+export type ContainedTarget =
+  | { readonly ok: true; readonly path: string }
+  | { readonly ok: false; readonly reason: string };
+
+/** Options for {@link resolveContainedTarget}. */
+export interface ContainedTargetOptions {
+  /**
+   * Exempt the LEAF from the symlink check. Only for writers that REPLACE the
+   * leaf entry instead of opening it — `fs.symlink` (which unlinks first) and
+   * the rename-based `writeAtomic` pair. A replaced link cannot redirect the
+   * write, and refusing one would break the ordinary case of re-running a
+   * restore over the symlink the previous run created.
+   */
+  readonly allowLeafSymlink?: boolean;
+}
+
+/**
+ * Turn a trusted `root` plus a REPO-SUPPLIED POSIX relative path into a
+ * destination that is provably inside that root and reachable without following
+ * a symlink. The one gate every restore write target goes through.
+ *
+ * Two independent things can put a write outside the tree arbella believes it
+ * owns, and this closes both:
+ *
+ *   - TRAVERSAL. The relative path comes out of a backup repo, so it is input.
+ *     Every segment must be an ordinary name: `""`, `.` and `..` are refused, as
+ *     is a segment carrying a `\` (a mixed-separator `files/..\escape` is one
+ *     "segment" to a POSIX split but two components to win32 `path.join`) or an
+ *     absolute one. The joined result is then re-checked against the root, so a
+ *     platform quirk in `path.join` cannot smuggle an escape past the segment
+ *     rules either.
+ *   - SYMLINKED COMPONENTS. A traversal-free `prompts/x.md` still lands wherever
+ *     `<root>/prompts` happens to point on THIS machine. See the module header:
+ *     the walk starts BELOW the root (a symlinked `~/.codex` is the user's own
+ *     legitimate dotfile layout, and the tool's other writes go through it too).
+ *
+ * Returns the reason rather than throwing: a refused target is a warning and a
+ * skipped file, never a failed restore — and the same call in the planner is how
+ * `--dry-run` avoids listing a write the restore will decline to make.
+ */
+export async function resolveContainedTarget(
+  fs: FsService,
+  root: string,
+  rel: string,
+  opts: ContainedTargetOptions = {},
+): Promise<ContainedTarget> {
+  const segments = rel.split("/");
+  for (const segment of segments) {
+    if (segment === "" || segment === "." || segment === "..") {
+      return { ok: false, reason: `"${rel}" contains an unsafe path segment` };
+    }
+    if (segment.includes("\\") || path.isAbsolute(segment)) {
+      return { ok: false, reason: `"${rel}" contains an unsafe path segment` };
+    }
+  }
+
+  const dest = path.join(root, ...segments);
+  if (dest === root || !isPathUnder(root, dest)) {
+    return { ok: false, reason: `"${rel}" resolves outside ${root}` };
+  }
+
+  const walkTo = opts.allowLeafSymlink === true ? path.dirname(dest) : dest;
+  if (walkTo !== root) {
+    const link = await findSymlinkComponent(fs, root, walkTo);
+    if (link !== null) return { ok: false, reason: `${link} is a symlink` };
+  }
+
+  return { ok: true, path: dest };
+}
+
 export default findSymlinkComponent;

@@ -385,13 +385,16 @@ const MYSTERY: ExternalToolRef = {
 };
 
 describe("externalToolActions", () => {
-  it("plans the exact install command, or the manual phrasing when unknown", () => {
+  it("plans the exact install command, or the manual phrasing when unknown", async () => {
     expect(
-      externalToolActions([
-        { ...SERENA, manager: "brew", name: "projectatlas", usedBy: ["mcp:atlas"] },
-        SERENA,
-        MYSTERY,
-      ]),
+      await externalToolActions(
+        [
+          { ...SERENA, manager: "brew", name: "projectatlas", usedBy: ["mcp:atlas"] },
+          SERENA,
+          MYSTERY,
+        ],
+        { which: async () => false },
+      ),
     ).toEqual([
       {
         type: "install-external-tool",
@@ -409,6 +412,28 @@ describe("externalToolActions", () => {
         description: "install mystery manually (hook:PreToolUse)",
       },
     ]);
+  });
+});
+
+describe("externalToolActions: the plan agrees with the install pass", () => {
+  it("omits a tool whose binary already resolves on PATH", async () => {
+    // The install pass skips `serena` outright when the binary is there; a plan
+    // that still advertised "uv tool install serena-agent" would be a --dry-run
+    // line for an install that never happens.
+    const onPath = async (bin: string) => bin === "serena";
+
+    const actions = await externalToolActions([SERENA, MYSTERY], { which: onPath });
+    const manual = await installSharedExternalTools(
+      [SERENA, MYSTERY],
+      { which: onPath, install: vi.fn().mockResolvedValue("unsupported") },
+      recordingLogger(),
+    );
+
+    expect(actions.map((a) => a.description)).toEqual([
+      "install mystery manually (hook:PreToolUse)",
+    ]);
+    // Same skip decision on the execution side: only `mystery` was attempted.
+    expect(manual.map((t) => t.name)).toEqual(["mystery"]);
   });
 });
 

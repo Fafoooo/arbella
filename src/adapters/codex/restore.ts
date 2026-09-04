@@ -14,20 +14,23 @@
  *   `codex` re-sync may be needed. This keeps restore resilient and idempotent.
  *
  * File writing: each CapturedFile's repoPath is stripped of the "codex/files/"
- * prefix and joined onto ctx.toolHome. Text files are de-templated
+ * prefix and joined onto ctx.toolHome THROUGH the shared containment gate
+ * (utils/safe-path.ts: no `..`/backslash/absolute segment, no symlinked
+ * component below the tool home), then written with the rename-based writers so
+ * a link at the leaf is replaced rather than followed. Text files are de-templated
  * (fromTemplate) so {{TOKENS}} become this machine's paths; config.toml is
  * additionally rehydrated (same fromTemplate, applied through configToml.ts for
  * clarity/symmetry). Binary files are decoded from base64. Modes are restored.
  * sourceOfTruth governs whether existing files are overwritten.
  */
 
-import path from "node:path";
-
 import { execa } from "execa";
 
 import type { RestoreContext, RestoreData } from "../adapter.interface.js";
 import type { CapturedFile, MarketplaceEntry, PluginEntry, RestoreAction } from "../../types.js";
 import { which } from "../../platform/install.js";
+import { resolveContainedTarget } from "../../utils/safe-path.js";
+import type { ContainedTarget, ContainedTargetOptions } from "../../utils/safe-path.js";
 import { REPO_PREFIX } from "./paths.js";
 import { rehydrateConfigToml } from "./configToml.js";
 
@@ -40,11 +43,25 @@ function repoPathToRel(repoPath: string): string | null {
   return repoPath.slice(PREFIX_WITH_SLASH.length);
 }
 
-/** Resolve a tool-home-relative POSIX subpath onto the absolute target path. */
-function targetAbsFor(toolHome: string, rel: string): string {
-  // Split on POSIX "/" and re-join with node:path so win32 separators are right.
-  const segments = rel.split("/").filter((s) => s.length > 0);
-  return path.join(toolHome, ...segments);
+/**
+ * Resolve a captured repoPath onto a CHECKED absolute target under ctx.toolHome,
+ * or null when the repoPath belongs to a repo root this adapter does not own.
+ *
+ * The rel half is repo-supplied, so it goes through the shared containment gate
+ * rather than a bare `path.join`: `codex/files/../../x` (and its backslash
+ * twin) must not resolve outside ~/.codex, and a planted `~/.codex/prompts ->
+ * /elsewhere` must not silently receive the write. Callers decide what to do
+ * with a refusal — the planner drops the action, the writer warns — so the two
+ * cannot disagree about which files a pull touches.
+ */
+async function targetFor(
+  ctx: RestoreContext,
+  repoPath: string,
+  opts: ContainedTargetOptions = {},
+): Promise<{ rel: string; target: ContainedTarget } | null> {
+  const rel = repoPathToRel(repoPath);
+  if (rel === null) return null;
+  return { rel, target: await resolveContainedTarget(ctx.fs, ctx.toolHome, rel, opts) };
 }
 
 /** Is this captured file the Codex config.toml? */
@@ -63,32 +80,38 @@ export async function planActions(
   const actions: RestoreAction[] = [];
   const overwriteAllowed = ctx.sourceOfTruth === "repo";
 
-  // Frozen files.
+  // Frozen files. A target the writer would refuse (traversal, symlinked
+  // component) or keep (local wins) is omitted, so --dry-run lists exactly the
+  // writes restore() will make.
   for (const file of data.files) {
-    const rel = repoPathToRel(file.repoPath);
-    if (rel === null) continue;
-    const targetPath = targetAbsFor(ctx.toolHome, rel);
+    const resolved = await targetFor(ctx, file.repoPath);
+    if (resolved === null || !resolved.target.ok) continue;
+    const targetPath = resolved.target.path;
     const exists = await ctx.fs.exists(targetPath);
+    if (!overwriteAllowed && exists) continue;
     actions.push({
       type: "write-file",
       tool: "codex",
       targetPath,
-      description: `Write ${rel}${file.binary ? " (binary)" : ""}`,
+      description: `Write ${resolved.rel}${file.binary ? " (binary)" : ""}`,
       overwrites: exists && overwriteAllowed,
     });
   }
 
-  // Symlinks (skills.sh etc.).
+  // Symlinks (skills.sh etc.). `fs.symlink` REPLACES the leaf entry, so only the
+  // components above it have to be link-free.
   for (const link of data.symlinks) {
-    const rel = repoPathToRel(link.repoPath);
-    if (rel === null) continue;
-    const targetPath = targetAbsFor(ctx.toolHome, rel);
-    const exists = await ctx.fs.exists(targetPath);
+    const resolved = await targetFor(ctx, link.repoPath, { allowLeafSymlink: true });
+    if (resolved === null || !resolved.target.ok) continue;
+    const targetPath = resolved.target.path;
+    // statKind, not exists(): a dangling link is still an entry the writer keeps.
+    const exists = (await ctx.fs.statKind(targetPath)) !== "missing";
+    if (!overwriteAllowed && exists) continue;
     actions.push({
       type: "write-symlink",
       tool: "codex",
       targetPath,
-      description: `Link ${rel} -> ${link.target}`,
+      description: `Link ${resolved.rel} -> ${link.target}`,
       overwrites: exists && overwriteAllowed,
     });
   }
@@ -171,14 +194,25 @@ export async function restore(ctx: RestoreContext, data: RestoreData): Promise<v
 
   // 2) Recreate symlinks.
   for (const link of data.symlinks) {
-    const rel = repoPathToRel(link.repoPath);
-    if (rel === null) continue;
-    const targetPath = targetAbsFor(ctx.toolHome, rel);
+    const resolved = await targetFor(ctx, link.repoPath, { allowLeafSymlink: true });
+    if (resolved === null) continue;
+    if (!resolved.target.ok) {
+      ctx.log.warn(
+        `codex: refusing to link ${link.repoPath} — ${resolved.target.reason}`,
+      );
+      continue;
+    }
+    const targetPath = resolved.target.path;
+    // Local wins: an entry that is already here is kept, as it is for files.
+    if (!overwriteAllowed && (await ctx.fs.statKind(targetPath)) !== "missing") {
+      ctx.log.debug(`codex: keep existing ${resolved.rel} (sourceOfTruth=local)`);
+      continue;
+    }
     try {
       await ctx.fs.symlink(link.target, targetPath);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      ctx.log.warn(`codex: could not recreate symlink ${rel} (${msg})`);
+      ctx.log.warn(`codex: could not recreate symlink ${resolved.rel} (${msg})`);
     }
   }
 
@@ -202,18 +236,26 @@ async function writeCapturedFile(
   file: CapturedFile,
   overwriteAllowed: boolean,
 ): Promise<void> {
-  const rel = repoPathToRel(file.repoPath);
-  if (rel === null) return;
-  const targetPath = targetAbsFor(ctx.toolHome, rel);
+  const resolved = await targetFor(ctx, file.repoPath);
+  if (resolved === null) return;
+  if (!resolved.target.ok) {
+    ctx.log.warn(`codex: refusing to write ${file.repoPath} — ${resolved.target.reason}`);
+    return;
+  }
+  const { rel, target } = resolved;
+  const targetPath = target.path;
 
   if (!overwriteAllowed && (await ctx.fs.exists(targetPath))) {
     ctx.log.debug(`codex: skip existing ${rel} (sourceOfTruth=local)`);
     return;
   }
 
+  // Rename-based writers: the containment check above and the write cannot be
+  // one operation, and a plain write FOLLOWS a link that appears at the leaf in
+  // the gap. `rename` replaces the entry instead.
   if (file.binary) {
     const bytes = Buffer.from(file.content, "base64");
-    await ctx.fs.writeBytes(targetPath, bytes, file.mode);
+    await ctx.fs.writeBytesAtomic(targetPath, bytes, file.mode);
     return;
   }
 
@@ -223,7 +265,7 @@ async function writeCapturedFile(
     ? rehydrateConfigToml(file.content, ctx.templater, ctx.vars)
     : ctx.templater.fromTemplate(file.content, ctx.vars);
 
-  await ctx.fs.write(targetPath, content, file.mode);
+  await ctx.fs.writeAtomic(targetPath, content, file.mode);
 }
 
 /**

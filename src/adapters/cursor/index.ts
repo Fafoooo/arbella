@@ -49,6 +49,8 @@ import { cliBinaryName, detectOS, installCommandFor } from "../../platform/os.js
 import { runInstall, which } from "../../platform/install.js";
 import { normalizeCapturedSymlinkTarget } from "../../utils/symlink.js";
 import { binaryScanViews, decodeForCapture } from "../../utils/capture-bytes.js";
+import { resolveContainedTarget } from "../../utils/safe-path.js";
+import type { ContainedTarget, ContainedTargetOptions } from "../../utils/safe-path.js";
 
 import {
   FROZEN_PATHS,
@@ -91,11 +93,23 @@ function targetFromRepoPath(repoPath: string): CursorTarget | undefined {
   return undefined;
 }
 
-/** Resolve a CursorTarget onto the target machine. */
-function targetAbsFor(ctx: RestoreContext, target: CursorTarget): string {
+/**
+ * Resolve a CursorTarget onto a CHECKED destination on the target machine.
+ *
+ * The `rel` half is repo-supplied, so it goes through the shared containment
+ * gate rather than a bare `path.join`: no `..`/backslash/absolute segment may
+ * escape the root, and a symlinked component below it refuses the write instead
+ * of redirecting it. Callers decide what a refusal means — the planner drops the
+ * action, the writers warn — so plan and execution cannot disagree.
+ */
+async function targetAbsFor(
+  ctx: RestoreContext,
+  target: CursorTarget,
+  opts: ContainedTargetOptions = {},
+): Promise<ContainedTarget> {
   const root =
     target.root === "home" ? ctx.toolHome : cursorUserPaths(ctx.toolHome, ctx.os, ctx.env).userDir;
-  return path.join(root, ...target.rel.split("/").filter(Boolean));
+  return resolveContainedTarget(ctx.fs, root, target.rel, opts);
 }
 
 
@@ -501,20 +515,28 @@ async function writeRestoredFile(ctx: RestoreContext, file: CapturedFile): Promi
     ctx.log.debug(`cursor: ignoring foreign repoPath ${file.repoPath}`);
     return;
   }
-  const dest = targetAbsFor(ctx, target);
+  const resolved = await targetAbsFor(ctx, target);
+  if (!resolved.ok) {
+    ctx.log.warn(`cursor: refusing to write ${file.repoPath} — ${resolved.reason}`);
+    return;
+  }
+  const dest = resolved.path;
 
   if (ctx.sourceOfTruth === "local" && (await ctx.fs.exists(dest))) {
     ctx.log.debug(`cursor: keep local ${target.rel} (sourceOfTruth=local)`);
     return;
   }
 
+  // Rename-based writers: the containment check and the write cannot be one
+  // operation, and a plain write follows a link that appears at the leaf in the
+  // gap. `rename` replaces that entry instead.
   if (file.binary) {
-    await ctx.fs.writeBytes(dest, Buffer.from(file.content, "base64"), file.mode);
+    await ctx.fs.writeBytesAtomic(dest, Buffer.from(file.content, "base64"), file.mode);
     return;
   }
 
   const expanded = ctx.templater.fromTemplate(file.content, ctx.vars);
-  await ctx.fs.write(dest, expanded, file.mode);
+  await ctx.fs.writeAtomic(dest, expanded, file.mode);
 }
 
 /** Recreate a captured symlink under ~/.cursor or Cursor User data. */
@@ -524,7 +546,12 @@ async function writeRestoredSymlink(ctx: RestoreContext, link: CapturedSymlink):
     ctx.log.debug(`cursor: ignoring foreign symlink ${link.repoPath}`);
     return;
   }
-  const dest = targetAbsFor(ctx, target);
+  const resolved = await targetAbsFor(ctx, target, { allowLeafSymlink: true });
+  if (!resolved.ok) {
+    ctx.log.warn(`cursor: refusing to link ${link.repoPath} — ${resolved.reason}`);
+    return;
+  }
+  const dest = resolved.path;
 
   if (ctx.sourceOfTruth === "local" && (await ctx.fs.statKind(dest)) !== "missing") {
     ctx.log.debug(`cursor: keep local symlink ${target.rel} (sourceOfTruth=local)`);
@@ -582,7 +609,9 @@ export async function planActions(
   for (const file of data.files) {
     const target = targetFromRepoPath(file.repoPath);
     if (target === undefined) continue;
-    const targetPath = targetAbsFor(ctx, target);
+    const resolved = await targetAbsFor(ctx, target);
+    if (!resolved.ok) continue;
+    const targetPath = resolved.path;
     const overwrites = await ctx.fs.exists(targetPath);
     if (ctx.sourceOfTruth === "local" && overwrites) continue;
     actions.push({
@@ -597,7 +626,9 @@ export async function planActions(
   for (const link of data.symlinks) {
     const target = targetFromRepoPath(link.repoPath);
     if (target === undefined) continue;
-    const targetPath = targetAbsFor(ctx, target);
+    const resolved = await targetAbsFor(ctx, target, { allowLeafSymlink: true });
+    if (!resolved.ok) continue;
+    const targetPath = resolved.path;
     const overwrites = (await ctx.fs.statKind(targetPath)) !== "missing";
     if (ctx.sourceOfTruth === "local" && overwrites) continue;
     actions.push({

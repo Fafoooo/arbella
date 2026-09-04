@@ -14,7 +14,7 @@ import { promises as fsp } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-import { findSymlinkComponent } from "../../src/utils/safe-path.js";
+import { findSymlinkComponent, resolveContainedTarget } from "../../src/utils/safe-path.js";
 import { fs as realFs } from "../../src/utils/fs.js";
 
 let root: string;
@@ -80,5 +80,52 @@ describe("findSymlinkComponent: what it refuses", () => {
     expect(await findSymlinkComponent(realFs, home, home)).toBe(home);
     const outside = path.join(root, "elsewhere", "x");
     expect(await findSymlinkComponent(realFs, home, outside)).toBe(outside);
+  });
+});
+
+describe("resolveContainedTarget: repo-supplied relative paths", () => {
+  it("joins an ordinary POSIX path under the root", async () => {
+    expect(await resolveContainedTarget(realFs, home, "prompts/x.md")).toEqual({
+      ok: true,
+      path: path.join(home, "prompts", "x.md"),
+    });
+  });
+
+  it("refuses every unsafe segment shape", async () => {
+    const unsafe = ["", ".", "..", "../escape", "a/../../escape", "a//b", "..\\..\\escape", "a\\b"];
+    for (const rel of unsafe) {
+      const result = await resolveContainedTarget(realFs, home, rel);
+      expect(result.ok, `expected ${JSON.stringify(rel)} to be refused`).toBe(false);
+    }
+  });
+
+  it("refuses a symlinked component below the root", async () => {
+    const elsewhere = path.join(root, "elsewhere");
+    await fsp.mkdir(elsewhere, { recursive: true });
+    await fsp.symlink(elsewhere, path.join(home, "prompts"), "dir");
+
+    expect(await resolveContainedTarget(realFs, home, "prompts/x.md")).toEqual({
+      ok: false,
+      reason: `${path.join(home, "prompts")} is a symlink`,
+    });
+  });
+
+  it("allowLeafSymlink exempts the LEAF but not its parents", async () => {
+    const elsewhere = path.join(root, "elsewhere-2");
+    await fsp.mkdir(elsewhere, { recursive: true });
+    await fsp.mkdir(path.join(home, "skills"), { recursive: true });
+    // A link at the leaf: `fs.symlink` unlinks it first, so re-creating it is
+    // safe — and refusing it would break re-running a pull.
+    await fsp.symlink(elsewhere, path.join(home, "skills", "foo"), "dir");
+    // A link as the PARENT: anything created under it lands outside the root.
+    await fsp.symlink(elsewhere, path.join(home, "linked-dir"), "dir");
+
+    expect(
+      await resolveContainedTarget(realFs, home, "skills/foo", { allowLeafSymlink: true }),
+    ).toEqual({ ok: true, path: path.join(home, "skills", "foo") });
+    expect(
+      (await resolveContainedTarget(realFs, home, "linked-dir/foo", { allowLeafSymlink: true }))
+        .ok,
+    ).toBe(false);
   });
 });
