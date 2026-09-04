@@ -663,6 +663,72 @@ describe("claude mcp: dry-run planning", () => {
 });
 
 /* -------------------------------------------------------------------------- */
+/* Visibility: project MCP servers skipped for a directory that doesn't exist  */
+/* -------------------------------------------------------------------------- */
+
+describe("claude mcp: skipped project MCP servers are reported, not silently dropped", () => {
+  /** One project whose dir will be created per-test, one that never is. */
+  function planningManifest() {
+    return manifestWith({
+      projectMcpServers: [
+        { projectPath: "{{HOME}}/programming/arbella", servers: { here: { command: "a" } } },
+        { projectPath: "{{HOME}}/programming/gone", servers: { nope: { command: "b" } } },
+      ],
+    });
+  }
+
+  it("plan.skippedProjectDirs names only the directory that does not exist here", async () => {
+    const present = path.join(home, "programming", "arbella");
+    await fsp.mkdir(present, { recursive: true });
+    const gone = path.join(home, "programming", "gone");
+
+    const plan = await planMcpMerge(restoreCtx(), planningManifest());
+
+    expect(toPosixAll(plan.skippedProjectDirs)).toEqual([toPosix(gone)]);
+    // The existing project is still planned normally.
+    expect(plan.projectServers.map((p) => toPosix(p.dir))).toEqual([toPosix(present)]);
+  });
+
+  it("warns exactly once, naming only the missing directory, when a restore runs", async () => {
+    const present = path.join(home, "programming", "arbella");
+    await fsp.mkdir(present, { recursive: true });
+    const gone = path.join(home, "programming", "gone");
+
+    await restoreMcpServers(restoreCtx(), planningManifest());
+
+    const skipWarnings = warnings.filter((w) => w.includes("skipped MCP servers"));
+    expect(skipWarnings).toHaveLength(1);
+    expect(toPosix(skipWarnings[0]!)).toContain(toPosix(gone));
+    expect(toPosix(skipWarnings[0]!)).not.toContain(toPosix(present));
+    expect(skipWarnings[0]).toContain("arbella pull");
+  });
+
+  it("does not warn when every project directory exists here", async () => {
+    await fsp.mkdir(path.join(home, "programming", "arbella"), { recursive: true });
+    await fsp.mkdir(path.join(home, "programming", "gone"), { recursive: true });
+
+    await restoreMcpServers(restoreCtx(), planningManifest());
+
+    expect(warnings.some((w) => w.includes("skipped MCP servers"))).toBe(false);
+  });
+
+  it("warns exactly once per pull even when the decision is (re-)computed for the same manifest", async () => {
+    // Mirrors the real call graph: the dry-run plan decides this once (or
+    // twice, via commands/restore.ts's own planning + needsEnv passes) before
+    // the real merge decides it again from the SAME manifest object.
+    await fsp.mkdir(path.join(home, "programming", "arbella"), { recursive: true });
+    const manifest = planningManifest();
+    const ctx = restoreCtx();
+
+    await planMcpMerge(ctx, manifest);
+    await planMcpMerge(ctx, manifest);
+    await restoreMcpServers(ctx, manifest);
+
+    expect(warnings.filter((w) => w.includes("skipped MCP servers"))).toHaveLength(1);
+  });
+});
+
+/* -------------------------------------------------------------------------- */
 /* findProjectKey (pure — the fix for cross-platform project-key drift)        */
 /* -------------------------------------------------------------------------- */
 

@@ -385,6 +385,13 @@ export interface McpMergePlan {
   userServers: PlannedServer[];
   /** Project-scope servers to write, grouped by hydrated project dir. */
   projectServers: PlannedProject[];
+  /**
+   * Hydrated directories from `manifest.projectMcpServers` that were skipped
+   * because they do not exist on this machine — the servers they name were
+   * NOT planned. See {@link warnSkippedProjects}: this is what turns into the
+   * one-line "clone the project and pull again" warning.
+   */
+  skippedProjectDirs: string[];
 }
 
 /** A plan that changes nothing (no servers to merge, or a file we must not touch). */
@@ -399,6 +406,7 @@ function emptyMergePlan(
     invalid: false,
     userServers: [],
     projectServers: [],
+    skippedProjectDirs: [],
     ...overrides,
   };
 }
@@ -464,9 +472,10 @@ async function planProjectScope(
   ctx: RestoreContext,
   manifest: ToolManifest,
   existing: Record<string, unknown>,
-): Promise<PlannedProject[]> {
+): Promise<{ planned: PlannedProject[]; skippedDirs: string[] }> {
   const projects = isPlainObject(existing.projects) ? existing.projects : {};
   const planned: PlannedProject[] = [];
+  const skippedDirs: string[] = [];
 
   for (const entry of manifest.projectMcpServers) {
     // Normalized so a manifest path that mixes separators (the stored
@@ -476,6 +485,7 @@ async function planProjectScope(
     const dir = path.normalize(hydrateProjectPath(ctx, entry.projectPath));
     if ((await ctx.fs.statKind(dir)) !== "dir") {
       ctx.log.debug(`claude: skip project MCP servers — ${dir} does not exist here`);
+      skippedDirs.push(dir);
       continue;
     }
     // The on-disk key may still be spelled differently (Claude Code wrote it
@@ -502,7 +512,40 @@ async function planProjectScope(
     if (servers.length > 0) planned.push({ dir: key, servers });
   }
 
-  return planned;
+  return { planned, skippedDirs };
+}
+
+/**
+ * Manifests this process has already warned about via {@link warnSkippedProjects}.
+ *
+ * `planMcpMerge` is invoked several times over the course of one `arbella pull`
+ * (once — sometimes twice — while the dry-run plan is assembled, and again
+ * inside {@link restoreMcpServers} when the real merge runs), always with the
+ * SAME `ToolManifest` object flowing through from `loadRestoreData`. Keying on
+ * that object's identity is what keeps the skipped-projects warning to exactly
+ * one line per pull (in both `--dry-run` and a real run) without every call
+ * site needing to coordinate.
+ */
+const warnedSkippedProjects = new WeakSet<ToolManifest>();
+
+/**
+ * Warn ONCE per manifest when one or more project-scope MCP server groups were
+ * skipped because their directory does not exist on this machine. See
+ * {@link warnedSkippedProjects} for why this is safe to call from every
+ * `planMcpMerge` invocation without re-printing the same line.
+ */
+function warnSkippedProjects(
+  ctx: RestoreContext,
+  manifest: ToolManifest,
+  skippedDirs: readonly string[],
+): void {
+  if (skippedDirs.length === 0 || warnedSkippedProjects.has(manifest)) return;
+  warnedSkippedProjects.add(manifest);
+  ctx.log.warn(
+    "claude: skipped MCP servers for project(s) not found on this machine: " +
+      `${skippedDirs.join(", ")}. Clone the project(s) here and run \`arbella pull\` ` +
+      "again to register their MCP servers.",
+  );
 }
 
 /**
@@ -542,7 +585,12 @@ export async function planMcpMerge(
   }
 
   const userServers = planUserScope(ctx, manifest, obj);
-  const projectServers = await planProjectScope(ctx, manifest, obj);
+  const { planned: projectServers, skippedDirs: skippedProjectDirs } = await planProjectScope(
+    ctx,
+    manifest,
+    obj,
+  );
+  warnSkippedProjects(ctx, manifest, skippedProjectDirs);
 
   const actions: RestoreAction[] = [
     ...userServers.map((s) => ({
@@ -574,7 +622,16 @@ export async function planMcpMerge(
   for (const server of userServers) note(server);
   for (const project of projectServers) for (const server of project.servers) note(server);
 
-  return { actions, needsEnv, existing: obj, existed, invalid, userServers, projectServers };
+  return {
+    actions,
+    needsEnv,
+    existing: obj,
+    existed,
+    invalid,
+    userServers,
+    projectServers,
+    skippedProjectDirs,
+  };
 }
 
 /** Apply the planned user-scope servers, returning a new global-state object. */

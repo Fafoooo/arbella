@@ -69,7 +69,7 @@ Beyond the obvious config files, Arbella also carries:
 
 Two things it deliberately won't do:
 
-- **Never commits secrets.** API keys, OAuth tokens, `auth.json`, `.credentials.json` — all excluded, no exceptions. You sign back in after a pull, or carry them yourself with [`arbella secrets`](#arbella-secrets).
+- **Excludes secrets by default.** Whole credential files — `auth.json`, `.credentials.json`, and the like — sit on a hard denylist and are never read into the repo, no exceptions. Inline secret-shaped values (API keys, OAuth tokens) found in files that *are* captured are redacted by default; [`includeSecrets`](#arbella-init) is the explicit opt-in that carries them verbatim into your (private) repo instead. You sign back in after a pull, or carry credentials yourself with [`arbella secrets`](#arbella-secrets).
 - **Doesn't copy what it can reinstall.** Plugins and registry skills are saved as a list and pulled fresh, so the repo stays small and never goes stale.
 
 Supported today: **Claude Code**, **Codex**, **Cursor** (IDE + the `cursor-agent` CLI), **opencode**, **GitHub Copilot CLI**, **Kilo Code**, and **Google Antigravity**. Claude Code coverage also reaches into `~/.claude.json` for MCP servers, per-project memories, and any linked scripts living under `$HOME`. Cursor support covers global MCP config, user settings, keybindings, snippets, local skills, skills.sh symlinks, the `cursor-agent` CLI config + global commands, and extension IDs; runtime state and credentials stay out. opencode, Copilot CLI, and Kilo are config-dir CLIs — Arbella captures each one's config dir (the JSON/JSONC config, custom agents/commands, MCP config), strips token-shaped values, and skips machine-local state, plugin install artifacts, and reinstallable skills (regenerated from the config on first run). Antigravity spans three roots — its VS Code-style User settings, the `~/.antigravity` extension list, and the shared `~/.gemini` agent config (global rules, MCP servers, skills) — while its Google OAuth tokens never leave your machine.
@@ -144,7 +144,7 @@ arbella pull <url> --dry-run
 - First copies your current `~/.claude` and `~/.codex` to a timestamped safety folder, so a pull can't quietly wreck what's already there.
 - Installs any missing CLIs — reaching for `sudo` only when the global npm folder actually needs root.
 - Writes files with this machine's paths, then reinstalls your plugins and skills from the manifest.
-- Merges MCP servers into `~/.claude.json` — a safety copy is taken first, and only the `mcpServers` keys are touched; your other keys (auth, telemetry) are never read or written.
+- Merges MCP servers into `~/.claude.json` — a safety copy is taken first; the file is read in full, only the `mcpServers` keys (user- and project-scope) are changed, every other key (auth, telemetry) is carried over unchanged, and the whole file is rewritten atomically so it's never left half-written.
 - Writes shared home files (linked scripts, `extraPaths`) back under `$HOME` — an existing file is snapshotted first and never overwritten while your machine is the source of truth.
 - Reinstalls external tools behind MCP/hook commands via brew, `uv tool`, or pipx, best-effort.
 - Deploys your shared instructions to `CLAUDE.md` and `AGENTS.md`.
@@ -209,6 +209,7 @@ Arbella restores everything it safely can. A few things are yours to finish:
 
 - **Credentials.** No API keys or OAuth tokens travel with a pull — sign back in when Arbella tells you to, or carry them yourself with [`arbella secrets`](#arbella-secrets).
 - **Redacted MCP env values.** If an MCP server's config held a secret-shaped value, push replaced it with `{{REDACTED}}`. Pull prints one line per key it couldn't restore, e.g. `claude: MCP server serena needs env SERENA_TOKEN re-supplied (redacted on backup)`.
+- **Per-project MCP servers for a project you haven't cloned yet.** A project's MCP servers are only registered when its directory exists on this machine; if it doesn't, pull skips them and warns you which directory was skipped. Clone the project, then run `arbella pull` again.
 - **External tools Arbella couldn't classify or install.** brew/`uv tool`/pipx tools are reinstalled best-effort; anything unknown, or that failed, is listed by name and by what uses it, so you can install it yourself.
 - **`~/.claude.json` is only merged, key by key.** Pull touches `mcpServers` (and per-project `mcpServers`) and nothing else in that file — your `oauthAccount`, telemetry, and everything else stay exactly as they were.
 - **The repo is trusted.** A pull writes the hooks, MCP commands, and install lists your repo describes, and runs `brew` / `uv tool` / `pipx` / `npm` for the tools it lists — exactly like the machine you pushed from. Keep the repo private, and run `arbella pull <url> --dry-run` first on anything you did not push yourself: the plan prints every command and target path.
