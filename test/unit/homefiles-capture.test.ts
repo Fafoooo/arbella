@@ -81,6 +81,10 @@ async function write(rel: string, content: string, mode?: number): Promise<strin
   const abs = path.join(home, ...rel.split("/"));
   await fsp.mkdir(path.dirname(abs), { recursive: true });
   await fsp.writeFile(abs, content, mode !== undefined ? { mode } : undefined);
+  // writeFile's creation mode is filtered through the process umask. Apply the
+  // requested fixture mode explicitly so mode-preservation assertions also run
+  // correctly under restrictive shells (for example umask 077).
+  if (mode !== undefined && isPosixHost) await fsp.chmod(abs, mode);
   return abs;
 }
 

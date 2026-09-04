@@ -24,11 +24,16 @@ async function ensureDir(p: string): Promise<void> {
 async function write(p: string, content: string, mode?: number): Promise<void> {
   await ensureDir(path.dirname(p));
   await fsp.writeFile(p, content, mode !== undefined ? { mode } : undefined);
+  // writeFile only consults `mode` when creating a file and filters it through
+  // the process umask. An explicit captured mode must also win for an existing
+  // target, so apply it after the contents are safely written on POSIX.
+  if (mode !== undefined && process.platform !== "win32") await fsp.chmod(p, mode);
 }
 
 async function writeBytes(p: string, content: Buffer, mode?: number): Promise<void> {
   await ensureDir(path.dirname(p));
   await fsp.writeFile(p, content, mode !== undefined ? { mode } : undefined);
+  if (mode !== undefined && process.platform !== "win32") await fsp.chmod(p, mode);
 }
 
 /**

@@ -225,6 +225,10 @@ async function writeFile(home: string, rel: string, content: string, mode?: numb
   const abs = under(home, rel);
   await fsp.mkdir(path.dirname(abs), { recursive: true });
   await fsp.writeFile(abs, content, mode !== undefined ? { mode } : undefined);
+  // writeFile's creation mode is filtered through the process umask. Apply the
+  // requested fixture mode explicitly so mode-preservation assertions also run
+  // correctly under restrictive shells (for example umask 077).
+  if (mode !== undefined && isPosixHost) await fsp.chmod(abs, mode);
 }
 
 beforeAll(async () => {
@@ -922,6 +926,7 @@ describe("restore: files reappear correctly in a fresh $HOME", () => {
 	      } else {
 	        await fsp.writeFile(abs, f.content, mode);
 	      }
+	      if (f.mode !== undefined && isPosixHost) await fsp.chmod(abs, f.mode);
 	    }
 	    for (const link of [...claudeCapture.symlinks, ...codexCapture.symlinks, ...cursorCapture.symlinks]) {
 	      const abs = path.join(repoRoot, ...link.repoPath.split("/"));
