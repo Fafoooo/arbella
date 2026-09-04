@@ -689,42 +689,26 @@ describe("claude mcp: skipped project MCP servers are reported, not silently dro
     expect(plan.projectServers.map((p) => toPosix(p.dir))).toEqual([toPosix(present)]);
   });
 
-  it("warns exactly once, naming only the missing directory, when a restore runs", async () => {
-    const present = path.join(home, "programming", "arbella");
-    await fsp.mkdir(present, { recursive: true });
-    const gone = path.join(home, "programming", "gone");
-
-    await restoreMcpServers(restoreCtx(), planningManifest());
-
-    const skipWarnings = warnings.filter((w) => w.includes("skipped MCP servers"));
-    expect(skipWarnings).toHaveLength(1);
-    expect(toPosix(skipWarnings[0]!)).toContain(toPosix(gone));
-    expect(toPosix(skipWarnings[0]!)).not.toContain(toPosix(present));
-    expect(skipWarnings[0]).toContain("arbella pull");
-  });
-
-  it("does not warn when every project directory exists here", async () => {
+  it("plan.skippedProjectDirs is empty when every project directory exists here", async () => {
     await fsp.mkdir(path.join(home, "programming", "arbella"), { recursive: true });
     await fsp.mkdir(path.join(home, "programming", "gone"), { recursive: true });
 
-    await restoreMcpServers(restoreCtx(), planningManifest());
+    const plan = await planMcpMerge(restoreCtx(), planningManifest());
 
-    expect(warnings.some((w) => w.includes("skipped MCP servers"))).toBe(false);
+    expect(plan.skippedProjectDirs).toEqual([]);
   });
 
-  it("warns exactly once per pull even when the decision is (re-)computed for the same manifest", async () => {
-    // Mirrors the real call graph: the dry-run plan decides this once (or
-    // twice, via commands/restore.ts's own planning + needsEnv passes) before
-    // the real merge decides it again from the SAME manifest object.
-    await fsp.mkdir(path.join(home, "programming", "arbella"), { recursive: true });
-    const manifest = planningManifest();
-    const ctx = restoreCtx();
+  it("planMcpMerge emits no warning for a skipped project (the command owns the message now)", async () => {
+    // planMcpMerge is a pure decision function now — the one-line "clone the
+    // project and pull again" warning is printed by src/commands/restore.ts
+    // from plan.skippedProjectDirs, not from here.
+    const present = path.join(home, "programming", "arbella");
+    await fsp.mkdir(present, { recursive: true });
 
-    await planMcpMerge(ctx, manifest);
-    await planMcpMerge(ctx, manifest);
-    await restoreMcpServers(ctx, manifest);
+    const plan = await planMcpMerge(restoreCtx(), planningManifest());
 
-    expect(warnings.filter((w) => w.includes("skipped MCP servers"))).toHaveLength(1);
+    expect(plan.skippedProjectDirs.length).toBeGreaterThan(0);
+    expect(warnings).toEqual([]);
   });
 });
 

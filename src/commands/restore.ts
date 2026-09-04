@@ -639,7 +639,7 @@ export function safetySourcesForTool(
  * Respects `dryRun` (reports only). Best-effort + graceful: a missing shared
  * file is logged, not fatal. Only deploys to a target whose tool is in scope.
  *
- * Two guards, both applied BEFORE the dry-run branch so `--dry-run` cannot
+ * Three guards, all applied BEFORE the dry-run branch so `--dry-run` cannot
  * promise a write this pass will not make:
  *   - the destination goes through the shared containment gate (a symlinked
  *     component below the tool home refuses the write instead of following it
@@ -648,6 +648,13 @@ export function safetySourcesForTool(
  *   - `sourceOfTruth: "local"` keeps an instructions file that is already here,
  *     exactly as every other restore write does. Without it the R9 step was the
  *     one place a "local wins" pull still overwrote the user's own CLAUDE.md.
+ *   - a repo that also carries the tool's OWN `<tool>/files/<relPath>` (e.g.
+ *     `claude/files/CLAUDE.md`) skips the shared copy for that target: R9 only
+ *     stores the shared file when BOTH producers share it, so a per-tool copy
+ *     sitting next to it means some later push ran with one producer missing
+ *     and captured its own fresh instructions instead of updating the shared
+ *     one (see `decideSharedInstructionsUpdate`) — that per-tool copy is by
+ *     construction newer than the kept shared text.
  */
 export async function deploySharedInstructions(
   repoRoot: string,
@@ -685,6 +692,19 @@ export async function deploySharedInstructions(
     const dest = resolved.path;
     if (sourceOfTruth === "local" && (await fs.exists(dest))) {
       l.debug(`restore: keep local ${dest} (sourceOfTruth=local)`);
+      continue;
+    }
+    // A tool that captured its OWN instructions file this push (R9 was not
+    // sharing on that machine) is by construction NEWER than a kept shared file:
+    // a sharing push removes the per-tool copies, so one being present at all
+    // means some later, non-sharing push wrote it. Prefer it over the older
+    // shared text rather than overwriting a fresher file with a stale one.
+    const ownRepoPath = path.join(repoRoot, target.tool, "files", ...target.relPath.split("/"));
+    if (await fs.exists(ownRepoPath)) {
+      l.debug(
+        `restore: skip shared instructions for ${target.tool} — repo has its own ` +
+          `${ownRepoPath}, which is deployed by ${target.tool}'s own restore instead.`,
+      );
       continue;
     }
     if (dryRun) {
@@ -914,6 +934,29 @@ function mcpNeedsEnv(
   return prepared.flatMap((tool) => tool.needsEnv);
 }
 
+/**
+ * Claude project-scope MCP directories skipped because they do not exist on
+ * this machine (Claude only; empty for every other tool). Taken from the same
+ * MCP merge plan `mcpNeedsEnv` reads, so the warning below can only ever name
+ * directories the merge really skipped.
+ */
+function mcpSkippedProjectDirs(prepared: readonly PreparedTool[]): string[] {
+  return prepared.flatMap((tool) => tool.skippedProjectDirs);
+}
+
+/**
+ * The one-line warning for `mcpSkippedProjectDirs` — shared by the dry-run plan
+ * (`printPlan`) and the post-restore reminder (`printReauthReminder`) so the
+ * message can never drift between the two.
+ */
+function skippedProjectDirsWarning(dirs: readonly string[]): string {
+  return (
+    "claude: skipped MCP servers for project(s) not found on this machine: " +
+    `${dirs.join(", ")}. Clone the project(s) here and run \`arbella pull\` ` +
+    "again to register their MCP servers."
+  );
+}
+
 /* -------------------------------------------------------------------------- */
 /* Plan building + printing                                                    */
 /* -------------------------------------------------------------------------- */
@@ -930,6 +973,12 @@ interface PreparedTool {
    * reminder names exactly the servers the merge decided to write.
    */
   needsEnv: Array<{ name: string; key: string }>;
+  /**
+   * Claude project-scope MCP server groups skipped because their directory
+   * does not exist here (Claude only; empty for every other tool). See
+   * McpMergePlan.skippedProjectDirs in src/adapters/claude/mcp.ts.
+   */
+  skippedProjectDirs: string[];
 }
 
 /** Strip the canonical "<tool>/files/" prefix from a reconstructed repoPath. */
@@ -1031,11 +1080,24 @@ async function buildPlan(args: {
 
     // Claude is the only tool that registers MCP servers today. The same
     // decision function the merge applies also reports which env values it will
-    // leave redacted — read it here so the reminder can only ever name servers
-    // that were really written.
-    const needsEnv =
-      id === "claude" ? (await planMcpMerge(planCtx, data.manifest)).needsEnv : [];
-    prepared.push({ id, adapter: wiring.adapter, data, actions: toolActions, needsEnv });
+    // leave redacted, and which project-scope groups it skipped because their
+    // directory does not exist here — read both here so the reminder can only
+    // ever name servers/directories the merge really decided on.
+    let needsEnv: Array<{ name: string; key: string }> = [];
+    let skippedProjectDirs: string[] = [];
+    if (id === "claude") {
+      const mcpPlan = await planMcpMerge(planCtx, data.manifest);
+      needsEnv = mcpPlan.needsEnv;
+      skippedProjectDirs = mcpPlan.skippedProjectDirs;
+    }
+    prepared.push({
+      id,
+      adapter: wiring.adapter,
+      data,
+      actions: toolActions,
+      needsEnv,
+      skippedProjectDirs,
+    });
 
     // R6: is the tool's CLI present? (Cursor's CLI is frequently absent; that's
     // fine — installCli degrades gracefully on platforms with no headless path.)
@@ -1081,12 +1143,13 @@ async function buildPlan(args: {
     actions,
     missingClis,
     willBackupExisting: true,
+    skippedProjectDirs: mcpSkippedProjectDirs(prepared),
   };
   return { plan, prepared, npmGlobals, externalTools, homeFiles };
 }
 
 /** Pretty-print a RestorePlan to the (stderr) logger for --dry-run. */
-function printPlan(
+export function printPlan(
   plan: RestorePlan,
   meta: ArbellaMeta,
   l: Logger = log,
@@ -1107,6 +1170,9 @@ function printPlan(
     l.step(
       "Shared instructions (R9) will be deployed to CLAUDE.md + AGENTS.md.",
     );
+  }
+  if (plan.skippedProjectDirs.length > 0) {
+    l.warn(skippedProjectDirsWarning(plan.skippedProjectDirs));
   }
 
   const counts = countByType(plan.actions);
@@ -1152,6 +1218,8 @@ function printReauthReminder(
     mcpNeedsEnv?: ReadonlyArray<{ name: string; key: string }>;
     /** External tools arbella could not install on this machine. */
     manualExternalTools?: readonly ExternalToolRef[];
+    /** Claude project-scope MCP dirs skipped (see McpMergePlan.skippedProjectDirs). */
+    skippedProjectDirs?: readonly string[];
   } = {},
 ): void {
   log.info("Restore complete. Secrets were intentionally NOT included.");
@@ -1210,6 +1278,10 @@ function printReauthReminder(
     log.step(
       `MCP env values were redacted on backup — re-supply them for: ${pairs.join(", ")}.`,
     );
+  }
+  const skippedProjectDirs = extras.skippedProjectDirs ?? [];
+  if (skippedProjectDirs.length > 0) {
+    log.warn(skippedProjectDirsWarning(skippedProjectDirs));
   }
   for (const tool of extras.manualExternalTools ?? []) {
     const usedBy = tool.usedBy.length > 0 ? ` (used by ${tool.usedBy.join(", ")})` : "";
@@ -1482,6 +1554,7 @@ export async function run(
   printReauthReminder(tools, {
     mcpNeedsEnv: mcpNeedsEnv(prepared),
     manualExternalTools,
+    skippedProjectDirs: mcpSkippedProjectDirs(prepared),
   });
   if (backups.length > 0) {
     log.info(

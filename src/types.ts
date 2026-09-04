@@ -198,6 +198,14 @@ export interface RestorePlan {
   missingClis: ToolId[];
   /** Whether a pre-restore safety backup of existing homes will be taken (R14). */
   willBackupExisting: boolean;
+  /**
+   * Claude project-scope MCP server groups skipped because their directory
+   * does not exist on this machine (see McpMergePlan.skippedProjectDirs in
+   * src/adapters/claude/mcp.ts). Carried on the plan so the dry-run printer and
+   * the post-restore reminder can both warn about it exactly once, without any
+   * state living outside this one plan.
+   */
+  skippedProjectDirs: string[];
 }
 
 /* -------------------------------------------------------------------------- */

@@ -278,4 +278,38 @@ describe("deploySharedInstructions: containment + sourceOfTruth", () => {
       );
     });
   });
+
+  it("prefers a tool's own captured instructions file over a kept shared one", async () => {
+    // Simulates a push where claude was configured but absent: the shared file
+    // from an earlier sharing push was kept (decideSharedInstructionsUpdate),
+    // but claude's adapter is not sharing on THIS push and froze its own fresh
+    // CLAUDE.md alongside it — that per-tool copy is the newer one.
+    const repoRoot = await repoWithSharedInstructions("# shared (stale)\n");
+    const ownClaudeMd = path.join(repoRoot, "claude", "files", "CLAUDE.md");
+    await fsp.mkdir(path.dirname(ownClaudeMd), { recursive: true });
+    await fsp.writeFile(ownClaudeMd, "# claude's own (fresh)\n");
+
+    await withTempHome("home-own-copy", async (home) => {
+      const claudeDest = path.join(home, ".claude", "CLAUDE.md");
+      const codexDest = path.join(home, ".codex", "AGENTS.md");
+      await fsp.mkdir(path.dirname(claudeDest), { recursive: true });
+      await fsp.writeFile(claudeDest, "# existing on this machine\n");
+      await fsp.mkdir(path.dirname(codexDest), { recursive: true });
+
+      await deploySharedInstructions(
+        repoRoot,
+        ["claude", "codex"],
+        false,
+        "repo",
+        recordingLogger(),
+      );
+
+      // claude has its own repo copy — the shared deployment is skipped, so the
+      // existing local file is untouched (claude's own restore path deploys
+      // claude/files/CLAUDE.md separately, outside this function).
+      expect(await fsp.readFile(claudeDest, "utf8")).toBe("# existing on this machine\n");
+      // codex has no own copy in the repo, so it still gets the shared file.
+      expect(await fsp.readFile(codexDest, "utf8")).toBe("# shared (stale)\n");
+    });
+  });
 });

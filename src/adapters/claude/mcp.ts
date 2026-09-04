@@ -388,8 +388,10 @@ export interface McpMergePlan {
   /**
    * Hydrated directories from `manifest.projectMcpServers` that were skipped
    * because they do not exist on this machine — the servers they name were
-   * NOT planned. See {@link warnSkippedProjects}: this is what turns into the
-   * one-line "clone the project and pull again" warning.
+   * NOT planned. `planMcpMerge` itself never warns about this (it is a pure
+   * decision function, invoked repeatedly over one pull); the restore command
+   * reads this field once from the plan it already built and prints the
+   * one-line "clone the project and pull again" warning exactly once.
    */
   skippedProjectDirs: string[];
 }
@@ -516,39 +518,6 @@ async function planProjectScope(
 }
 
 /**
- * Manifests this process has already warned about via {@link warnSkippedProjects}.
- *
- * `planMcpMerge` is invoked several times over the course of one `arbella pull`
- * (once — sometimes twice — while the dry-run plan is assembled, and again
- * inside {@link restoreMcpServers} when the real merge runs), always with the
- * SAME `ToolManifest` object flowing through from `loadRestoreData`. Keying on
- * that object's identity is what keeps the skipped-projects warning to exactly
- * one line per pull (in both `--dry-run` and a real run) without every call
- * site needing to coordinate.
- */
-const warnedSkippedProjects = new WeakSet<ToolManifest>();
-
-/**
- * Warn ONCE per manifest when one or more project-scope MCP server groups were
- * skipped because their directory does not exist on this machine. See
- * {@link warnedSkippedProjects} for why this is safe to call from every
- * `planMcpMerge` invocation without re-printing the same line.
- */
-function warnSkippedProjects(
-  ctx: RestoreContext,
-  manifest: ToolManifest,
-  skippedDirs: readonly string[],
-): void {
-  if (skippedDirs.length === 0 || warnedSkippedProjects.has(manifest)) return;
-  warnedSkippedProjects.add(manifest);
-  ctx.log.warn(
-    "claude: skipped MCP servers for project(s) not found on this machine: " +
-      `${skippedDirs.join(", ")}. Clone the project(s) here and run \`arbella pull\` ` +
-      "again to register their MCP servers.",
-  );
-}
-
-/**
  * Decide the whole MCP merge WITHOUT touching anything: which servers would be
  * registered, and which of their env values the user has to re-supply.
  *
@@ -590,7 +559,6 @@ export async function planMcpMerge(
     manifest,
     obj,
   );
-  warnSkippedProjects(ctx, manifest, skippedProjectDirs);
 
   const actions: RestoreAction[] = [
     ...userServers.map((s) => ({
