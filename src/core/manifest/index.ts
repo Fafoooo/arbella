@@ -313,6 +313,52 @@ export function shouldShareInstructions(claudeMd?: string, agentsMd?: string): b
   return claudeMd === agentsMd;
 }
 
+/** What a run must do with the committed `shared/instructions.md`. */
+export type SharedInstructionsUpdate = "write" | "remove" | "keep";
+
+/**
+ * Decide what a run may do with the COMMITTED shared instructions file (and with
+ * `meta.sharedInstructions`), given the R9 sharing decision and the tools this
+ * run actually captured.
+ *
+ * The rule that matters: when sharing, `shared/instructions.md` is the ONLY copy
+ * of CLAUDE.md / AGENTS.md in the repo — both adapters skip their own. So a run
+ * on a machine where one producer is missing has NO evidence about that tool's
+ * instructions, and must leave the file (and the previously recorded flag)
+ * alone. Deleting it there is a laptop quietly amputating the desktop's Codex
+ * instructions, visible only on the next pull.
+ *
+ * Hence: a producer that is still CONFIGURED but did not run here keeps the
+ * file. Once every configured producer ran — or a producer was removed from
+ * `config.tools` altogether, so the repo no longer carries its instructions at
+ * all (see `resolveMetaTools`) — the run decides normally: write when sharing,
+ * remove otherwise. Pure + synchronous; shared by `push` and `status` so the
+ * two cannot disagree about whether the file would survive a push.
+ *
+ * A kept file can coexist with the present tool's OWN freshly captured copy (a
+ * run that is not sharing does not skip instructions); restore prefers the
+ * per-tool copy for that target. Keeping it is still strictly better than
+ * deleting the absent tool's only copy.
+ */
+export function decideSharedInstructionsUpdate(args: {
+  /** R9: both instruction files were read this run and are byte-identical. */
+  share: boolean;
+  /** Tools whose capture actually ran this run. */
+  capturedTools: readonly ToolId[];
+  /** `config.tools` — a producer the user dropped no longer holds a veto. */
+  configuredTools: readonly ToolId[];
+}): SharedInstructionsUpdate {
+  const captured = new Set<ToolId>(args.capturedTools);
+  const configured = new Set<ToolId>(args.configuredTools);
+  for (const producer of SHARED_INSTRUCTIONS_PRODUCERS) {
+    if (configured.has(producer) && !captured.has(producer)) return "keep";
+  }
+  return args.share ? "write" : "remove";
+}
+
+/** The two tools whose instruction files R9 can fold into one shared file. */
+const SHARED_INSTRUCTIONS_PRODUCERS: readonly ToolId[] = ["claude", "codex"];
+
 /**
  * Produce the CapturedFile for the shared instructions (repoPath =
  * SHARED_INSTRUCTIONS_REPO_PATH). The content is the shared text verbatim; it is

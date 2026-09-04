@@ -58,12 +58,14 @@ import process from "node:process";
 import type { Command } from "commander";
 
 import type {
+  ArbellaMeta,
   CaptureResult,
   CapturedFile,
   ArbellaConfig,
   SecretRef,
   ToolId,
 } from "../types.js";
+import { TOOL_IDS } from "../types.js";
 import type { CaptureContext, CoreServices } from "../adapters/adapter.interface.js";
 
 import { detectOS, toolHomeDir } from "../platform/os.js";
@@ -72,12 +74,15 @@ import { log } from "../utils/log.js";
 
 import { loadConfig } from "../core/config/index.js";
 import { ensureLocalClone, commitAndPush } from "../core/repo/index.js";
+import { status as gitStatus } from "../core/repo/git.js";
 import { maybeRunBackup } from "../core/autobackup/index.js";
 import { buildRepoAuthHooks } from "./_context.js";
 import { ensureDeps } from "./setup.js";
 import {
   serialize,
   buildArbellaMeta,
+  decideSharedInstructionsUpdate,
+  parseMeta,
   shouldShareInstructions,
   buildSharedInstructionsFile,
   SHARED_INSTRUCTIONS_REPO_PATH,
@@ -479,6 +484,13 @@ export async function run(opts: BackupOptions = {}): Promise<void> {
   await ensureLocalClone(config.repo, authHooks);
   const repoRoot = config.repo.localPath;
 
+  // What the repo already says about itself, read BEFORE this run overwrites it:
+  // the previous tool list (a push from a machine missing a tool must not drop
+  // that tool from meta.tools), the previous sharedInstructions flag, and the raw
+  // bytes of the two files every push rewrites (so a no-op push can put them
+  // back byte-for-byte instead of committing a pure timestamp churn).
+  const previous = await readPreviousGenerated(repoRoot);
+
   // Mirror semantics: for each tool we captured, replace its `<tool>/files`
   // subtree wholesale so local deletions propagate to the repo. We deliberately
   // do NOT touch subtrees for tools we did not capture this run.
@@ -491,29 +503,76 @@ export async function run(opts: BackupOptions = {}): Promise<void> {
   }
   await writeSharedHome(repoRoot, home.entries, home.claims, capturedTools);
 
-  // Shared instructions (R9): write once when sharing, otherwise ensure a stale
-  // shared file from a previous (sharing) backup is removed.
-  if (sharedContent !== undefined) {
+  // Shared instructions (R9): write once when sharing, remove a stale file when
+  // this run saw BOTH producers and they are no longer identical — and otherwise
+  // (a producer missing here) keep whatever is committed, because the shared file
+  // is the only copy of the absent tool's instructions. See
+  // decideSharedInstructionsUpdate.
+  const sharedUpdate = decideSharedInstructionsUpdate({
+    share: sharedContent !== undefined,
+    capturedTools,
+    configuredTools: config.tools,
+  });
+  if (sharedUpdate === "write" && sharedContent !== undefined) {
     const shared = buildSharedInstructionsFile(sharedContent);
     await writeCapturedFile(repoRoot, shared);
     log.step(`Wrote ${SHARED_INSTRUCTIONS_REPO_PATH} (shared CLAUDE.md == AGENTS.md)`);
-  } else {
+  } else if (sharedUpdate === "remove") {
     await fs.rmrf(repoJoin(repoRoot, SHARED_INSTRUCTIONS_REPO_PATH));
   }
+  // "keep" carries the previously recorded flag forward with the kept file.
+  const sharedInstructions =
+    sharedUpdate === "keep"
+      ? (previous.meta?.sharedInstructions ?? false)
+      : sharedUpdate === "write";
+
+  // The tool list this backup CLAIMS to carry. NOT `capturedTools`: a push from a
+  // machine that lacks one configured tool leaves that tool's subtree untouched
+  // in the repo, so dropping it from meta.tools would make the next pull skip a
+  // still-present backup (restore constrains itself to meta.tools).
+  const metaTools = resolveMetaTools({
+    capturedTools,
+    previousTools: previous.meta?.tools ?? [],
+    configuredTools: config.tools,
+    toolsWithRepoSubtree: await toolsWithRepoSubtree(repoRoot, previous.meta?.tools ?? []),
+  });
 
   // Top-level metadata (arbella.json) — createdAt supplied here (clock).
   const meta = buildArbellaMeta({
     arbellaVersion: ARBELLA_VERSION,
-    tools: capturedTools,
+    tools: metaTools,
     config,
     createdAt: nowIso,
-    sharedInstructions: sharedContent !== undefined,
+    sharedInstructions,
   });
   await fs.write(repoJoin(repoRoot, "arbella.json"), serialize(meta));
 
   // Generated repo scaffolding: restore README + defensive .gitignore.
   await fs.write(repoJoin(repoRoot, "README.md"), renderRepoReadme(meta, nowIso));
-  await fs.write(repoJoin(repoRoot, ".gitignore"), renderRepoGitignore(capturedTools));
+  await fs.write(repoJoin(repoRoot, ".gitignore"), renderRepoGitignore(metaTools));
+
+  // Both files above are rewritten on EVERY push (createdAt / "Generated:"), so a
+  // run that changed nothing else would still produce a commit — and `status`,
+  // which ignores those two files, would have called the repo clean. Put them
+  // back and stop instead.
+  const changedPaths = await changedRepoPaths(repoRoot);
+  if (
+    changedPaths !== undefined &&
+    (await skipUnchangedPush({ repoRoot, changedPaths, meta, previous }))
+  ) {
+    log.info("Nothing changed since the last push.");
+    printSummary({
+      changed: false,
+      repoRoot,
+      capturedTools,
+      results: toolResults,
+      homeFiles: home.entries,
+      secrets: allSecrets,
+      sharing: sharedInstructions,
+      includeSecrets: config.includeSecrets,
+    });
+    return;
+  }
 
   // --- Commit + push (auth-aware: sign in on a private-repo push failure) --
   const message = opts.message ?? `arbella push ${nowIso}`;
@@ -531,9 +590,153 @@ export async function run(opts: BackupOptions = {}): Promise<void> {
     results: toolResults,
     homeFiles: home.entries,
     secrets: allSecrets,
-    sharing: sharedContent !== undefined,
+    sharing: sharedInstructions,
     includeSecrets: config.includeSecrets,
   });
+}
+
+/* -------------------------------------------------------------------------- */
+/* What the repo already said (previous arbella.json + README)                 */
+/* -------------------------------------------------------------------------- */
+
+/** The generated repo files as they were BEFORE this run rewrote them. */
+export interface PreviousGenerated {
+  /** Raw bytes of the committed arbella.json (undefined on a first push). */
+  metaRaw?: string;
+  /** The parsed committed meta (undefined when absent, corrupt or too new). */
+  meta?: ArbellaMeta;
+  /** Raw bytes of the committed README.md (undefined when it has none). */
+  readme?: string;
+}
+
+/** Read the committed arbella.json + README.md. Never throws. */
+async function readPreviousGenerated(repoRoot: string): Promise<PreviousGenerated> {
+  const metaRaw = await readIfExists(repoJoin(repoRoot, "arbella.json"));
+  const readme = await readIfExists(repoJoin(repoRoot, "README.md"));
+  let meta: ArbellaMeta | undefined;
+  if (metaRaw !== undefined) {
+    try {
+      meta = parseMeta(JSON.parse(metaRaw));
+    } catch {
+      // A corrupt/unknown arbella.json must not abort the push — this run simply
+      // has no previous state to carry forward.
+      meta = undefined;
+    }
+  }
+  return { metaRaw, meta, readme };
+}
+
+/**
+ * The tool list stamped into arbella.json (and used for the generated
+ * .gitignore): every tool captured HERE, plus every tool the previous backup
+ * recorded that is still configured AND still has a `<tool>/` subtree in the
+ * repo — in canonical {@link TOOL_IDS} order.
+ *
+ * The bug this pins: `meta.tools` used to be the tools present on the pushing
+ * machine. A push from a laptop without Codex shrank it to ["claude"] while
+ * leaving `codex/files/` in the repo — and `selectToolsForRestore` constrains a
+ * pull to `meta.tools`, so that still-committed subtree was never restored
+ * again. A tool the user REMOVES from `config.tools` (or whose subtree is gone)
+ * is still dropped, so the list cannot grow stale forever.
+ *
+ * Pure; the caller supplies `toolsWithRepoSubtree` because that check is fs work.
+ */
+export function resolveMetaTools(args: {
+  /** Tools whose capture ran this run. */
+  capturedTools: readonly ToolId[];
+  /** `tools` from the previous arbella.json ([] on a first push). */
+  previousTools: readonly ToolId[];
+  /** `config.tools` — a tool the user removed is dropped from the list. */
+  configuredTools: readonly ToolId[];
+  /** Previous tools whose `<tool>/` repo subtree still exists. */
+  toolsWithRepoSubtree: readonly ToolId[];
+}): ToolId[] {
+  const configured = new Set<ToolId>(args.configuredTools);
+  const onDisk = new Set<ToolId>(args.toolsWithRepoSubtree);
+  const keep = new Set<ToolId>(args.capturedTools);
+  for (const tool of args.previousTools) {
+    if (configured.has(tool) && onDisk.has(tool)) keep.add(tool);
+  }
+  return TOOL_IDS.filter((tool) => keep.has(tool));
+}
+
+/** Which of `tools` still have a `<tool>/` directory in the repo working copy. */
+async function toolsWithRepoSubtree(
+  repoRoot: string,
+  tools: readonly ToolId[],
+): Promise<ToolId[]> {
+  const out: ToolId[] = [];
+  for (const tool of tools) {
+    if ((await fs.statKind(repoJoin(repoRoot, tool))) === "dir") out.push(tool);
+  }
+  return out;
+}
+
+/* -------------------------------------------------------------------------- */
+/* No-op push detection                                                        */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * The repo files EVERY push rewrites even when nothing else changed: arbella.json
+ * carries `createdAt` and README.md carries the "Generated:" line. They are the
+ * two paths a no-op check has to look past.
+ */
+const TIMESTAMP_ONLY_PATHS: ReadonlySet<string> = new Set(["arbella.json", "README.md"]);
+
+/**
+ * Paths that differ from the last commit, or `undefined` when git could not say.
+ * "Cannot tell" must never be read as "nothing changed", so the caller commits.
+ */
+async function changedRepoPaths(repoRoot: string): Promise<string[] | undefined> {
+  try {
+    return (await gitStatus(repoRoot)).map((entry) => entry.path);
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Decide whether this push would only churn the two timestamp-bearing files —
+ * and if so, restore them so the working tree matches HEAD again and the caller
+ * can skip the commit entirely.
+ *
+ * The bug this pins: `status` reports "clean" (it ignores arbella.json and
+ * README.md) and the very next `push` commits anyway, because both files are
+ * rewritten unconditionally. A first push (no previous arbella.json), a version
+ * bump, a tool-list change and any content change all still commit — only a run
+ * whose meta is identical apart from `createdAt`, with no other path touched,
+ * is skipped.
+ *
+ * Exported for the no-op regression test: what matters is that the two files end
+ * up byte-identical to what was committed, which no pure predicate can show.
+ */
+export async function skipUnchangedPush(args: {
+  repoRoot: string;
+  /** Working-tree paths that differ from the last commit (git status). */
+  changedPaths: readonly string[];
+  /** The meta this run just wrote. */
+  meta: ArbellaMeta;
+  /** The generated files as they were before this run. */
+  previous: PreviousGenerated;
+}): Promise<boolean> {
+  const { repoRoot, changedPaths, meta, previous } = args;
+  if (previous.metaRaw === undefined || previous.meta === undefined) return false;
+  if (changedPaths.some((p) => !TIMESTAMP_ONLY_PATHS.has(p))) return false;
+  if (!sameMetaIgnoringCreatedAt(meta, previous.meta)) return false;
+
+  await fs.write(repoJoin(repoRoot, "arbella.json"), previous.metaRaw);
+  const readmePath = repoJoin(repoRoot, "README.md");
+  if (previous.readme === undefined) {
+    await fs.rmrf(readmePath);
+  } else {
+    await fs.write(readmePath, previous.readme);
+  }
+  return true;
+}
+
+/** Compare two metas ignoring the one field every push necessarily changes. */
+function sameMetaIgnoringCreatedAt(a: ArbellaMeta, b: ArbellaMeta): boolean {
+  return serialize({ ...a, createdAt: "" }) === serialize({ ...b, createdAt: "" });
 }
 
 /* -------------------------------------------------------------------------- */

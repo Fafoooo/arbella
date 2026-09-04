@@ -61,6 +61,7 @@ import { buildVariables } from "../core/templater/variables.js";
 import { sanitizer } from "../core/sanitizer/index.js";
 import { templater } from "../core/templater/index.js";
 import {
+  decideSharedInstructionsUpdate,
   parseManifest,
   serialize,
   shouldShareInstructions,
@@ -327,17 +328,12 @@ export async function run(opts: StatusOptions): Promise<void> {
   }
 
   // --- Shared instructions (R9) diff ---------------------------------------
-  const sharedChanges: FileChange[] = [];
-  if (sharing && claudeMd !== undefined) {
-    const file = buildSharedInstructionsFile(claudeMd);
-    const change = await classifyFile(repoRoot, file);
-    if (change.kind !== "unchanged") sharedChanges.push(change);
-  } else {
-    // Not sharing this run: a previously-committed shared file is now stale.
-    if (await committedFileExists(repoRoot, SHARED_INSTRUCTIONS_REPO_PATH)) {
-      sharedChanges.push({ repoPath: SHARED_INSTRUCTIONS_REPO_PATH, kind: "removed" });
-    }
-  }
+  const sharedChanges: FileChange[] = await diffSharedInstructions(repoRoot, {
+    share: sharing,
+    content: claudeMd,
+    capturedTools: captureResults.map((r) => r.tool),
+    configuredTools: config.tools,
+  });
 
   // --- shared/home diff (WP-B) ---------------------------------------------
   sharedChanges.push(
@@ -397,6 +393,57 @@ function buildCaptureContext(
     includeMemories,
     dryRun: true,
   };
+}
+
+/* -------------------------------------------------------------------------- */
+/* shared/instructions.md diffing (R9)                                         */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Diff `shared/instructions.md` by the SAME rule a push applies
+ * ({@link decideSharedInstructionsUpdate}).
+ *
+ * The bug this pins: status announced the file as "removed" whenever this run was
+ * not sharing — including on a machine where Codex simply is not installed, where
+ * the push keeps the file (it is the only copy of that machine-less tool's
+ * instructions). A deletion status predicts and the push declines to make is
+ * exactly what sends a user chasing a phantom.
+ *
+ * Exported for the regression test: status and push have to agree, and only a
+ * test driving both can show that.
+ */
+export async function diffSharedInstructions(
+  repoRoot: string,
+  args: {
+    /** R9: CLAUDE.md and AGENTS.md were read and are byte-identical. */
+    share: boolean;
+    /** The shared content (i.e. CLAUDE.md) when sharing. */
+    content?: string;
+    /** Tools whose capture actually ran this run. */
+    capturedTools: readonly ToolId[];
+    /** `config.tools`, so a dropped producer no longer keeps the file alive. */
+    configuredTools: readonly ToolId[];
+  },
+): Promise<FileChange[]> {
+  const update = decideSharedInstructionsUpdate({
+    share: args.share,
+    capturedTools: args.capturedTools,
+    configuredTools: args.configuredTools,
+  });
+
+  if (update === "write") {
+    if (args.content === undefined) return [];
+    const change = await classifyFile(repoRoot, buildSharedInstructionsFile(args.content));
+    return change.kind === "unchanged" ? [] : [change];
+  }
+
+  if (update === "remove" && (await committedFileExists(repoRoot, SHARED_INSTRUCTIONS_REPO_PATH))) {
+    return [{ repoPath: SHARED_INSTRUCTIONS_REPO_PATH, kind: "removed" }];
+  }
+
+  // "keep": the committed file stays exactly as it is, so there is nothing to
+  // report — the push will not touch it either.
+  return [];
 }
 
 /* -------------------------------------------------------------------------- */
