@@ -144,6 +144,32 @@ function valueLooksSecret(value: string): boolean {
   return false;
 }
 
+/** MCP auth references name environment variables; they do not contain tokens. */
+function isEnvReference(value: unknown): value is string {
+  return typeof value === "string" && /^[A-Za-z_][A-Za-z0-9_]*$/.test(value) && !valueLooksSecret(value);
+}
+
+function redactMcpServers(servers: TomlTable, secrets: SecretRef[]): void {
+  const references: Array<{ server: TomlTable; key: string; value: unknown }> = [];
+  for (const server of Object.values(servers)) {
+    if (!isTable(server)) continue;
+    const bearer = server["bearer_token_env_var"];
+    if (isEnvReference(bearer)) {
+      references.push({ server, key: "bearer_token_env_var", value: bearer });
+      delete server["bearer_token_env_var"];
+    }
+    const headers = server["env_http_headers"];
+    if (isTable(headers) && Object.values(headers).every(isEnvReference)) {
+      references.push({ server, key: "env_http_headers", value: headers });
+      delete server["env_http_headers"];
+    }
+  }
+  // Only these documented server-level reference fields are exempt. Actual
+  // env/http_headers values and similarly named nested keys remain protected.
+  redactSubtree(servers, "mcp_servers", secrets, false);
+  for (const { server, key, value } of references) server[key] = value;
+}
+
 /** Build a value-kind SecretRef for a redacted config.toml leaf. */
 function makeValueSecret(dottedPath: string): SecretRef {
   return {
@@ -257,7 +283,7 @@ export function processConfigToml(
   if (redactSecrets) {
     const mcpServers = parsed["mcp_servers"];
     if (isTable(mcpServers)) {
-      redactSubtree(mcpServers, "mcp_servers", secrets, false);
+      redactMcpServers(mcpServers, secrets);
     }
     const shellEnv = parsed["shell_environment_policy"];
     if (isTable(shellEnv)) {

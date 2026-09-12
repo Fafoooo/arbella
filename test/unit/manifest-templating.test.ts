@@ -11,6 +11,7 @@
  */
 
 import { describe, it, expect } from "vitest";
+import { parse as parseToml } from "smol-toml";
 
 import { parseInstalledPlugins } from "../../src/adapters/claude/plugins.js";
 import {
@@ -23,6 +24,26 @@ import { createTemplater } from "../../src/core/templater/index.js";
 import { makeVariables } from "../../src/core/templater/variables.js";
 import type { RestoreContext, RestoreData } from "../../src/adapters/adapter.interface.js";
 import type { Logger, MarketplaceEntry, PluginEntry } from "../../src/types.js";
+
+it("preserves Codex MCP environment references while redacting actual credentials", () => {
+  const result = processConfigToml(`
+[mcp_servers.remote]
+url = "https://example.test/mcp"
+bearer_token_env_var = "SERVICE_TOKEN"
+env_http_headers = { Authorization = "SERVICE_AUTH", X_API_KEY = "SERVICE_API_KEY" }
+http_headers = { Authorization = "opaque-private-header" }
+env = { SERVICE_TOKEN = "opaque-private-token", bearer_token_env_var = "nested-private-value" }
+`, createTemplater(), makeVariables("/home/test", "test", "linux", "/home/test/.codex"));
+  const restored = parseToml(result.sanitizedToml);
+  expect(restored.mcp_servers).toEqual({ remote: {
+    url: "https://example.test/mcp",
+    bearer_token_env_var: "SERVICE_TOKEN",
+    env_http_headers: { Authorization: "SERVICE_AUTH", X_API_KEY: "SERVICE_API_KEY" },
+    http_headers: { Authorization: "{{REDACTED}}" },
+    env: { SERVICE_TOKEN: "{{REDACTED}}", bearer_token_env_var: "{{REDACTED}}" },
+  } });
+  expect(result.sanitizedToml).not.toContain("opaque-private");
+});
 
 /** Minimal no-op Logger fake shared by the restore-planning tests below. */
 function fakeLogger(): Logger {
