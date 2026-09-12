@@ -1,12 +1,10 @@
 name: CI
 
 on:
+  push:
+    branches: [main]
   pull_request:
     branches: [main]
-  workflow_call:
-
-permissions:
-  contents: read
 
 jobs:
   test:
@@ -37,24 +35,3 @@ jobs:
 
       - name: Verify npm package
         run: npm pack --dry-run
-
-  release-tests:
-    name: Release versioning / Node 24
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: 24
-          cache: npm
-          cache-dependency-path: .github/release/package-lock.json
-
-      - name: Install release dependencies
-        run: npm ci --prefix .github/release
-
-      - name: Test release versioning
-        run: npm test --prefix .github/release
