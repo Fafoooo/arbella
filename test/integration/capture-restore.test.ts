@@ -734,7 +734,7 @@ describe("capture: machine paths become placeholders", () => {
 	    expect(cursorCapture.manifest.skills).toEqual(
 	      expect.arrayContaining([
 	        expect.objectContaining({ name: "local", source: "frozen", symlinked: false }),
-	        expect.objectContaining({ name: "humanizer", source: "skills.sh", symlinked: true }),
+	        expect.objectContaining({ name: "humanizer", source: "frozen", symlinked: true }),
 	      ]),
 	    );
 	    expect(cursorCapture.manifest.plugins).toContainEqual(

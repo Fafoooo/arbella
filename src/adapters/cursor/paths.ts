@@ -98,7 +98,7 @@ export function cursorUserPaths(toolHome: string, os: OS, env: EnvVars = {}): Cu
 /**
  * Files/dirs to FREEZE (copy into the repo), relative to the tool home, in
  * capture order. Cursor's `skills` dir is intentionally included: symlinked
- * skills are recorded as reinstallable skills.sh entries, while local skill dirs
+ * skills retain their links and shared contents, while local skill dirs
  * are frozen just like Claude/Codex local skills.
  *
  * The trailing three cover the Cursor CLI (cursor-agent), which shares ~/.cursor

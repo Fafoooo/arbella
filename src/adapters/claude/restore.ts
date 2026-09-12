@@ -202,6 +202,14 @@ async function claudeAvailable(): Promise<boolean> {
   return which(cliBinaryName("claude"));
 }
 
+/** Nonzero installer exits must reach the warning path, never a success step. */
+async function runRestoreCommand(command: string, args: string[]): Promise<void> {
+  const result = await execa(command, args, { reject: false, stdin: "ignore" });
+  if (result.exitCode !== 0) {
+    throw new Error(result.stderr.trim() || `exited with code ${result.exitCode}`);
+  }
+}
+
 /**
  * Write one CapturedFile to disk, honoring sourceOfTruth + mode + binary flag.
  * Returns true if written, false if skipped.
@@ -466,7 +474,7 @@ export async function restore(ctx: RestoreContext, data: RestoreData): Promise<v
     for (const m of data.manifest.marketplaces) {
       const args = marketplaceAddArgs(m);
       try {
-        await execa("claude", args, { reject: false });
+        await runRestoreCommand("claude", args);
         ctx.log.step(`marketplace add ${m.source}`);
       } catch (err) {
         ctx.log.warn(`claude: marketplace add ${m.source} failed: ${(err as Error).message}`);
@@ -477,7 +485,7 @@ export async function restore(ctx: RestoreContext, data: RestoreData): Promise<v
       if (!isUserScope(plugin)) continue;
       const args = pluginInstallArgs(plugin);
       try {
-        await execa("claude", args, { reject: false });
+        await runRestoreCommand("claude", args);
         ctx.log.step(`plugin install ${plugin.id}`);
       } catch (err) {
         ctx.log.warn(`claude: plugin install ${plugin.id} failed: ${(err as Error).message}`);
@@ -492,7 +500,7 @@ export async function restore(ctx: RestoreContext, data: RestoreData): Promise<v
   for (const skill of data.manifest.skills) {
     if (skill.source !== "skills.sh") continue;
     try {
-      await execa("npx", ["--yes", "skills", "add", skill.name], { reject: false });
+      await runRestoreCommand("npx", ["--yes", "skills", "add", skill.name]);
       ctx.log.step(`skills add ${skill.name}`);
     } catch (err) {
       ctx.log.warn(`claude: skills add ${skill.name} failed: ${(err as Error).message}`);

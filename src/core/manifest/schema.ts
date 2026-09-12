@@ -79,7 +79,7 @@ export const marketplaceEntrySchema = z.object({
 });
 
 /* -------------------------------------------------------------------------- */
-/* Skills (skills.sh / npx skills reinstallable; frozen ones are NOT here)       */
+/* Skills (frozen contents and legacy reinstall entries)                       */
 /* -------------------------------------------------------------------------- */
 
 export const skillEntrySchema = z.object({
@@ -87,10 +87,9 @@ export const skillEntrySchema = z.object({
   name: z.string(),
   /**
    * How to reinstall:
-   *  - "skills.sh": installed via `npx skills add <name>` into ~/.agents/skills,
-   *                 then symlinked into the tool's skills dir.
-   *  - "frozen":   hand-made; the directory is stored as files (NOT reinstalled).
-   *                Recorded here for completeness/visibility only.
+   *  - "skills.sh": legacy reinstall entry, retained for existing backups.
+   *  - "frozen": the directory is stored as files (NOT reinstalled). Linked
+   *                shared skills are carried under shared/home/.agents/skills.
    */
   source: z.enum(["skills.sh", "frozen"]),
   /** The install command to run for reinstallable skills, when known. */

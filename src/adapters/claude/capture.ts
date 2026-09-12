@@ -10,10 +10,9 @@
  *     paths to {{HOME}}/{{USER}}/... placeholders; emit a CapturedFile with
  *     repoPath = "claude/files/<rel>". Preserve executable mode for hooks/
  *     statusline/commands scripts.
- *   - skills/ is MIXED: a relative symlink "-> ../../.agents/skills/<name>" is a
- *     skills.sh install => emit a CapturedSymlink + a SkillEntry(source:"skills.sh",
- *     symlinked:true, installCommand:"npx skills add <name>"). A real dir is
- *     hand-made => freeze its files + a SkillEntry(source:"frozen").
+ *   - Freeze local skills and the canonical contents of linked shared skills.
+ *     Shared skills keep their portable symlinks; their contents live under
+ *     shared/home/.agents/skills rather than an inferred install command.
  *   - Parse plugins/installed_plugins.json + plugins/known_marketplaces.json +
  *     settings.json.enabledPlugins into the manifest.
  *   - Collect npm globals via the shared platform helper.
@@ -69,6 +68,7 @@ import {
   collectExternalTools,
 } from "../../core/externaltools/collect.js";
 import { normalizeCapturedSymlinkTarget } from "../../utils/symlink.js";
+import { captureSharedSkill } from "../../core/homefiles/skills.js";
 import { listNpmGlobals } from "../../platform/install.js";
 
 import type { ClaudePaths } from "./paths.js";
@@ -254,8 +254,8 @@ async function captureFile(
 }
 
 /**
- * Handle the skills/ directory specially: classify each entry as a skills.sh
- * symlink (reinstallable) or a frozen hand-made dir.
+ * Freeze skills in place, or carry a shared skill's canonical contents alongside
+ * its portable symlink.
  */
 async function captureSkills(
   ctx: CaptureContext,
@@ -265,6 +265,7 @@ async function captureSkills(
   files: CapturedFile[],
   symlinks: CapturedSymlink[],
   skills: SkillEntry[],
+  secrets: SecretRef[],
   warnings: string[],
 ): Promise<void> {
   if ((await ctx.fs.statKind(skillsDir)) !== "dir") return;
@@ -282,16 +283,18 @@ async function captureSkills(
 
     const kind = await ctx.fs.statKind(abs);
     if (kind === "symlink") {
-      // skills.sh: ~/.claude/skills/<name> -> ../../.agents/skills/<name>
-      const target = normalizeCapturedSymlinkTarget(await ctx.fs.readLink(abs));
+      const target = await captureSharedSkill(
+        ctx, "claude", name, abs,
+        normalizeCapturedSymlinkTarget(await ctx.fs.readLink(abs)),
+        { files, secrets, warnings },
+      );
       symlinks.push({ repoPath: repoPathFor(rel), target });
       skills.push({
         name,
-        source: "skills.sh",
+        source: "frozen",
         symlinked: true,
-        installCommand: `npx skills add ${name}`,
       });
-      ctx.log.debug(`claude: skill (skills.sh) ${name} -> ${target}`);
+      ctx.log.debug(`claude: shared skill ${name} -> ${target}`);
     } else if (kind === "dir") {
       // Hand-made skill: freeze its files AND record it as frozen.
       await walk(ctx, home, abs, deny, files, symlinks, warnings);
@@ -395,7 +398,7 @@ export async function capture(
       continue;
     }
     if (top === "skills") {
-      await captureSkills(ctx, home, p.skillsDir, deny, files, symlinks, skills, warnings);
+      await captureSkills(ctx, home, p.skillsDir, deny, files, symlinks, skills, secrets, warnings);
       continue;
     }
     await walk(ctx, home, path.join(home, top), deny, files, symlinks, warnings);

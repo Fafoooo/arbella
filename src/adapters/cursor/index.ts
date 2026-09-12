@@ -48,6 +48,7 @@ import { emptyManifest } from "../../core/manifest/index.js";
 import { cliBinaryName, detectOS, installCommandFor } from "../../platform/os.js";
 import { runInstall, which } from "../../platform/install.js";
 import { normalizeCapturedSymlinkTarget } from "../../utils/symlink.js";
+import { captureSharedSkill } from "../../core/homefiles/skills.js";
 import { binaryScanViews, decodeForCapture } from "../../utils/capture-bytes.js";
 import { resolveContainedTarget } from "../../utils/safe-path.js";
 import type { ContainedTarget, ContainedTargetOptions } from "../../utils/safe-path.js";
@@ -287,7 +288,7 @@ async function walkFrozen(
   });
 }
 
-/** Classify Cursor skills as reinstallable symlinks or frozen local skill dirs. */
+/** Freeze local and shared Cursor skills, retaining portable shared links. */
 async function captureSkills(
   ctx: CaptureContext,
   home: string,
@@ -311,12 +312,15 @@ async function captureSkills(
 
     const kind = await ctx.fs.statKind(abs);
     if (kind === "symlink") {
-      const target = normalizeCapturedSymlinkTarget(await ctx.fs.readLink(abs));
+      const target = await captureSharedSkill(
+        ctx, "cursor", name, abs,
+        normalizeCapturedSymlinkTarget(await ctx.fs.readLink(abs)),
+        { files, secrets, warnings },
+      );
       symlinks.push({ repoPath: repoPathFor(rel), target });
       skills.push({
         name,
-        source: "skills.sh",
-        installCommand: `npx skills add ${name}`,
+        source: "frozen",
         symlinked: true,
       });
       continue;
