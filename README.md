@@ -13,7 +13,7 @@ memories — into a private Git repo you own.
 [![License](https://img.shields.io/badge/license-AGPL--3.0--only-blue.svg)](./LICENSE)
 &nbsp;![Node](https://img.shields.io/badge/node-%E2%89%A518-43853d?logo=node.js&logoColor=white)
 &nbsp;![Platforms](https://img.shields.io/badge/platform-Linux%20%C2%B7%20macOS%20%C2%B7%20Windows-555)
-&nbsp;![Status](https://img.shields.io/badge/status-v0.3-orange)
+&nbsp;![Status](https://img.shields.io/badge/status-v1.0.0-green)
 
 [Quick start](#quick-start) · [Commands](#commands) · [How sign-in works](#how-sign-in-works) · [What still needs you after a pull](#what-still-needs-you-after-a-pull) · [Secrets](#secrets)
 
@@ -241,7 +241,29 @@ The Arbella was the flagship of the 1630 Winthrop Fleet — a few hundred settle
 
 ## Status
 
-v0.3 — early, but it builds clean, the full test suite passes, and I use it daily. Issues and pull requests welcome.
+v1.0.0 — builds clean, the full test suite passes, and I use it daily. Issues and pull requests welcome.
+
+## Releases
+
+Merging to `main` runs the Linux, macOS, and Windows checks first. When they pass,
+`publish.yml` publishes to npm and creates the GitHub tag and release automatically.
+The first release from this change is **1.0.0**. After that, commits since the last
+release determine the next version:
+
+- `feat: ...` increments the minor version.
+- `fix: ...`, documentation, maintenance, or other changes increment the patch version.
+- A `BREAKING CHANGE:` footer or a `!` after the commit type/scope increments the major version.
+
+Use the same conventions in the PR title when squash merging. No manual version bump,
+tag, or GitHub release is needed. Re-running a successful release does not bump again.
+The published package and `arbella --version` use the computed version; the source
+`package.json` stays at its baseline because release versions are tracked by Git tags.
+
+Publishing uses [npm trusted publishing](https://docs.npmjs.com/trusted-publishers/).
+The `arbella` package's npm Settings must have a GitHub Actions trusted publisher with
+owner **Fafoooo**, repository **arbella**, and workflow filename **publish.yml**
+(no environment name). This avoids maintaining an npm token in GitHub secrets.
+Release tooling runs separately on Node 24; Arbella itself continues to support Node 18+.
 
 ## License
 

@@ -1,6 +1,6 @@
 {
   "name": "arbella",
-  "version": "0.3.0",
+  "version": "1.0.0",
   "description": "Set up your AI coding tools once, then rebuild that setup on any machine — MCP servers included. Claude Code, Codex, Cursor, opencode, GitHub Copilot CLI, Kilo Code & Antigravity — Linux, macOS, Windows.",
   "type": "module",
   "license": "AGPL-3.0-only",
