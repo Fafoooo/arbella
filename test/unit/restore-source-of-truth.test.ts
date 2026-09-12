@@ -165,6 +165,31 @@ describe("claude restore: enabledPlugins honors sourceOfTruth", () => {
     expect(actions.filter((a) => a.type === "enable-plugin")).toHaveLength(1);
   });
 
+  it.each([false, true])("omits the overlay for symlinked settings (dangling=%s)", async (dangling) => {
+    const { home, toolHome } = await claudeHome("enabled-symlink");
+    const settings = path.join(toolHome, "settings.json");
+    const target = path.join(home, "dotfiles-settings.json");
+    const original = JSON.stringify({ enabledPlugins: { "a@m": false } });
+    if (!dangling) await fsp.writeFile(target, original);
+    await fsp.symlink(target, settings, "file");
+
+    const ctx = claudeCtx(toolHome, home, "repo");
+    const data: RestoreData = {
+      manifest: manifestWithEnabled({ "a@m": true }),
+      files: [{ repoPath: `${REPO_PREFIX}/settings.json`, content: "{}\n" }],
+      symlinks: [],
+    };
+
+    const actions = await claudePlanActions(ctx, data);
+    await restoreClaude(ctx, data);
+
+    expect(await fsp.readlink(settings)).toBe(target);
+    if (dangling) expect(await realFs.exists(target)).toBe(false);
+    else expect(await fsp.readFile(target, "utf8")).toBe(original);
+    expect(lines.some((line) => line.includes("refusing to merge enabledPlugins"))).toBe(true);
+    expect(actions.filter((a) => a.type === "enable-plugin")).toEqual([]);
+  });
+
   it("applies the overlay under local policy when settings.json is NEW", async () => {
     // Nothing was here before the pull, so nothing local is being overwritten:
     // the settings.json this restore just placed must get its enabledPlugins.

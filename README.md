@@ -141,6 +141,10 @@ arbella pull https://github.com/you/your-setup
 arbella pull <url> --dry-run
 ```
 
+`pull --dry-run` does not alter your tool setup or persistent backup clone. It
+plans from an existing local clone without refreshing it; when there is no clone
+yet, it makes a temporary download for the preview and removes it afterwards.
+
 - First copies your current `~/.claude` and `~/.codex` to a timestamped safety folder, so a pull can't quietly wreck what's already there.
 - Installs any missing CLIs — reaching for `sudo` only when the global npm folder actually needs root.
 - Writes files with this machine's paths, then reinstalls your plugins and skills from the manifest.
@@ -148,7 +152,7 @@ arbella pull <url> --dry-run
 - Writes shared home files (linked scripts, `extraPaths`) back under `$HOME` — an existing file is snapshotted first and never overwritten while your machine is the source of truth.
 - Reinstalls external tools behind MCP/hook commands via brew, `uv tool`, or pipx, best-effort.
 - Deploys your shared instructions to `CLAUDE.md` and `AGENTS.md`.
-- Reminds you to sign back in at the end, since no credentials came along for the ride.
+- Reminds you to sign back in for credential stores that never travel. With the default secret setting, it also lists inline values that were redacted and need to be supplied again.
 
 ### `arbella status`
 
@@ -207,7 +211,7 @@ For the device flow, point Arbella at your own registered OAuth app with `ARBELL
 
 Arbella restores everything it safely can. A few things are yours to finish:
 
-- **Credentials.** No API keys or OAuth tokens travel with a pull — sign back in when Arbella tells you to, or carry them yourself with [`arbella secrets`](#arbella-secrets).
+- **Credentials.** Credential stores never travel, so sign back in when Arbella tells you to, or carry them yourself with [`arbella secrets`](#arbella-secrets). By default, inline API keys and OAuth tokens are redacted too; `includeSecrets` is the explicit private-repo opt-in that carries those inline values.
 - **Redacted MCP env values.** If an MCP server's config held a secret-shaped value, push replaced it with `{{REDACTED}}`. Pull prints one line per key it couldn't restore, e.g. `claude: MCP server serena needs env SERENA_TOKEN re-supplied (redacted on backup)`.
 - **Per-project MCP servers for a project you haven't cloned yet.** A project's MCP servers are only registered when its directory exists on this machine; if it doesn't, pull skips them and warns you which directory was skipped. Clone the project, then run `arbella pull` again.
 - **External tools Arbella couldn't classify or install.** brew/`uv tool`/pipx tools are reinstalled best-effort; anything unknown, or that failed, is listed by name and by what uses it, so you can install it yourself.

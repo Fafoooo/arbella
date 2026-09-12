@@ -195,4 +195,66 @@ describe("claude restore: claude/files/ symlink gate", () => {
     expect(paths.some((d) => d.includes("skills/foo/SKILL.md"))).toBe(true);
     expect(paths.some((d) => d.includes("hooks/x.sh"))).toBe(false);
   });
+
+  it("refuses an inner symlink below a legitimate shared skill link", async () => {
+    const home = path.join(tmpRoot, "home-nested-link");
+    const toolHome = path.join(home, ".claude");
+    const sharedSkill = path.join(home, ".agents", "skills", "foo");
+    const outside = path.join(tmpRoot, "outside-nested-link");
+    await fsp.mkdir(sharedSkill, { recursive: true });
+    await fsp.mkdir(outside, { recursive: true });
+    await fsp.mkdir(path.join(toolHome, "skills"), { recursive: true });
+    await fsp.symlink(
+      path.join("..", "..", ".agents", "skills", "foo"),
+      path.join(toolHome, "skills", "foo"),
+      "dir",
+    );
+    await fsp.symlink(outside, path.join(sharedSkill, "references"), "dir");
+
+    const file = skillFile("foo", "references/escaped.md", "# should stay inside\n");
+    const data = {
+      manifest: emptyManifest("claude"),
+      files: [file],
+      symlinks: [],
+    };
+    const actions = await planActions(restoreCtx(toolHome, home), data);
+    await restoreClaude(restoreCtx(toolHome, home), {
+      ...data,
+    });
+
+    expect(await realFs.exists(path.join(outside, "escaped.md"))).toBe(false);
+    expect(warnings.some((w) => w.includes("symlink"))).toBe(true);
+    expect(actions.filter((action) => action.type === "write-file")).toEqual([]);
+  });
+
+  it("refuses a leaf symlink below a legitimate shared skill link", async () => {
+    const home = path.join(tmpRoot, "home-leaf-link");
+    const toolHome = path.join(home, ".claude");
+    const sharedSkill = path.join(home, ".agents", "skills", "foo");
+    const outside = path.join(tmpRoot, "outside-leaf-link");
+    await fsp.mkdir(sharedSkill, { recursive: true });
+    await fsp.mkdir(outside, { recursive: true });
+    await fsp.mkdir(path.join(toolHome, "skills"), { recursive: true });
+    await fsp.symlink(
+      path.join("..", "..", ".agents", "skills", "foo"),
+      path.join(toolHome, "skills", "foo"),
+      "dir",
+    );
+    await fsp.symlink(path.join(outside, "escaped.md"), path.join(sharedSkill, "SKILL.md"));
+
+    const file = skillFile("foo", "SKILL.md", "# should stay inside\n");
+    const data = {
+      manifest: emptyManifest("claude"),
+      files: [file],
+      symlinks: [],
+    };
+    const actions = await planActions(restoreCtx(toolHome, home), data);
+    await restoreClaude(restoreCtx(toolHome, home), {
+      ...data,
+    });
+
+    expect(await realFs.exists(path.join(outside, "escaped.md"))).toBe(false);
+    expect(warnings.some((w) => w.includes("symlink"))).toBe(true);
+    expect(actions.filter((action) => action.type === "write-file")).toEqual([]);
+  });
 });

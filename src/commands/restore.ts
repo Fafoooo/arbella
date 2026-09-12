@@ -12,7 +12,9 @@
  *   4. For each tool, load its RestoreData (frozen files + symlinks reconstructed
  *      from <repoRoot>/<tool>/files, manifest via parseManifest) and build the
  *      adapter's planned actions. Probe which CLIs are missing (R6).
- *   5. If `--dry-run`: print the full RestorePlan and STOP (no mutations).
+ *   5. If `--dry-run`: print the full RestorePlan and STOP without changing the
+ *      user's setup or persistent backup clone (a fresh-machine preview uses a
+ *      temporary clone that is removed afterwards).
  *   6. Otherwise — R14 SAFETY BACKUP FIRST: copy every existing target tool home
  *      (~/.claude, ~/.codex, ~/.cursor) to a timestamped dir under dataDir()
  *      BEFORE anything is overwritten. Then auto-install any missing CLIs (R6),
@@ -46,6 +48,8 @@
  * delegates the real work to the adapters + core modules.
  */
 
+import { promises as fsp } from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import process from "node:process";
 
@@ -139,7 +143,7 @@ import { planActions as codexPlanActions } from "../adapters/codex/restore.js";
 
 /** CLI options for `arbella pull` (commander fills these from flags). */
 export interface RestoreOptions {
-  /** Plan + report only; perform no filesystem or install actions (R14). */
+  /** Plan + report only; never modify the user setup or persistent backup clone (R14). */
   dryRun?: boolean;
   /** Override the repo URL (otherwise the positional arg, then config.repo). */
   repo?: string;
@@ -1376,40 +1380,63 @@ async function ensureRepoReady(
   }
 }
 
+/** A repo root a dry-run may read, plus its mandatory temporary-clone cleanup. */
+export interface DryRunRepo {
+  /** The immutable local snapshot that planning reads. */
+  repoRoot: string;
+  /** Remove the temporary clone, or no-op when using an existing local clone. */
+  cleanup(): Promise<void>;
+}
+
+/**
+ * Find a repo for a dry-run without changing a user's persistent backup clone.
+ *
+ * An existing configured clone is read as-is: planning neither pulls nor fetches
+ * it, so the preview describes that local snapshot. A fresh machine instead gets
+ * a non-interactive clone below the OS temp directory; callers must invoke the
+ * returned cleanup in a finally block after planning has finished.
+ */
+export async function prepareDryRunRepo(repo: RepoConfig): Promise<DryRunRepo> {
+  if (await git.isGitRepo(repo.localPath)) {
+    return { repoRoot: repo.localPath, cleanup: async () => {} };
+  }
+
+  const tempRoot = await fsp.mkdtemp(path.join(os.tmpdir(), "arbella-pull-preview-"));
+  const repoRoot = path.join(tempRoot, "repo");
+  try {
+    log.step("Cloning backup repo into a temporary directory for this preview…");
+    // Deliberately bypass ensureLocalClone/buildRepoAuthHooks: a preview must not
+    // create a persistent clone, prompt, install a provider CLI, or persist creds.
+    // git.clone itself disables terminal credential prompts and can still reuse an
+    // already-configured credential helper for a private repo.
+    await git.clone(repo.url, repoRoot);
+  } catch (err) {
+    await fsp.rm(tempRoot, { recursive: true, force: true });
+    throw err;
+  }
+
+  return {
+    repoRoot,
+    cleanup: async () => {
+      await fsp.rm(tempRoot, { recursive: true, force: true });
+    },
+  };
+}
+
 /* -------------------------------------------------------------------------- */
-/* Entry point                                                                 */
+/* Restore body                                                                */
 /* -------------------------------------------------------------------------- */
 
 /**
- * Run the restore. `repoUrl` is the optional positional arg; `opts` are the
- * parsed flags. This is the single directly-callable entrypoint (commander's
- * action handler delegates here, and tests call it without commander).
+ * Apply a parsed backup repo. The outer entrypoint owns repository preparation
+ * and dry-run temporary-clone cleanup; this helper owns planning and application.
  */
-export async function run(
-  repoUrl: string | undefined,
+async function runFromRepo(
+  repoRoot: string,
   opts: RestoreOptions,
+  os: OS,
+  dryRun: boolean,
 ): Promise<void> {
-  const os = detectOS();
-  const dryRun = opts.dryRun === true;
-
-  // ---- 0. Ensure git is available before we touch any repo (P3 on-demand) --
-  //         A dry run only reads an already-cloned repo, so don't force-install
-  //         git just to plan; the real run needs it to clone/pull.
-  if (!dryRun) {
-    await ensureDeps(["git"], { required: true });
-  }
-
-  // ---- 1. Resolve + ready the repo (gh/glab-first auth on private repos) ---
-  const repo = await resolveRepo(repoUrl, opts.repo);
-  log.info(`Restoring from ${repo.url}`);
-  // Interactive auth seams (skipped for a pure dry run, which shouldn't prompt).
-  const authHooks = buildRepoAuthHooks({
-    createdAt: new Date().toISOString(),
-    interactive: !dryRun,
-  });
-  await ensureRepoReady(repo, authHooks);
-  const repoRoot = repo.localPath;
-
   // ---- 2. Parse arbella.json (ArbellaMeta) ------------------------------
   const metaPath = path.join(repoRoot, "arbella.json");
   if (!(await fs.exists(metaPath))) {
@@ -1460,7 +1487,7 @@ export async function run(
   // ---- 5. Dry run: print the plan and STOP --------------------------------
   if (dryRun) {
     printPlan(plan, meta);
-    log.info("Dry run: no changes were made.");
+    log.info("Dry run: your setup and persistent backup clone were unchanged.");
     return;
   }
 
@@ -1566,6 +1593,48 @@ export async function run(
   }
 }
 
+/**
+ * Run the restore. `repoUrl` is the optional positional arg; `opts` are the
+ * parsed flags. This is the single directly-callable entrypoint (commander's
+ * action handler delegates here, and tests call it without commander).
+ */
+export async function run(
+  repoUrl: string | undefined,
+  opts: RestoreOptions,
+): Promise<void> {
+  const os = detectOS();
+  const dryRun = opts.dryRun === true;
+
+  // ---- 0. Ensure git is available before we touch any repo (P3 on-demand) --
+  //         A dry run never installs it; it reads a local snapshot or creates a
+  //         disposable non-interactive clone solely for the preview.
+  if (!dryRun) {
+    await ensureDeps(["git"], { required: true });
+  }
+
+  // ---- 1. Resolve + ready the repo (gh/glab-first auth on private repos) ---
+  const repo = await resolveRepo(repoUrl, opts.repo);
+  log.info(`Restoring from ${repo.url}`);
+  const previewRepo = dryRun ? await prepareDryRunRepo(repo) : undefined;
+  if (!dryRun) {
+    const authHooks = buildRepoAuthHooks({
+      createdAt: new Date().toISOString(),
+      interactive: true,
+    });
+    await ensureRepoReady(repo, authHooks);
+  }
+  const repoRoot = previewRepo?.repoRoot ?? repo.localPath;
+  if (dryRun && repoRoot === repo.localPath) {
+    log.info(`Dry run: using the current local backup snapshot at ${repoRoot} (not refreshing it).`);
+  }
+
+  try {
+    await runFromRepo(repoRoot, opts, os, dryRun);
+  } finally {
+    if (previewRepo !== undefined) await previewRepo.cleanup();
+  }
+}
+
 /* -------------------------------------------------------------------------- */
 /* commander registration                                                      */
 /* -------------------------------------------------------------------------- */
@@ -1592,7 +1661,7 @@ export function register(program: Command): void {
       )
       .option(
         "--dry-run",
-        "Preview the pull: show what would change without writing anything.",
+        "Preview the pull without modifying your setup or persistent backup clone.",
       )
       .option(
         "--repo <url>",

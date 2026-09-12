@@ -128,7 +128,10 @@ async function memorySymlinkBlock(
  *
  * Anything else — a link elsewhere under the tool home, or a `skills/<name>`
  * link that resolves somewhere outside those two roots (a planted symlink) —
- * returns false so the caller refuses the write.
+ * returns false so the caller refuses the write. The destination BELOW a valid
+ * shared-skill link must also be free of symlinks: the direct writer deliberately
+ * follows the valid root link, but must not then follow a nested link into an
+ * arbitrary directory.
  */
 async function isSharedSkillsLink(
   ctx: RestoreContext,
@@ -145,7 +148,14 @@ async function isSharedSkillsLink(
   const resolved = await ctx.fs.realPath(link);
   const sharedSkillsRoot = path.join(path.dirname(ctx.toolHome), ".agents", "skills");
   const ownSkillsRoot = path.join(ctx.toolHome, "skills");
-  return isPathUnder(sharedSkillsRoot, resolved) || isPathUnder(ownSkillsRoot, resolved);
+  if (!isPathUnder(sharedSkillsRoot, resolved) && !isPathUnder(ownSkillsRoot, resolved)) {
+    return false;
+  }
+
+  const remaining = segments.slice(2);
+  if (remaining.length === 0) return false;
+  const nestedTarget = path.join(resolved, ...remaining);
+  return (await findSymlinkComponent(ctx.fs, resolved, nestedTarget)) === null;
 }
 
 /**
@@ -366,18 +376,18 @@ export async function planActions(
     });
   }
 
-  // The overlay is skipped when local is authoritative and settings.json is
-  // already here — nothing has been written yet, so `exists` still answers
-  // "existed before the restore", exactly what mergeEnabledPlugins asks.
+  // Match both the containment gate and local-policy skip in mergeEnabledPlugins.
+  // Nothing has been written yet, so `exists` still answers "existed before
+  // the restore". A settings symlink (including a dangling one) is refused.
   const enabledIds = Object.keys(data.manifest.enabledPlugins);
-  const settingsPath = path.join(ctx.toolHome, SETTINGS_REL);
+  const settings = await resolveContainedTarget(ctx.fs, ctx.toolHome, SETTINGS_REL);
   const keepsLocalSettings =
-    ctx.sourceOfTruth === "local" && (await ctx.fs.exists(settingsPath));
-  if (enabledIds.length > 0 && !keepsLocalSettings) {
+    settings.ok && ctx.sourceOfTruth === "local" && (await ctx.fs.exists(settings.path));
+  if (enabledIds.length > 0 && settings.ok && !keepsLocalSettings) {
     actions.push({
       type: "enable-plugin",
       tool: "claude",
-      targetPath: settingsPath,
+      targetPath: settings.path,
       description: `Re-enable ${enabledIds.length} plugin(s) in settings.json`,
     });
   }
