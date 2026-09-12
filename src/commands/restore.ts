@@ -1613,7 +1613,7 @@ export async function run(
 
   // ---- 1. Resolve + ready the repo (gh/glab-first auth on private repos) ---
   const repo = await resolveRepo(repoUrl, opts.repo);
-  log.info(`Restoring from ${repo.url}`);
+  log.info("Restoring from the configured backup repository");
   const previewRepo = dryRun ? await prepareDryRunRepo(repo) : undefined;
   if (!dryRun) {
     const authHooks = buildRepoAuthHooks({
