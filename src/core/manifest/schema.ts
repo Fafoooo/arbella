@@ -15,6 +15,8 @@
 
 import { z } from "zod";
 
+import { isSafeToolName } from "../externaltools/classify.js";
+
 /* -------------------------------------------------------------------------- */
 /* Schema version                                                              */
 /* -------------------------------------------------------------------------- */
@@ -77,7 +79,7 @@ export const marketplaceEntrySchema = z.object({
 });
 
 /* -------------------------------------------------------------------------- */
-/* Skills (skills.sh / npx skills reinstallable; frozen ones are NOT here)       */
+/* Skills (frozen contents and legacy reinstall entries)                       */
 /* -------------------------------------------------------------------------- */
 
 export const skillEntrySchema = z.object({
@@ -85,10 +87,9 @@ export const skillEntrySchema = z.object({
   name: z.string(),
   /**
    * How to reinstall:
-   *  - "skills.sh": installed via `npx skills add <name>` into ~/.agents/skills,
-   *                 then symlinked into the tool's skills dir.
-   *  - "frozen":   hand-made; the directory is stored as files (NOT reinstalled).
-   *                Recorded here for completeness/visibility only.
+   *  - "skills.sh": legacy reinstall entry, retained for existing backups.
+   *  - "frozen": the directory is stored as files (NOT reinstalled). Linked
+   *                shared skills are carried under shared/home/.agents/skills.
    */
   source: z.enum(["skills.sh", "frozen"]),
   /** The install command to run for reinstallable skills, when known. */
@@ -106,6 +107,63 @@ export const npmGlobalEntrySchema = z.object({
   package: z.string(),
   /** Version captured at backup time (informational; restore installs latest). */
   version: z.string().optional(),
+});
+
+/* -------------------------------------------------------------------------- */
+/* MCP servers (Claude ~/.claude.json#mcpServers, Codex [mcp_servers.*])        */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * One MCP server definition, stored VERBATIM apart from two transformations the
+ * capture side always applies: secret values are redacted (every leaf under an
+ * env/environment/headers map becomes {{REDACTED}} unless includeSecrets), and
+ * machine paths are folded to {{HOME}}/{{TOOL_HOME}} placeholders. The shape is
+ * intentionally open (`unknown` values): MCP server configs are vendor-defined
+ * and arbella must round-trip fields it has never heard of.
+ */
+export const mcpServerDefSchema = z.record(z.string(), z.unknown());
+
+/**
+ * Project-scope MCP servers: the servers registered for ONE project directory
+ * (Claude: ~/.claude.json#projects.<absPath>.mcpServers). `projectPath` is
+ * templated, and restore only applies the entry when that directory actually
+ * exists on the target machine.
+ */
+export const projectMcpServersSchema = z.object({
+  /** Templated absolute path of the project the servers belong to. */
+  projectPath: z.string(),
+  /** name -> server definition. */
+  servers: z.record(z.string(), mcpServerDefSchema),
+});
+
+/* -------------------------------------------------------------------------- */
+/* External tools (binaries behind MCP/hook commands)                           */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * A binary referenced by an MCP/hook command that a package manager OTHER than
+ * npm installed (brew, uv, pipx). npm globals have their own list; anything we
+ * cannot classify lands here as "unknown" so the post-restore reminder can at
+ * least tell the user what to install by hand.
+ */
+export const externalToolEntrySchema = z.object({
+  /**
+   * Package name to install, e.g. "serena-agent", "greppy".
+   *
+   * Validated against {@link isSafeToolName} by the ARRAY below rather than
+   * here: an entry with an unusable name must not make the whole manifest
+   * unparseable (a repo written by another/older client has to keep working),
+   * so it is DROPPED instead of rejected.
+   */
+  name: z.string(),
+  /** Which package manager owns it (or "unknown" when unclassifiable). */
+  manager: z.enum(["brew", "uv", "pipx", "unknown"]),
+  /** The command exactly as written in the config (templated). */
+  command: z.string(),
+  /** Resolved realpath at capture time, templated. Informational only. */
+  resolvedPath: z.string().optional(),
+  /** What referenced it, e.g. ["mcp:serena", "hook:PreToolUse"]. */
+  usedBy: z.array(z.string()).default([]),
 });
 
 /* -------------------------------------------------------------------------- */
@@ -129,6 +187,28 @@ export const toolManifestSchema = z.object({
    * per-entry convenience copy.
    */
   enabledPlugins: z.record(z.string(), z.boolean()).default({}),
+  /**
+   * User-scope MCP servers (Claude: ~/.claude.json#mcpServers), sanitized +
+   * templated, stored verbatim otherwise. Keyed by server name.
+   */
+  mcpServers: z.record(z.string(), mcpServerDefSchema).default({}),
+  /** Project-scope MCP servers (Claude: ~/.claude.json#projects.<path>.mcpServers). */
+  projectMcpServers: z.array(projectMcpServersSchema).default([]),
+  /**
+   * Binaries behind MCP/hook commands that a non-npm package manager installed.
+   *
+   * Entries whose `name` is not {@link isSafeToolName} are DROPPED here, at the
+   * boundary where repo data becomes program data: the name ends up as an argv
+   * element of `brew install <name>` on a pull, where a leading `-` is an option
+   * and a `git+https://…` is a source. Dropping (rather than throwing) keeps a
+   * manifest written by a foreign/older client parseable; the restore command
+   * reports each dropped name via {@link parseManifest}'s callback so the user
+   * hears about it instead of silently getting less than the repo claims.
+   */
+  externalTools: z
+    .array(externalToolEntrySchema)
+    .default([])
+    .transform((list) => list.filter((entry) => isSafeToolName(entry.name))),
 });
 
 /* -------------------------------------------------------------------------- */
@@ -165,5 +245,8 @@ export type PluginEntry = z.infer<typeof pluginEntrySchema>;
 export type MarketplaceEntry = z.infer<typeof marketplaceEntrySchema>;
 export type SkillEntry = z.infer<typeof skillEntrySchema>;
 export type NpmGlobalEntry = z.infer<typeof npmGlobalEntrySchema>;
+export type McpServerDef = z.infer<typeof mcpServerDefSchema>;
+export type ProjectMcpServers = z.infer<typeof projectMcpServersSchema>;
+export type ExternalToolEntry = z.infer<typeof externalToolEntrySchema>;
 export type ToolManifest = z.infer<typeof toolManifestSchema>;
 export type ArbellaMeta = z.infer<typeof arbellaMetaSchema>;

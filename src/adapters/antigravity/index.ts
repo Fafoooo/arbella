@@ -35,14 +35,16 @@ import type {
   OS,
   RestoreAction,
   SecretRef,
-  ToolManifest,
 } from "../../types.js";
 
 import { denylistFor, matchesDeny } from "../../core/sanitizer/denylist.js";
+import { emptyManifest } from "../../core/manifest/index.js";
 import { cliBinaryName, detectOS, installCommandFor } from "../../platform/os.js";
 import { runInstall, which } from "../../platform/install.js";
 import { normalizeCapturedSymlinkTarget } from "../../utils/symlink.js";
 import { binaryScanViews, decodeForCapture } from "../../utils/capture-bytes.js";
+import { resolveContainedTarget } from "../../utils/safe-path.js";
+import type { ContainedTarget, ContainedTargetOptions } from "../../utils/safe-path.js";
 
 import {
   GEMINI_FROZEN_PATHS,
@@ -130,27 +132,28 @@ async function resolveRootDirs(
   };
 }
 
-/** Resolve an AntigravityTarget onto the target machine's resolved roots. */
-function targetAbsFor(dirs: RootDirs, target: AntigravityTarget): string {
-  return path.join(dirs[target.root], ...target.rel.split("/").filter(Boolean));
+/**
+ * Resolve an AntigravityTarget onto a CHECKED destination under its resolved
+ * root.
+ *
+ * The `rel` half is repo-supplied, so it goes through the shared containment
+ * gate rather than a bare `path.join`: no `..`/backslash/absolute segment may
+ * escape the root, and a symlinked component below it refuses the write instead
+ * of redirecting it. Callers decide what a refusal means — the planner drops the
+ * action, the writers warn — so plan and execution cannot disagree.
+ */
+async function targetAbsFor(
+  fs: FsService,
+  dirs: RootDirs,
+  target: AntigravityTarget,
+  opts: ContainedTargetOptions = {},
+): Promise<ContainedTarget> {
+  return resolveContainedTarget(fs, dirs[target.root], target.rel, opts);
 }
 
 /* -------------------------------------------------------------------------- */
 /* Small helpers                                                               */
 /* -------------------------------------------------------------------------- */
-
-/** An empty manifest for antigravity (it tracks no reinstallable plugins here —
- * the extension list is frozen as a file, not reinstalled from a manifest). */
-function emptyManifest(): ToolManifest {
-  return {
-    tool: "antigravity",
-    plugins: [],
-    marketplaces: [],
-    skills: [],
-    npmGlobals: [],
-    enabledPlugins: {},
-  };
-}
 
 /** Read mode bits best-effort so executable helper files keep their mode. */
 async function readMode(abs: string): Promise<number | undefined> {
@@ -291,7 +294,7 @@ export async function capture(ctx: CaptureContext): Promise<CaptureResult> {
   const symlinks: CapturedSymlink[] = [];
   const secrets: SecretRef[] = [];
   const warnings: string[] = [];
-  const manifest = emptyManifest();
+  const manifest = emptyManifest("antigravity");
   const deny = denylistFor("antigravity");
 
   const roots = await captureRoots(ctx);
@@ -346,19 +349,27 @@ async function writeRestoredFile(
     ctx.log.debug(`antigravity: ignoring foreign repoPath ${file.repoPath}`);
     return;
   }
-  const dest = targetAbsFor(dirs, target);
+  const resolved = await targetAbsFor(ctx.fs, dirs, target);
+  if (!resolved.ok) {
+    ctx.log.warn(`antigravity: refusing to write ${file.repoPath} — ${resolved.reason}`);
+    return;
+  }
+  const dest = resolved.path;
 
   if (ctx.sourceOfTruth === "local" && (await ctx.fs.exists(dest))) {
     ctx.log.debug(`antigravity: keep local ${file.repoPath} (sourceOfTruth=local)`);
     return;
   }
 
+  // Rename-based writers: the containment check and the write cannot be one
+  // operation, and a plain write follows a link that appears at the leaf in the
+  // gap. `rename` replaces that entry instead.
   if (file.binary) {
-    await ctx.fs.writeBytes(dest, Buffer.from(file.content, "base64"), file.mode);
+    await ctx.fs.writeBytesAtomic(dest, Buffer.from(file.content, "base64"), file.mode);
     return;
   }
   const expanded = ctx.templater.fromTemplate(file.content, ctx.vars);
-  await ctx.fs.write(dest, expanded, file.mode);
+  await ctx.fs.writeAtomic(dest, expanded, file.mode);
 }
 
 /** Recreate one captured symlink under the right target root. */
@@ -372,7 +383,12 @@ async function writeRestoredSymlink(
     ctx.log.debug(`antigravity: ignoring foreign symlink ${link.repoPath}`);
     return;
   }
-  const dest = targetAbsFor(dirs, target);
+  const resolved = await targetAbsFor(ctx.fs, dirs, target, { allowLeafSymlink: true });
+  if (!resolved.ok) {
+    ctx.log.warn(`antigravity: refusing to link ${link.repoPath} — ${resolved.reason}`);
+    return;
+  }
+  const dest = resolved.path;
 
   if (ctx.sourceOfTruth === "local" && (await ctx.fs.statKind(dest)) !== "missing") {
     ctx.log.debug(`antigravity: keep local symlink ${link.repoPath} (sourceOfTruth=local)`);
@@ -392,7 +408,9 @@ export async function planActions(ctx: RestoreContext, data: RestoreData): Promi
   for (const file of data.files) {
     const target = targetFromRepoPath(file.repoPath);
     if (target === undefined) continue;
-    const targetPath = targetAbsFor(dirs, target);
+    const resolved = await targetAbsFor(ctx.fs, dirs, target);
+    if (!resolved.ok) continue;
+    const targetPath = resolved.path;
     const overwrites = await ctx.fs.exists(targetPath);
     if (ctx.sourceOfTruth === "local" && overwrites) continue;
     actions.push({
@@ -407,7 +425,9 @@ export async function planActions(ctx: RestoreContext, data: RestoreData): Promi
   for (const link of data.symlinks) {
     const target = targetFromRepoPath(link.repoPath);
     if (target === undefined) continue;
-    const targetPath = targetAbsFor(dirs, target);
+    const resolved = await targetAbsFor(ctx.fs, dirs, target, { allowLeafSymlink: true });
+    if (!resolved.ok) continue;
+    const targetPath = resolved.path;
     const overwrites = (await ctx.fs.statKind(targetPath)) !== "missing";
     if (ctx.sourceOfTruth === "local" && overwrites) continue;
     actions.push({

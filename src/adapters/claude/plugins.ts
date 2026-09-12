@@ -25,11 +25,7 @@
  */
 
 import type { PluginEntry, MarketplaceEntry } from "../../types.js";
-
-/** Narrow a value to a plain object record. */
-function isRecord(v: unknown): v is Record<string, unknown> {
-  return typeof v === "object" && v !== null && !Array.isArray(v);
-}
+import { isPlainObject as isRecord } from "../../utils/object.js";
 
 /**
  * Split a fully-qualified plugin id ("name@marketplace") into its parts.

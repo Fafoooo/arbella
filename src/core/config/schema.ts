@@ -62,6 +62,13 @@ export const arbellaConfigSchema = z.object({
   includeMemories: z.boolean().default(false),
   /** Tools to manage. Order is respected during backup/restore. */
   tools: z.array(toolIdSchema).default(["claude", "codex"]),
+  /**
+   * Extra $HOME-relative paths (files or directories) to carry in `shared/home`,
+   * on top of the scripts arbella discovers from the tool configs themselves.
+   * "~/x" and "x" both mean "$HOME/x"; an absolute path is accepted as long as it
+   * resolves under $HOME. Anything outside $HOME is warned about and skipped.
+   */
+  extraPaths: z.array(z.string()).default([]),
 });
 
 export type RepoConfig = z.infer<typeof repoConfigSchema>;
@@ -79,4 +86,5 @@ export const DEFAULT_CONFIG: ArbellaConfig = {
   includeSecrets: false,
   includeMemories: false,
   tools: ["claude", "codex"],
+  extraPaths: [],
 };

@@ -19,6 +19,7 @@ import {
 import { denylistFor } from "../../src/core/sanitizer/denylist.js";
 import { cliBinaryName, installCommandFor, toolHomeDir } from "../../src/platform/os.js";
 import { getDependency } from "../../src/platform/install.js";
+import { MEMORIES_REPO_PREFIX } from "../../src/adapters/claude/memories.js";
 import { toolRepoDataRoots } from "../../src/commands/backup.js";
 import { safetySourcesForTool } from "../../src/commands/restore.js";
 
@@ -138,7 +139,14 @@ describe("multi-root tools: backup mirror + R14 safety-backup wiring", () => {
     ]);
     // Existing behavior stays intact:
     expect(toolRepoDataRoots("cursor")).toEqual(["cursor/files", "cursor/user"]);
-    expect(toolRepoDataRoots("claude")).toEqual(["claude/files"]);
+    // Claude owns a second root since per-project memories landed (WP-A): it must
+    // be mirrored too, or a locally-deleted memory would resurrect on the next pull
+    // — and switching `includeMemories` back off must EMPTY the root rather than
+    // freeze whatever the last opted-in push left there.
+    expect(toolRepoDataRoots("claude")).toEqual(["claude/files", "claude/memories"]);
+    // Pinned against the adapter's own constant so the mirror root cannot drift
+    // away from the prefix capture actually writes memories under.
+    expect(toolRepoDataRoots("claude")).toContain(MEMORIES_REPO_PREFIX);
   });
 
   it("safety backup snapshots BOTH antigravity dir variants and gemini restore targets", () => {

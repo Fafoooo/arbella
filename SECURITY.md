@@ -5,12 +5,12 @@ carrying a secret into a Git repo**. Security reports are taken seriously.
 
 ## Supported versions
 
-Arbella is pre-1.0 and ships from `main`. Only the latest published `0.1.x`
-release on npm receives security fixes.
+Arbella ships from `main`. Only the latest published release on npm receives
+security fixes.
 
 | Version | Supported |
 | --- | --- |
-| latest `0.1.x` | ✅ |
+| latest published release | ✅ |
 | older | ❌ |
 
 ## Reporting a vulnerability

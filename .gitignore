@@ -20,6 +20,10 @@ Thumbs.db
 .idea/
 .vscode/
 
+# Agent tooling
+.serena/
+.claude/
+
 # Env / local
 .env
 .env.local

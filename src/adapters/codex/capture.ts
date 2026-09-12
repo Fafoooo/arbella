@@ -10,7 +10,11 @@
  *   - skills are classified: a relative symlink into ~/.agents/skills becomes a
  *     reinstallable SkillEntry (source:"skills.sh") + a CapturedSymlink; a real
  *     directory is frozen file-by-file + recorded as SkillEntry (source:"frozen");
- *   - denylisted-but-present secret files (auth.json, ...) yield a SecretRef.
+ *   - denylisted-but-present secret files (auth.json, ...) yield a SecretRef;
+ *   - scripts referenced from hooks.json / [mcp_servers.*] that live in $HOME but
+ *     outside ~/.codex are followed with core/homefiles and emitted as
+ *     `shared/home/<rel>` files inside this same CaptureResult, and the binaries
+ *     those same commands invoke are classified into manifest.externalTools.
  *
  * Security: every file path is checked against the per-tool denylist before it is
  * read; text files are sanitized (secret values redacted) then templated (machine
@@ -19,6 +23,8 @@
  */
 
 import path from "node:path";
+
+import { parse as parseToml } from "smol-toml";
 
 import type { CaptureContext } from "../adapter.interface.js";
 import type {
@@ -31,6 +37,14 @@ import type {
   ToolManifest,
 } from "../../types.js";
 import { denylistFor, matchesDeny } from "../../core/sanitizer/denylist.js";
+import { emptyManifest } from "../../core/manifest/index.js";
+import type { CommandRef } from "../../core/homefiles/scan.js";
+import { collectCommandRefs } from "../../core/homefiles/scan.js";
+import { captureLinkedHomeFiles, homeExcludeRoots } from "../../core/homefiles/capture.js";
+import {
+  capturedAbsolutePaths,
+  collectExternalTools,
+} from "../../core/externaltools/collect.js";
 import { listNpmGlobals } from "../../platform/install.js";
 import { normalizeCapturedSymlinkTarget } from "../../utils/symlink.js";
 import {
@@ -276,14 +290,11 @@ export async function capture(
   const warnings: string[] = [];
   const skills: SkillEntry[] = [];
 
-  const manifest: ToolManifest = {
-    tool: "codex",
-    plugins: [],
-    marketplaces: [],
-    skills,
-    npmGlobals: [],
-    enabledPlugins: {},
-  };
+  // MCP servers are Claude-side today; the schema default keeps the field on
+  // every manifest so old and new repos parse identically. `skills` is the SAME
+  // array the capture below pushes into, and externalTools is filled once the
+  // referenced commands are known (WP-C).
+  const manifest: ToolManifest = { ...emptyManifest("codex"), skills };
 
   const out = { files, symlinks, secrets, warnings };
 
@@ -337,6 +348,23 @@ export async function capture(
     }
   }
 
+  // Scripts referenced from hooks.json / [mcp_servers.*] that live in $HOME but
+  // outside ~/.codex (WP-B). Emitted as shared/home/* files in this same result.
+  const commandRefs = await captureHomeExtras(ctx, p.hooksJson, p.configToml, out);
+
+  // The binaries behind those same commands (WP-C). Anything this capture
+  // already carries (a hook script now in shared/home, a file under ~/.codex) is
+  // restored as a FILE and must not be reported as a package to install.
+  manifest.externalTools = await collectExternalTools(commandRefs, {
+    home: ctx.vars.HOME,
+    capturedPaths: capturedAbsolutePaths(files, {
+      home: ctx.vars.HOME,
+      toolHome: p.home,
+      filesPrefix: REPO_PREFIX,
+    }),
+    toTemplate: (value) => ctx.templater.toTemplate(value, ctx.vars),
+  });
+
   // npm globals are workflow-level state shared across adapters.
   manifest.npmGlobals = await collectNpmGlobals();
 
@@ -348,6 +376,58 @@ export async function capture(
     secrets,
     warnings,
   };
+}
+
+/**
+ * Capture the scripts Codex's configs point at that live in $HOME but OUTSIDE
+ * ~/.codex (`~/.local/bin/graphify`, `~/.agents/hooks/*.sh`). Restoring
+ * hooks.json without them leaves every hook failing on the target machine.
+ *
+ * Both sources are parsed HERE rather than reusing the capture pass above:
+ * hooks.json is otherwise only ever copied verbatim, and processConfigToml
+ * mutates + re-serializes its parse (secrets redacted, machine paths templated),
+ * so it can no longer tell us which absolute paths the file mentioned. A parse
+ * failure is silent — capture.ts already warns loudly about an unparseable
+ * config.toml, and hooks.json's own warning would be redundant noise.
+ *
+ * Returns the ref list so the external-tool collector (WP-C) can classify the
+ * same commands without parsing either file again.
+ */
+async function captureHomeExtras(
+  ctx: CaptureContext,
+  hooksJsonAbs: string,
+  configTomlAbs: string,
+  out: { files: CapturedFile[]; secrets: SecretRef[]; warnings: string[] },
+): Promise<CommandRef[]> {
+  const refs: CommandRef[] = [];
+
+  if ((await ctx.fs.statKind(hooksJsonAbs)) === "file") {
+    try {
+      refs.push(
+        ...collectCommandRefs(JSON.parse(await ctx.fs.read(hooksJsonAbs)), "codex:hooks.json"),
+      );
+    } catch {
+      ctx.log.debug("codex: hooks.json is not valid JSON; no linked scripts scanned");
+    }
+  }
+
+  if ((await ctx.fs.statKind(configTomlAbs)) === "file") {
+    try {
+      const parsed = parseToml(await ctx.fs.read(configTomlAbs)) as Record<string, unknown>;
+      const servers = parsed["mcp_servers"];
+      if (servers !== undefined) {
+        refs.push(...collectCommandRefs({ mcp_servers: servers }, "codex:config.toml"));
+      }
+    } catch {
+      ctx.log.debug("codex: config.toml could not be parsed; no linked scripts scanned");
+    }
+  }
+
+  await captureLinkedHomeFiles(ctx, refs, "codex", out, {
+    excludeRoots: homeExcludeRoots(ctx.toolHome),
+  });
+
+  return refs;
 }
 
 /**

@@ -55,6 +55,9 @@ import {
   saveConfig,
 } from "../core/config/index.js";
 import { ensureLocalClone, ensureRemoteRepo } from "../core/repo/index.js";
+import { homeExcludeRoots } from "../core/homefiles/capture.js";
+import { suggestExtraPaths } from "../core/homefiles/suggest.js";
+import { homeDir } from "../platform/os.js";
 import { buildRepoAuthHooks } from "./_context.js";
 import { ensureDeps } from "./setup.js";
 import {
@@ -92,6 +95,8 @@ export interface InitOptions {
   includeSecrets?: boolean;
   /** Include memories/ in backups (default false; see R13). */
   includeMemories?: boolean;
+  /** Comma-separated extra $HOME paths to carry in shared/home (e.g. "~/.agents/hooks"). */
+  extraPaths?: string;
   /** Offer to run the first push after setup. Commander's --no-push => false. */
   push?: boolean;
   /** Legacy alias for --no-push. */
@@ -131,6 +136,10 @@ export function register(program: Command): void {
     )
     .option("--include-secrets", "allow secrets into the private repo (default: off)")
     .option("--include-memories", "include memories/ in pushes (default: off)")
+    .option(
+      "--extra-paths <list>",
+      "comma-separated extra $HOME paths to carry (e.g. ~/.agents/hooks,~/.agents/memory)",
+    )
     .option("--no-push", "do not offer to run the first push")
     .addOption(new Option("--no-backup", "legacy alias for --no-push").hideHelp())
     .option("-y, --yes", "accept defaults for anything not provided (no prompts)")
@@ -165,9 +174,11 @@ export async function run(opts: InitOptions): Promise<void> {
 
   const current = await loadConfigOrDefault();
 
-  // 1. Detect installed tools (tool-home presence + best-effort CLI probe).
+  // 1. Detect installed tools (tool-home presence + best-effort CLI probe) and
+  //    the $HOME dirs their configs link into (shared/home suggestions, WP-B).
   const detected = await detectTools();
-  reportDetection(detected);
+  const suggestedExtras = await detectExtraPathSuggestions();
+  reportDetection(detected, suggestedExtras);
 
   // 2. Provider.
   const provider = await resolveProvider(opts);
@@ -210,6 +221,11 @@ export async function run(opts: InitOptions): Promise<void> {
   });
   if (includeMemories === undefined) return; // cancelled
 
+  // 7b. Extra $HOME paths carried in shared/home (WP-B). Seeded with whatever is
+  //     already configured, else with the dirs the detection probe found.
+  const extraPaths = await resolveExtraPaths(opts, current.extraPaths, suggestedExtras);
+  if (extraPaths === undefined) return; // cancelled
+
   // 8. Sign in to the provider FIRST (gh/glab-first) so creating the PRIVATE
   //    repo and the subsequent clone "just work". For github/gitlab this ensures
   //    the CLI is installed (offering to install it) and logged in; for generic
@@ -243,6 +259,7 @@ export async function run(opts: InitOptions): Promise<void> {
     includeSecrets,
     includeMemories,
     tools,
+    extraPaths,
   });
 
   try {
@@ -328,7 +345,7 @@ async function detectTools(): Promise<DetectedTool[]> {
 }
 
 /** Print a short detection summary (decorative; goes to stderr via log). */
-function reportDetection(detected: DetectedTool[]): void {
+function reportDetection(detected: DetectedTool[], extraSuggestions: string[]): void {
   const lines = detected.map((d) => {
     const home = d.homePresent ? "config found" : "no config";
     const cli =
@@ -339,7 +356,34 @@ function reportDetection(detected: DetectedTool[]): void {
           : ", CLI missing";
     return `${displayName(d.id)}: ${home}${cli}`;
   });
+  if (extraSuggestions.length > 0) {
+    lines.push(
+      "",
+      `Linked script dirs in your home: ${extraSuggestions.join(", ")}`,
+      "(suggestions only — pass --extra-paths to carry them non-interactively)",
+    );
+  }
   note(lines.join("\n"), "Detected tools");
+}
+
+/**
+ * Probe the tool configs for the $HOME directories they link scripts into
+ * (~/.agents/hooks, ~/.local/bin, …) so the extraPaths prompt can be pre-filled.
+ * Best-effort: any failure yields no suggestions rather than blocking setup.
+ */
+async function detectExtraPathSuggestions(): Promise<string[]> {
+  try {
+    return await suggestExtraPaths({
+      fs,
+      home: homeDir(),
+      claudeHome: toolHomeDir("claude"),
+      codexHome: toolHomeDir("codex"),
+      excludeRoots: homeExcludeRoots(),
+    });
+  } catch (err) {
+    log.debug(`init: extraPaths suggestion probe skipped: ${errMessage(err)}`);
+    return [];
+  }
 }
 
 /** The tools to pre-select: detected ones, else the existing/default config set. */
@@ -562,6 +606,55 @@ async function resolveAutoBackup(
     return undefined;
   }
   return picked;
+}
+
+/**
+ * Resolve the extra $HOME paths carried in `shared/home`.
+ *
+ * Precedence: an explicit `--extra-paths` wins; `--yes` keeps whatever is
+ * ALREADY configured (an empty list on a first run); otherwise a text prompt
+ * pre-filled with the existing value, or with the detected suggestions when
+ * there is none. An empty answer means "carry nothing extra".
+ *
+ * Suggestions are deliberately NOT accepted by `--yes`: they are a guess derived
+ * from the commands this machine's configs happen to mention, and a
+ * non-interactive run must never silently start copying directories out of $HOME
+ * that the user never approved. `--extra-paths` is the non-interactive way in.
+ */
+async function resolveExtraPaths(
+  opts: InitOptions,
+  current: string[],
+  suggestions: string[],
+): Promise<string[] | undefined> {
+  if (opts.extraPaths !== undefined) return parsePathList(opts.extraPaths);
+  if (opts.yes) return current;
+
+  const seed = current.length > 0 ? current : suggestions;
+  const value = await text({
+    message:
+      "Extra home paths to carry (comma-separated, e.g. ~/.agents/hooks, ~/.agents/memory)",
+    placeholder: "~/.agents/hooks, ~/.agents/memory",
+    initialValue: seed.join(", "),
+    defaultValue: "",
+  });
+  if (isCancel(value)) {
+    cancel("Setup cancelled.");
+    return undefined;
+  }
+  return parsePathList(value);
+}
+
+/** Split a comma/newline-separated path list into trimmed, deduped entries. */
+function parsePathList(raw: string): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const part of raw.split(/[,\n]+/)) {
+    const value = part.trim();
+    if (value === "" || seen.has(value)) continue;
+    seen.add(value);
+    out.push(value);
+  }
+  return out;
 }
 
 /**

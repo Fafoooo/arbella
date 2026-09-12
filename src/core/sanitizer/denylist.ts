@@ -15,6 +15,11 @@
  *   - an exact (wildcard-free, slash-free) pattern matches if it equals ANY path
  *     segment OR equals the basename. So "auth.json" matches "auth.json" and
  *     "nested/auth.json"; ".DS_Store" matches it at any depth.
+ *   - a pattern starting with "/" is ROOT-ANCHORED: it only matches at the top
+ *     level of the relative path. "/ecc/" excludes ~/.claude/ecc without also
+ *     excluding the perfectly shareable ~/.claude/rules/ecc/. Use it whenever a
+ *     top-level noise dir has a name that can legitimately recur deeper in the
+ *     tree.
  *
  * Pure module: no imports, no fs, no clock.
  */
@@ -27,8 +32,10 @@ import type { ToolId } from "../../types.js";
 
 /**
  * Patterns that are dangerous/noisy for EVERY tool. Kept intentionally generic:
- * OS cruft, editor cruft, and SQLite databases (+ their WAL/SHM sidecars) which
- * are large, binary, and frequently hold session/telemetry data.
+ * OS cruft, editor cruft, SQLite databases (+ their WAL/SHM sidecars) which are
+ * large, binary and frequently hold session/telemetry data, vendored language
+ * runtimes (a python venv is machine-specific and huge), and the backup/merge
+ * droppings that editors and tools leave next to the real file.
  */
 export const COMMON_DENY: readonly string[] = [
   ".DS_Store",
@@ -36,6 +43,12 @@ export const COMMON_DENY: readonly string[] = [
   "desktop.ini",
   ".git/",
   "node_modules/",
+  // Vendored runtimes: never portable, always huge.
+  ".venv/",
+  "venv/",
+  "__pycache__/",
+  "*.pyc",
+  "*.pyo",
   "*.sqlite",
   "*.sqlite-shm",
   "*.sqlite-wal",
@@ -47,6 +60,11 @@ export const COMMON_DENY: readonly string[] = [
   "*.pid",
   "*.swp",
   "*.tmp",
+  // Backup / merge droppings ("settings.json.bak-routing-20260829", "x.js.orig").
+  "*.bak",
+  "*.bak-*",
+  "*.orig",
+  "*.rej",
   ".tmp/",
   "tmp/",
   "cache/",
@@ -91,6 +109,21 @@ export const CLAUDE_DENY: readonly string[] = [
   ".last-cleanup",
   ".last-update-result.json",
   ".last-*",
+  // Top-level noise dirs. ROOT-ANCHORED on purpose: `rules/ecc/...` and a skill
+  // called `feedback/` are legitimate content, only the ~/.claude/<name> ones are
+  // machine state. security/ holds a python venv, ecc/ a state.db, feedback/ raw
+  // session feedback, plugins/ clones + caches that the manifest reinstalls,
+  // .pi/ another tool's local state.
+  "/security/",
+  "/ecc/",
+  "/feedback/",
+  "/plugins/",
+  "/.pi/",
+  // Server-pushed policy/catalog caches: refetched on first run, never portable.
+  "remote-settings.json",
+  "policy-limits.json",
+  "plugin-catalog-cache.json",
+  "blocklist.json",
 ];
 
 /**
@@ -294,6 +327,10 @@ function segmentMatches(pattern: string, segment: string): boolean {
  * True if `relativePath` (POSIX, relative to a tool home) matches any pattern.
  *
  * Semantics per pattern:
+ *   - leading "/"   -> ROOT-ANCHORED: the pattern must match starting at the
+ *                       first segment (the whole path for a file pattern, a
+ *                       leading run for a dir pattern). Everything else below is
+ *                       depth-agnostic.
  *   - trailing "/"  -> directory prefix match: the named directory itself OR
  *                       anything underneath it, at any depth.
  *   - contains "/"  -> path-suffix match: the pattern's segments must appear as
@@ -303,35 +340,57 @@ function segmentMatches(pattern: string, segment: string): boolean {
  *   - single token  -> segment OR basename match at any depth.
  */
 export function matchesDeny(relativePath: string, patterns: string[]): boolean {
+  return firstMatchingDeny(relativePath, patterns) !== null;
+}
+
+/**
+ * Like {@link matchesDeny}, but returns the FIRST pattern (verbatim, as given
+ * in `patterns`) that matched instead of a boolean — for callers that need to
+ * tell the user WHY a path was excluded, not just THAT it was. Returns null
+ * when nothing matches. Pure; shares matchesDeny's exact matching semantics
+ * (matchesDeny is defined in terms of this function, so the two can never
+ * drift apart).
+ */
+export function firstMatchingDeny(relativePath: string, patterns: string[]): string | null {
   const segs = toSegments(relativePath);
-  if (segs.length === 0) return false;
+  if (segs.length === 0) return null;
 
   for (const raw of patterns) {
     if (!raw) continue;
+    const anchored = raw.startsWith("/");
     const isDir = raw.endsWith("/");
     const pattern = isDir ? raw.slice(0, -1) : raw;
     const patSegs = toSegments(pattern);
     if (patSegs.length === 0) continue;
 
+    if (anchored) {
+      // Root-anchored: match from segment 0. A dir pattern also covers the
+      // subtree below it; a file pattern must consume the whole path.
+      if (matchesHead(segs, patSegs) && (isDir || patSegs.length === segs.length)) {
+        return raw;
+      }
+      continue;
+    }
+
     if (isDir) {
       // Directory prefix: find the pattern's segment sequence anywhere such that
       // the path either IS that dir or continues beneath it.
-      if (containsSequence(segs, patSegs, /* requireMore */ false)) return true;
+      if (containsSequence(segs, patSegs, /* requireMore */ false)) return raw;
       continue;
     }
 
     if (patSegs.length > 1) {
       // Multi-segment exact-ish pattern: must appear as a contiguous tail.
-      if (matchesTail(segs, patSegs)) return true;
+      if (matchesTail(segs, patSegs)) return raw;
       continue;
     }
 
     // Single-segment pattern: match against ANY segment (covers basename too).
     const p = patSegs[0]!;
-    if (segs.some((s) => segmentMatches(p, s))) return true;
+    if (segs.some((s) => segmentMatches(p, s))) return raw;
   }
 
-  return false;
+  return null;
 }
 
 /**
@@ -355,6 +414,15 @@ function containsSequence(segs: string[], patSegs: string[], requireMore: boolea
     if (!requireMore || consumedEnd < segs.length) return true;
   }
   return false;
+}
+
+/** True if `patSegs` matches the leading segments of `segs` (a path prefix). */
+function matchesHead(segs: string[], patSegs: string[]): boolean {
+  if (patSegs.length > segs.length) return false;
+  for (let j = 0; j < patSegs.length; j++) {
+    if (!segmentMatches(patSegs[j]!, segs[j]!)) return false;
+  }
+  return true;
 }
 
 /** True if `patSegs` matches the final segments of `segs` (a path suffix). */
