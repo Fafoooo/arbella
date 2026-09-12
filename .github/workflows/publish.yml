@@ -1,28 +1,38 @@
 name: Publish to npm
 
 on:
-  release:
-    types: [published]
+  push:
+    branches: [main]
 
 permissions:
   contents: read
-  id-token: write
+
+concurrency:
+  group: npm-release-main
+  cancel-in-progress: false
 
 jobs:
+  checks:
+    uses: ./.github/workflows/ci.yml
+
   publish:
+    needs: checks
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
 
     steps:
-      - name: Checkout release tag
+      - name: Checkout history and release tags
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.release.tag_name }}
+          fetch-depth: 0
 
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
           node-version: 24
-          registry-url: https://registry.npmjs.org
 
       - name: Use recent npm
         run: npm install -g npm@latest
@@ -30,17 +40,10 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Verify release version
-        run: |
-          version="$(node -p "require('./package.json').version")"
-          tag="${GITHUB_REF_NAME}"
-          if [ "$tag" != "v$version" ]; then
-            echo "Release tag $tag does not match package.json version $version"
-            exit 1
-          fi
+      - name: Install release dependencies
+        run: npm ci --prefix .github/release
 
-      - name: Typecheck and test
-        run: npm run prepublishOnly
-
-      - name: Publish to npm
-        run: npm publish --provenance
+      - name: Version, publish to npm, and create GitHub release
+        run: node .github/release/node_modules/semantic-release/bin/semantic-release.js --extends ./.github/release/release.config.cjs
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
