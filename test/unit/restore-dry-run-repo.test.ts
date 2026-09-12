@@ -10,10 +10,15 @@ import path from "node:path";
 
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const gitMocks = vi.hoisted(() => ({ isGitRepo: vi.fn(), clone: vi.fn() }));
-const { isGitRepo, clone } = gitMocks;
+const gitMocks = vi.hoisted(() => ({ isGitRepo: vi.fn(), clone: vi.fn(), setRemote: vi.fn() }));
+const authMocks = vi.hoisted(() => ({ ensureRepoAuth: vi.fn() }));
+const { isGitRepo, clone, setRemote } = gitMocks;
 
 vi.mock("../../src/core/repo/git.js", () => gitMocks);
+vi.mock("../../src/core/auth/index.js", async (importOriginal) => ({
+  ...await importOriginal<typeof import("../../src/core/auth/index.js")>(),
+  ensureRepoAuth: authMocks.ensureRepoAuth,
+}));
 vi.mock("../../src/core/config/index.js", () => ({
   loadConfigOrDefault: async () => ({
     repo: { provider: "generic", url: "", localPath: "" },
@@ -36,6 +41,8 @@ function repo(localPath: string): RepoConfig {
 beforeEach(() => {
   isGitRepo.mockReset();
   clone.mockReset();
+  setRemote.mockReset();
+  authMocks.ensureRepoAuth.mockReset();
 });
 
 describe("prepareDryRunRepo", () => {
@@ -87,6 +94,33 @@ describe("prepareDryRunRepo", () => {
 
     expect(cloneDest).not.toBe("");
     await expect(fsp.stat(path.dirname(cloneDest))).rejects.toThrow();
+  });
+
+  it("reuses stored private-repo credentials without prompting or keeping the authenticated URL", async () => {
+    isGitRepo.mockResolvedValue(false);
+    const authenticated = "https://oauth2:PREVIEW_TEST_TOKEN@example.test/backup.git";
+    clone.mockRejectedValueOnce(new Error("fatal: Authentication failed"));
+    clone.mockImplementationOnce(async (_url: string, dest: string) => {
+      await fsp.mkdir(dest, { recursive: true });
+    });
+    authMocks.ensureRepoAuth.mockResolvedValue({
+      needsAuth: true,
+      authUrl: authenticated,
+      reason: "Reused a stored test token",
+    });
+
+    const preview = await prepareDryRunRepo(repo(path.join(os.tmpdir(), "arbella-private-preview")));
+    try {
+      expect(authMocks.ensureRepoAuth).toHaveBeenCalledWith(expect.objectContaining({
+        interactive: false,
+        requireAuth: true,
+      }));
+      expect(clone).toHaveBeenLastCalledWith(authenticated, preview.repoRoot);
+      expect(setRemote).toHaveBeenCalledWith(preview.repoRoot, "origin", "https://example.test/backup.git");
+    } finally {
+      await preview.cleanup();
+    }
+    await expect(fsp.stat(path.dirname(preview.repoRoot))).rejects.toThrow();
   });
 
   it("cleans the temporary clone when dry-run planning fails", async () => {

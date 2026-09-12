@@ -1405,11 +1405,10 @@ export async function prepareDryRunRepo(repo: RepoConfig): Promise<DryRunRepo> {
   const repoRoot = path.join(tempRoot, "repo");
   try {
     log.step("Cloning backup repo into a temporary directory for this preview…");
-    // Deliberately bypass ensureLocalClone/buildRepoAuthHooks: a preview must not
-    // create a persistent clone, prompt, install a provider CLI, or persist creds.
-    // git.clone itself disables terminal credential prompts and can still reuse an
-    // already-configured credential helper for a private repo.
-    await git.clone(repo.url, repoRoot);
+    // Reuse existing Git or Arbella credentials, but never prompt, install a
+    // provider CLI, or acquire/persist new credentials. The shared clone helper
+    // also scrubs any authenticated URL from the temporary origin after cloning.
+    await ensureLocalClone({ ...repo, localPath: repoRoot }, { interactive: false });
   } catch (err) {
     await fsp.rm(tempRoot, { recursive: true, force: true });
     throw err;
