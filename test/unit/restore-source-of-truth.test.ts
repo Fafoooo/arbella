@@ -15,10 +15,17 @@
  * "Would deploy" line has to disappear alongside the write.
  */
 
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { promises as fsp } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+
+// Keep real file reads/writes, but do not depend on the host's installed CLIs
+// or the latency of `where`/`which` while testing restore policy.
+vi.mock("../../src/platform/install.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../src/platform/install.js")>()),
+  which: async () => false,
+}));
 
 import { itPosixHost } from "../helpers/platform.js";
 

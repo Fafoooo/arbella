@@ -17,10 +17,17 @@
  * does.
  */
 
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { promises as fsp } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+
+// These tests exercise real filesystem safety, independently of the host's
+// installed CLIs. A slow `where`/`which` probe must not consume the test timeout.
+vi.mock("../../src/platform/install.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../src/platform/install.js")>()),
+  which: async () => false,
+}));
 
 import { restore as restoreClaude, planActions } from "../../src/adapters/claude/restore.js";
 import { REPO_PREFIX } from "../../src/adapters/claude/paths.js";
@@ -119,8 +126,7 @@ describe("claude restore: claude/files/ symlink gate", () => {
     });
 
     expect(await fsp.readFile(path.join(sharedSkill, "SKILL.md"), "utf8")).toBe("# Foo skill\n");
-    // Only the symlink gate matters here; an unrelated "claude CLI not found"
-    // warning appears on CI runners that have no `claude` binary on PATH.
+    // Only the symlink gate matters here; the absent CLI is stubbed above.
     expect(warnings.filter((w) => w.includes("symlink"))).toEqual([]);
   });
 
