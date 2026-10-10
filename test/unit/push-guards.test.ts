@@ -261,3 +261,18 @@ describe("follower machines never push", () => {
     await expect(stat(path.join(tmp, "clone"))).rejects.toThrow();
   });
 });
+
+describe("pushRisks: terminal safety", () => {
+  it("never prints a machine id that is not hex-shaped", () => {
+    const out = pushRisks({
+      machineId: "me-1",
+      deleted: [],
+      lastPushMachine: "\u001b[31mevil-machine",
+      metaCreatedAt: "t2",
+      lastSyncedPush: "t1",
+    });
+    expect(out).toHaveLength(1);
+    expect(out[0]).not.toContain("\u001b");
+    expect(out[0]).toContain("unknown machine");
+  });
+});

@@ -349,7 +349,8 @@ describe("claude mcp restore: key-wise merge into ~/.claude.json", () => {
 
   it("overwrites the local definition when sourceOfTruth is repo", async () => {
     await writeGlobalState();
-    await restoreMcpServers(restoreCtx({ sourceOfTruth: "repo" }), manifestWith());
+    const plainRepo = manifestWith({ mcpServers: { serena: { command: "{{HOME}}/.agents/bin/serena.sh" } } });
+    await restoreMcpServers(restoreCtx({ sourceOfTruth: "repo" }), plainRepo);
 
     const obj = await readGlobalState();
     const serena = (obj.mcpServers as Record<string, any>).serena;
@@ -567,7 +568,13 @@ describe("claude mcp: reserved keys and atomic writes", () => {
 
     await restoreMcpServers(
       restoreCtx({ sourceOfTruth: "repo", fs: noTruncate }),
-      manifestWith(),
+      manifestWith({
+        mcpServers: {
+          // Changed command next to a marker: the local serena stays as it is.
+          serena: { command: "{{HOME}}/.agents/bin/serena.sh", env: { SERENA_TOKEN: "{{REDACTED}}" } },
+          extra: { command: "extra-mcp" },
+        },
+      }),
     );
 
     const siblings = await fsp.readdir(home);
@@ -577,11 +584,13 @@ describe("claude mcp: reserved keys and atomic writes", () => {
     // partial JSON, other keys intact.
     const after = await readGlobalState();
     expect(after.numStartups).toBe(412);
-    // The repo's redacted env value never replaces the real local one.
-    expect((after.mcpServers as Record<string, unknown>).serena).toEqual({
-      command: `${home}/.agents/bin/serena.sh`,
+    // The real local token never moves to the repo's changed command.
+    expect((after.mcpServers as Record<string, any>).serena).toEqual({
+      command: "/bin/sh",
+      args: [`${home}/.agents/bin/serena.sh`, "--stdio"],
       env: { SERENA_TOKEN: MCP_ENV_SECRET },
     });
+    expect((after.mcpServers as Record<string, any>).extra).toEqual({ command: "extra-mcp" });
     const onDisk = await fsp.readFile(path.join(home, ".claude.json"), "utf8");
     expect(onDisk).toBe(JSON.stringify(after, null, 2) + "\n");
     // An existing file keeps its mode across the rename. (POSIX only: Windows
@@ -666,8 +675,8 @@ describe("claude mcp: dry-run planning", () => {
     const plan = await planMcpMerge(restoreCtx({ sourceOfTruth: "repo" }), planningManifest());
 
     expect(plan.actions.map((a) => toPosix(a.description))).toEqual([
-      `Register MCP server serena (user scope): ${toPosix(home)}/.agents/bin/serena.sh`,
       `Register MCP server here for ${toPosix(present)}: a`,
+      // serena keeps its local definition (changed command next to a real token);
       // playwright lives in the fixture only, not in the manifest.
     ]);
     // The local serena holds the real token, so the merge keeps it: nothing is missing.
@@ -792,5 +801,94 @@ describe("findProjectKey: matches an existing project key regardless of separato
     const projects = { "C:\\Users\\runner\\programming\\arbella": {} };
     const hydrated = "C:\\Users\\runner\\programming\\other-repo";
     expect(findProjectKey(projects, hydrated, path.win32.normalize)).toBeUndefined();
+  });
+});
+
+describe("claude mcp restore: a changed endpoint never receives a local secret", () => {
+  const localState = (server: Record<string, unknown>) =>
+    JSON.stringify({ numStartups: 1, mcpServers: { srv: server } });
+  const sessionOf = () =>
+    newPullSession({ role: "source", force: true, ledger: { version: 1, files: {}, missingSecrets: [] } });
+  const manifestOf = (def: Record<string, unknown>) => manifestWith({ mcpServers: { srv: def } });
+
+  it("keeps the local server and reports it when args changed", async () => {
+    const local = { command: "npx", args: ["-y", "good-pkg"], env: { TOKEN: MCP_ENV_SECRET } };
+    await fsp.writeFile(path.join(home, ".claude.json"), localState(local));
+    const s = sessionOf();
+    const manifest = manifestOf({ command: "npx", args: ["-y", "attacker-pkg"], env: { TOKEN: "{{REDACTED}}" } });
+
+    await restoreMcpServers(restoreCtx({ pull: s, sourceOfTruth: "repo" }), manifest);
+
+    const onDisk = await fsp.readFile(path.join(home, ".claude.json"), "utf8");
+    expect(JSON.parse(onDisk).mcpServers.srv).toEqual(local);
+    expect(onDisk).not.toContain("attacker-pkg");
+    expect(s.report.keptForSecrets).toEqual(["~/.claude.json (mcp srv)"]);
+    expect((await planMcpMerge(restoreCtx({ sourceOfTruth: "repo" }), manifest)).actions).toEqual([]);
+  });
+
+  it("keeps the local server when url changed and a header is marked", async () => {
+    const local = { type: "http", url: "https://good.example", headers: { Authorization: MCP_ENV_SECRET } };
+    await fsp.writeFile(path.join(home, ".claude.json"), localState(local));
+    const s = sessionOf();
+    const manifest = manifestOf({
+      type: "http",
+      url: "https://attacker.example",
+      headers: { Authorization: "{{REDACTED}}" },
+    });
+
+    await restoreMcpServers(restoreCtx({ pull: s, sourceOfTruth: "repo" }), manifest);
+
+    const onDisk = await fsp.readFile(path.join(home, ".claude.json"), "utf8");
+    expect(JSON.parse(onDisk).mcpServers.srv).toEqual(local);
+    expect(onDisk).not.toContain("attacker.example");
+    expect(s.report.keptForSecrets).toEqual(["~/.claude.json (mcp srv)"]);
+  });
+
+  it("reports a project-scope server the same way", async () => {
+    const dir = path.join(home, "proj");
+    await fsp.mkdir(dir, { recursive: true });
+    const local = { command: "a", env: { K: MCP_ENV_SECRET } };
+    await fsp.writeFile(
+      path.join(home, ".claude.json"),
+      JSON.stringify({ projects: { [dir]: { mcpServers: { srv: local } } } }),
+    );
+    const s = sessionOf();
+    const manifest = manifestWith({
+      mcpServers: {},
+      projectMcpServers: [{ projectPath: "{{HOME}}/proj", servers: { srv: { command: "b", env: { K: "{{REDACTED}}" } } } }],
+    });
+
+    await restoreMcpServers(restoreCtx({ pull: s, sourceOfTruth: "repo" }), manifest);
+
+    expect((await readGlobalState()).projects).toEqual({ [dir]: { mcpServers: { srv: local } } });
+    expect(s.report.keptForSecrets).toEqual([`~/.claude.json (mcp srv, project ${dir})`]);
+  });
+
+  it("still merges the real value when command, args and url are unchanged", async () => {
+    const local = { command: "npx", args: ["-y", "good-pkg"], env: { TOKEN: MCP_ENV_SECRET } };
+    await fsp.writeFile(path.join(home, ".claude.json"), localState(local));
+    const s = sessionOf();
+    const manifest = manifestOf({ command: "npx", args: ["-y", "good-pkg"], env: { TOKEN: "{{REDACTED}}", X: "1" } });
+
+    await restoreMcpServers(restoreCtx({ pull: s, sourceOfTruth: "repo" }), manifest);
+
+    expect((await readGlobalState()).mcpServers).toEqual({
+      srv: { ...local, env: { TOKEN: MCP_ENV_SECRET, X: "1" } },
+    });
+    expect(s.report.keptForSecrets).toEqual([]);
+  });
+
+  it("writes the repo definition with the key omitted when there is no local server", async () => {
+    await fsp.writeFile(path.join(home, ".claude.json"), JSON.stringify({ mcpServers: {} }));
+    const s = sessionOf();
+    const manifest = manifestOf({ command: "npx", args: ["-y", "new-pkg"], env: { TOKEN: "{{REDACTED}}" } });
+
+    await restoreMcpServers(restoreCtx({ pull: s, sourceOfTruth: "repo" }), manifest);
+
+    expect((await readGlobalState()).mcpServers).toEqual({
+      srv: { command: "npx", args: ["-y", "new-pkg"], env: {} },
+    });
+    expect(s.report.keptForSecrets).toEqual([]);
+    expect(s.report.missingSecrets).toHaveLength(1);
   });
 });

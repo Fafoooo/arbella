@@ -125,15 +125,17 @@ function nextContent(a: {
   localText?: string;
   content: string | Buffer;
   repair: boolean;
-}): { next: string | Buffer; missing: string[][]; merged: boolean } {
+}): { next: string | Buffer; missing: string[][]; merged: boolean; unsafe: boolean } {
   const { kind, repoText, localText } = a;
-  const asIs = { next: a.content, missing: [], merged: false };
+  const asIs = { next: a.content, missing: [], merged: false, unsafe: false };
   if (!kind || repoText === undefined) return asIs;
   const repaired =
     a.repair && localText !== undefined ? repairRedactedText(kind, localText, repoText) : undefined;
   const out =
     repaired ?? (repoText.includes(REDACTED) ? mergeRedactedText(kind, repoText, localText) : undefined);
-  return out ? { next: out.text, missing: out.missing, merged: true } : asIs;
+  return out
+    ? { next: out.text, missing: out.missing, merged: true, unsafe: out.unsafe.length > 0 }
+    : asIs;
 }
 
 /** The local hook file equals `nextText` once arbella's own autobackup hook is left out. */
@@ -163,7 +165,7 @@ export async function planPlacement(ctx: PlaceCtx, req: PlaceRequest): Promise<P
         ? localText.includes(REDACTED)
         : isRedactedFormOf(localText, repoText);
 
-  const { next, missing, merged } = nextContent({
+  const { next, missing, merged, unsafe } = nextContent({
     kind,
     repoText,
     localText,
@@ -176,10 +178,13 @@ export async function planPlacement(ctx: PlaceCtx, req: PlaceRequest): Promise<P
   // Replacing the local file loses nothing real when the repo has no marker,
   // there is no local text or it holds markers itself, or the structured merge
   // carries its values over.
+  // An unsafe merge (a changed command/args/url next to a marker) never counts:
+  // the real value would stay behind or go to a new endpoint, so the file is kept.
   const secretSafe =
-    !repoHasMarkers ||
-    (localText?.includes(REDACTED) ?? true) ||
-    (merged && isPlain(parseStructured(kind!, localText!)));
+    !unsafe &&
+    (!repoHasMarkers ||
+      (localText?.includes(REDACTED) ?? true) ||
+      (merged && isPlain(parseStructured(kind!, localText!))));
 
   const hashOf = (b: Buffer): string => placementHash(req.dest, b, repoText);
 
@@ -204,7 +209,9 @@ export async function planPlacement(ctx: PlaceCtx, req: PlaceRequest): Promise<P
     ledgerMatch,
     secretSafe,
   };
-  const outcome = unreadable ? (force ? "written" : "kept") : decide(inputs);
+  const decided = unreadable ? (force ? "written" : "kept") : decide(inputs);
+  // decide() lets a marker-broken local file through before the secret check.
+  const outcome = unsafe && decided === "written" ? "kept" : decided;
 
   // Identical via secrets: nothing is missing. A structured file records its
   // secret-blind hash so a later repo change still reaches a follower; a text
@@ -223,7 +230,9 @@ export async function planPlacement(ctx: PlaceCtx, req: PlaceRequest): Promise<P
     stillRedacted:
       outcome === "written" ? nextBytes.includes(REDACTED) : (local?.includes(REDACTED) ?? false),
     keptForSecrets:
-      outcome === "kept" && !unreadable && decide({ ...inputs, secretSafe: true }) === "written",
+      outcome === "kept" &&
+      !unreadable &&
+      (unsafe || decide({ ...inputs, secretSafe: true }) === "written"),
   };
 }
 
@@ -301,6 +310,11 @@ export function recordExternalWrite(
 
 export function noteMissingSecrets(ctx: PlaceCtx, e: MissingSecret[]): void {
   if (ctx.pull && !ctx.dryRun) ctx.pull.report.missingSecrets.push(...e);
+}
+
+/** Entries for the pull summary: kept although the repo would replace them, to protect a real local value. */
+export function noteKeptForSecrets(ctx: PlaceCtx, what: string[]): void {
+  if (ctx.pull && !ctx.dryRun) ctx.pull.report.keptForSecrets.push(...what);
 }
 
 export function newPullSession(a: { role: Role; force: boolean; ledger: Ledger }): PullSession {

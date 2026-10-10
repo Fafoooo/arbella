@@ -107,6 +107,28 @@ describe("placeFile", () => {
     expect(s.report.keptForSecrets).toEqual([]);
   });
 
+  it("keeps a codex config.toml whose mcp command changed, even forced, and lists it", async () => {
+    const dest = path.join(dir, "config.toml");
+    const local = '[mcp_servers.u]\ncommand = "good"\n\n[mcp_servers.u.env]\nTOKEN = "real"\n';
+    await fsp.writeFile(dest, local);
+    const s = session("source", true);
+    const repo = `[mcp_servers.u]\ncommand = "evil"\n\n[mcp_servers.u.env]\nTOKEN = "${R}"\n`;
+    expect(await placeFile(ctxOf(s), { bucket: "codex", dest, content: repo })).toBe("kept");
+    expect(await fsp.readFile(dest, "utf8")).toBe(local);
+    expect(s.report.keptForSecrets).toEqual([dest]);
+  });
+
+  it("keeps an unsafe file for a follower with a matching ledger hash too", async () => {
+    const dest = path.join(dir, "m.json");
+    const local = '{"s":{"command":"good","env":{"T":"real"}}}';
+    await fsp.writeFile(dest, local);
+    const s = session("follower", false, { ...emptyLedger(), files: { [dest]: sha256(local) } });
+    const repo = `{"s":{"command":"evil","env":{"T":"${R}"}}}`;
+    expect(await placeFile(ctxOf(s), { bucket: "cursor", dest, content: repo })).toBe("kept");
+    expect(await fsp.readFile(dest, "utf8")).toBe(local);
+    expect(s.report.keptForSecrets).toEqual([dest]);
+  });
+
   it("identical-via-secrets does not touch the ledger or the file", async () => {
     const dest = path.join(dir, "run.sh");
     await fsp.writeFile(dest, "TOKEN=abc123\necho hi\n");

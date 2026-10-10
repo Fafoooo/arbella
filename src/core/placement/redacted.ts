@@ -4,6 +4,7 @@
  * local tool. These helpers merge the real local value back in, or report the
  * key as missing. Never logs or returns anything but key paths for omissions.
  */
+import { isDeepStrictEqual } from "node:util";
 import { parse as parseToml, stringify as stringifyToml } from "smol-toml";
 import { REDACTED } from "../sanitizer/patterns.js";
 import { detectJsonIndent, parseJsonOrJsonc } from "../sanitizer/index.js";
@@ -22,41 +23,65 @@ export function hasMarker(v: unknown): boolean {
 }
 
 /**
+ * Keys that say WHERE a server's secrets go. When one differs between the repo
+ * and the local object, no real local value may be reused inside that object:
+ * it would be handed to a different executable or endpoint.
+ */
+const BINDING_KEYS = ["command", "args", "url"] as const;
+
+/** Equal, or equal once the repo's marker stands for the local real value (e.g. `--token <marker>`). */
+const sameBinding = (repo: unknown, local: unknown): boolean =>
+  isDeepStrictEqual(repo, local) ||
+  (hasMarker(repo) &&
+    local !== undefined &&
+    matchesWithSecrets(JSON.stringify(repo), JSON.stringify(local)));
+
+const bindingChanged = (repo: Plain, local: Plain): boolean =>
+  BINDING_KEYS.some((k) => !sameBinding(repo[k], local[k]));
+
+/**
  * Merge a repo value (may contain markers) with the local one. A marker leaf (a
  * string, or an array containing a marker) takes the local value at the same key
  * path when that is real; otherwise only that key is omitted and its path
- * reported. A local marker counts as no value.
+ * reported. A local marker counts as no value. Inside an object whose binding
+ * keys (command, args, url) differ from the local object, no local value is
+ * reused: such a leaf is omitted and its path listed in `unsafe` instead.
  */
 export function mergeRedacted(
   repo: unknown,
   local: unknown,
-): { value: unknown; missing: string[][] } {
-  if (!isPlain(repo)) return { value: repo, missing: [] };
-  return mergeObject(repo, isPlain(local) ? local : {}, []);
+): { value: unknown; missing: string[][]; unsafe: string[][] } {
+  if (!isPlain(repo)) return { value: repo, missing: [], unsafe: [] };
+  return mergeObject(repo, isPlain(local) ? local : undefined, true, []);
 }
 
 function mergeObject(
   repo: Plain,
-  local: Plain,
+  local: Plain | undefined,
+  reuse: boolean,
   path: string[],
-): { value: Plain; missing: string[][] } {
+): { value: Plain; missing: string[][]; unsafe: string[][] } {
   const value: Plain = {};
   const missing: string[][] = [];
+  const unsafe: string[][] = [];
+  const trusted = reuse && !(local && bindingChanged(repo, local));
   for (const [key, rv] of Object.entries(repo)) {
-    const lv = local[key];
+    const lv = local?.[key];
     const here = [...path, key];
     if (isPlain(rv)) {
-      const sub = mergeObject(rv, isPlain(lv) ? lv : {}, here);
+      const sub = mergeObject(rv, isPlain(lv) ? lv : undefined, trusted, here);
       value[key] = sub.value;
       missing.push(...sub.missing);
+      unsafe.push(...sub.unsafe);
     } else if (hasMarker(rv)) {
-      if (lv !== undefined && !hasMarker(lv)) value[key] = lv;
-      else missing.push(here);
+      if (lv === undefined || hasMarker(lv)) missing.push(here);
+      else if (trusted) value[key] = lv;
+      else unsafe.push(here);
     } else {
       value[key] = rv;
     }
   }
-  return { value, missing };
+  return { value, missing, unsafe };
 }
 
 export function structuredKind(dest: string): "json" | "toml" | undefined {
@@ -86,13 +111,13 @@ export function mergeRedactedText(
   kind: "json" | "toml",
   repoText: string,
   localText?: string,
-): { text: string; missing: string[][] } | undefined {
-  if (!repoText.includes(REDACTED)) return { text: repoText, missing: [] };
+): { text: string; missing: string[][]; unsafe: string[][] } | undefined {
+  if (!repoText.includes(REDACTED)) return { text: repoText, missing: [], unsafe: [] };
   const repo = parseStructured(kind, repoText);
   if (!isPlain(repo)) return undefined;
   const local = localText === undefined ? undefined : parseStructured(kind, localText);
-  const { value, missing } = mergeRedacted(repo, local);
-  return { text: serialize(kind, value as Plain, repoText), missing };
+  const { value, missing, unsafe } = mergeRedacted(repo, local);
+  return { text: serialize(kind, value as Plain, repoText), missing, unsafe };
 }
 
 /** `value` as `kind` text; JSON keeps the indent and trailing newline of `like`. */
@@ -145,11 +170,12 @@ export function repairRedactedText(
   kind: "json" | "toml",
   localText: string,
   repoText: string,
-): { text: string; missing: string[][] } | undefined {
+): { text: string; missing: string[][]; unsafe: string[][] } | undefined {
   const local = parseStructured(kind, localText);
   if (!isPlain(local)) return undefined;
   const { value, missing } = repairRedacted(local, parseStructured(kind, repoText));
-  return { text: serialize(kind, value as Plain, localText), missing };
+  // Starts from the local file, so no local value travels anywhere.
+  return { text: serialize(kind, value as Plain, localText), missing, unsafe: [] };
 }
 
 /**

@@ -828,6 +828,8 @@ export const MASS_DELETE_MIN = 25;
 export const MEMORY_DELETE_MIN = 3;
 /** Id characters shown when naming another machine; never the whole id. */
 const MACHINE_ID_SHOWN = 8;
+/** The id comes from the repo's arbella.json; only a UUID-like one is echoed to the terminal. */
+const MACHINE_ID_SHAPE = /^[0-9a-f-]{8,64}$/i;
 
 /** Repo roots that hold memories. Only managed when `includeMemories` is on. */
 const MEMORY_ROOTS: readonly string[] = ["claude/memories", "codex/files/memories"];
@@ -891,10 +893,10 @@ export function pushRisks(args: {
     lastPushMachine !== machineId &&
     metaCreatedAt !== lastSyncedPush
   ) {
-    risks.push(
-      `Another machine (${lastPushMachine.slice(0, MACHINE_ID_SHOWN)}) pushed last and ` +
-        "this machine has not pulled since.",
-    );
+    const who = MACHINE_ID_SHAPE.test(lastPushMachine)
+      ? `Another machine (${lastPushMachine.slice(0, MACHINE_ID_SHOWN)})`
+      : "An unknown machine";
+    risks.push(`${who} pushed last and this machine has not pulled since.`);
   }
   if (deleted.length >= MASS_DELETE_MIN) {
     risks.push(`This push would delete ${deleted.length} files from the backup repo.`);

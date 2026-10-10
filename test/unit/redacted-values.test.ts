@@ -30,9 +30,10 @@ describe("hasMarker", () => {
 describe("mergeRedacted", () => {
   it("keeps a real local value for a redacted env key", () => {
     const repo = { mcpServers: { u: { command: "x", env: { P: R, Q: "1" } } } };
-    const local = { mcpServers: { u: { env: { P: "local-value" } } } };
+    const local = { mcpServers: { u: { command: "x", env: { P: "local-value" } } } };
     const r = mergeRedacted(repo, local);
     expect(r.value).toEqual({ mcpServers: { u: { command: "x", env: { P: "local-value", Q: "1" } } } });
+    expect(r.unsafe).toEqual([]);
     expect(r.missing).toEqual([]);
   });
 
@@ -68,9 +69,9 @@ describe("mergeRedacted", () => {
   });
 
   it("returns non-object roots untouched", () => {
-    expect(mergeRedacted("x", {})).toEqual({ value: "x", missing: [] });
-    expect(mergeRedacted([1], {})).toEqual({ value: [1], missing: [] });
-    expect(mergeRedacted(null, {})).toEqual({ value: null, missing: [] });
+    expect(mergeRedacted("x", {})).toEqual({ value: "x", missing: [], unsafe: [] });
+    expect(mergeRedacted([1], {})).toEqual({ value: [1], missing: [], unsafe: [] });
+    expect(mergeRedacted(null, {})).toEqual({ value: null, missing: [], unsafe: [] });
   });
 });
 
@@ -86,8 +87,8 @@ describe("structuredKind", () => {
 describe("mergeRedactedText", () => {
   it("returns the repo text byte-identical when it has no marker", () => {
     const t = '{"a":   1}';
-    expect(mergeRedactedText("json", t, '{"a":2}')).toEqual({ text: t, missing: [] });
-    expect(mergeRedactedText("toml", "a  =  1", undefined)).toEqual({ text: "a  =  1", missing: [] });
+    expect(mergeRedactedText("json", t, '{"a":2}')).toEqual({ text: t, missing: [], unsafe: [] });
+    expect(mergeRedactedText("toml", "a  =  1", undefined)).toEqual({ text: "a  =  1", missing: [], unsafe: [] });
   });
 
   it("merges JSON keeping indent and trailing newline", () => {
@@ -260,7 +261,7 @@ describe("repairRedactedText", () => {
     const local = `{\n    "env": { "S": "${R}" },\n    "permissions": { "allow": [] }\n}`;
     const out = repairRedactedText("json", local, '{"env":{"S":"1"}}');
     expect(out?.text).toBe('{\n    "env": {\n        "S": "1"\n    },\n    "permissions": {\n        "allow": []\n    }\n}');
-    expect(repairRedactedText("json", `{"k":"${R}"}\n`, "{nope")).toEqual({ text: "{}\n", missing: [["k"]] });
+    expect(repairRedactedText("json", `{"k":"${R}"}\n`, "{nope")).toEqual({ text: "{}\n", missing: [["k"]], unsafe: [] });
   });
 
   it("round-trips TOML and keeps a local-only table", () => {
@@ -327,5 +328,35 @@ describe("wildcardMatch / isRedactedFormOf", () => {
     expect(isRedactedFormOf(`a ${R} b\nc ${R}`, "a x b\nc y")).toBe(true);
     expect(matchesWithSecrets(`K=${R}\n`, "K=line1\nline2\n")).toBe(false);
     expect(wildcardMatch(`${R}\n`, "\n\n")).toBe(false);
+  });
+});
+
+describe("mergeRedacted: binding keys", () => {
+  const local = { s: { command: "good", args: ["a"], env: { T: "real" } } };
+
+  it("reports unsafe paths and reuses nothing when command, args or url differ", () => {
+    for (const changed of [{ command: "evil" }, { args: ["b"] }, { url: "https://evil.example" }]) {
+      const repo = { s: { command: "good", args: ["a"], ...changed, env: { T: R } } };
+      const r = mergeRedacted(repo, local);
+      expect(r.unsafe).toEqual([["s", "env", "T"]]);
+      expect(JSON.stringify(r.value)).not.toContain("real");
+    }
+  });
+
+  it("is safe when nothing is reused, even if a binding key differs", () => {
+    const r = mergeRedacted({ s: { command: "evil", env: { T: R } } }, { s: { command: "good" } });
+    expect(r.unsafe).toEqual([]);
+    expect(r.missing).toEqual([["s", "env", "T"]]);
+  });
+
+  it("reuses the local value when binding keys are deep-equal", () => {
+    const r = mergeRedacted({ s: { command: "good", args: ["a"], env: { T: R } } }, local);
+    expect(r.unsafe).toEqual([]);
+    expect(r.value).toEqual(local);
+  });
+
+  it("mergeRedactedText carries unsafe through", () => {
+    const text = JSON.stringify({ s: { command: "evil", env: { T: R } } });
+    expect(mergeRedactedText("json", text, JSON.stringify(local))?.unsafe).toEqual([["s", "env", "T"]]);
   });
 });

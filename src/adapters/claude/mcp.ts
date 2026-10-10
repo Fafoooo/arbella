@@ -44,7 +44,7 @@ import type { CaptureContext, RestoreContext } from "../adapter.interface.js";
 import type { RestoreAction, SecretRef, ToolManifest } from "../../types.js";
 
 import { hasMarker, mergeRedacted } from "../../core/placement/redacted.js";
-import { noteMissingSecrets } from "../../core/placement/index.js";
+import { noteKeptForSecrets, noteMissingSecrets } from "../../core/placement/index.js";
 import { isPlainObject, isUnsafeObjectKey } from "../../utils/object.js";
 import type { CommandRef } from "../../core/homefiles/scan.js";
 import { collectCommandRefs } from "../../core/homefiles/scan.js";
@@ -306,6 +306,11 @@ interface PlannedServer {
   def: Record<string, unknown>;
   /** ~/.claude.json key paths of the redacted values the merge had to omit. */
   missing: string[][];
+  /**
+   * The repo changed command/args/url while a real local value sits where it has
+   * the marker: the server is not written and the local definition stays.
+   */
+  unsafe: boolean;
 }
 
 /**
@@ -320,11 +325,12 @@ function plannedServer(
   localDef: unknown,
   at: string[],
 ): PlannedServer {
-  const { value, missing } = mergeRedacted(hydrateDef(ctx, repoDef), localDef);
+  const { value, missing, unsafe } = mergeRedacted(hydrateDef(ctx, repoDef), localDef);
   return {
     name,
     def: value as Record<string, unknown>,
     missing: missing.map((p) => [...at, ...p]),
+    unsafe: unsafe.length > 0,
   };
 }
 
@@ -386,6 +392,8 @@ export interface McpMergePlan {
   existed: boolean;
   /** True when the file exists but is not valid JSON: the merge must refuse. */
   invalid: boolean;
+  /** Pull-summary entries for servers kept local because their endpoint changed next to a secret. */
+  keptForSecrets: string[];
   /** User-scope servers to write, name-sorted. */
   userServers: PlannedServer[];
   /** Project-scope servers to write, grouped by hydrated project dir. */
@@ -411,6 +419,7 @@ function emptyMergePlan(
     existing: {},
     existed: false,
     invalid: false,
+    keptForSecrets: [],
     userServers: [],
     projectServers: [],
     skippedProjectDirs: [],
@@ -571,12 +580,23 @@ export async function planMcpMerge(
     return emptyMergePlan({ existing: obj, existed, invalid });
   }
 
-  const userServers = planUserScope(ctx, manifest, obj);
-  const { planned: projectServers, skippedDirs: skippedProjectDirs } = await planProjectScope(
+  const allUser = planUserScope(ctx, manifest, obj);
+  const { planned: allProject, skippedDirs: skippedProjectDirs } = await planProjectScope(
     ctx,
     manifest,
     obj,
   );
+  // An unsafe server is never written: the local definition stays.
+  const userServers = allUser.filter((s) => !s.unsafe);
+  const projectServers = allProject
+    .map((p) => ({ ...p, servers: p.servers.filter((s) => !s.unsafe) }))
+    .filter((p) => p.servers.length > 0);
+  const keptForSecrets = [
+    ...allUser.filter((s) => s.unsafe).map((s) => `~/.claude.json (mcp ${s.name})`),
+    ...allProject.flatMap((p) =>
+      p.servers.filter((s) => s.unsafe).map((s) => `~/.claude.json (mcp ${s.name}, project ${p.dir})`),
+    ),
+  ];
 
   const actions: RestoreAction[] = [
     ...userServers.map((s) => ({
@@ -611,6 +631,7 @@ export async function planMcpMerge(
     existing: obj,
     existed,
     invalid,
+    keptForSecrets,
     userServers,
     projectServers,
     skippedProjectDirs,
@@ -660,6 +681,9 @@ function mergeProjectScope(
  *   - sourceOfTruth "local" keeps an already-registered server; "repo" (or
  *     --force) overwrites it;
  *   - project-scope entries apply only when the project dir exists here;
+ *   - a server whose command/args/url changed in the repo while the local one
+ *     holds a real value where the repo has the marker is NOT written (the
+ *     secret must not reach a new endpoint); it is listed under keptForSecrets;
  *   - a redacted value never lands in the file: a real local value survives,
  *     otherwise the key is left out and recorded as a missing secret for the
  *     pull summary.
@@ -685,6 +709,8 @@ export async function restoreMcpServers(
     );
     return;
   }
+
+  noteKeptForSecrets(ctx, plan.keptForSecrets);
 
   const written =
     plan.userServers.length +

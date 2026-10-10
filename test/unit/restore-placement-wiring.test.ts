@@ -140,8 +140,9 @@ describe("codex config.toml", () => {
   it("keeps a real local secret under sourceOfTruth repo", async () => {
     const ctx = restoreCtx("codex", "repo");
     const dest = path.join(ctx.toolHome, "config.toml");
-    await put(dest, '[mcp_servers.u]\ncommand = "run-old"\n\n[mcp_servers.u.env]\nP = "local-fixture-value"\n');
-    const repo = `[mcp_servers.u]\ncommand = "{{HOME}}/bin/run"\n\n[mcp_servers.u.env]\nP = "${R}"\n`;
+    await put(dest, `[mcp_servers.u]\ncommand = '${ctx.vars.HOME}/bin/run'\n\n[mcp_servers.u.env]\nP = "local-fixture-value"\n`);
+    // Literal string: a Windows {{HOME}} in a basic string breaks TOML (rehydrateConfigToml limitation).
+    const repo = `[mcp_servers.u]\ncommand = '{{HOME}}/bin/run'\n\n[mcp_servers.u.env]\nP = "${R}"\n`;
 
     await codex.restore(ctx, data("codex", [{ repoPath: "codex/files/config.toml", content: repo }]));
 

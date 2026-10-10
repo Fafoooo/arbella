@@ -23,6 +23,7 @@ import {
   type RepoAuth,
 } from "../auth/index.js";
 
+import { plain } from "../placement/redacted.js";
 import * as git from "./git.js";
 import { genericProvider } from "./providers/generic.js";
 import { githubProvider } from "./providers/github.js";
@@ -285,7 +286,8 @@ export async function syncBeforePush(
     await pullWithAuth(repo, auth);
   } catch (err) {
     await git.abortRebase(repo.localPath);
-    const cause = err instanceof Error ? err.message : String(err);
+    // git output (`remote:` lines) is server-controlled: no escape sequences.
+    const cause = plain(err instanceof Error ? err.message : String(err));
     throw new Error(
       "Nothing was pushed: could not integrate the latest changes from the " +
         `backup repo. ${cause}`,

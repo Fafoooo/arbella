@@ -1551,10 +1551,16 @@ async function runFromRepo(
   // overwrites differing local files. A follower takes the repo's version too,
   // except for files changed here since the last pull (the ledger decides).
   // Neither replaces a real local value where the repo has the marker.
+  // Non-ledger state (MCP servers, symlinks) is repo-wins for a follower only
+  // once it has pulled before: the adoption pull of an arbitrary URL keeps what
+  // is already here.
   const role = config.role;
   const force = opts.force === true || (role === "source" && config.sourceOfTruth === "repo");
-  const sourceOfTruth: "local" | "repo" = force || role === "follower" ? "repo" : "local";
-  const session = newPullSession({ role, force, ledger: await loadLedger(fs, undefined, log) });
+  const ledger = await loadLedger(fs, undefined, log);
+  const ledgerHasFiles = Object.keys(ledger.files).length > 0;
+  const sourceOfTruth: "local" | "repo" =
+    force || (role === "follower" && ledgerHasFiles) ? "repo" : "local";
+  const session = newPullSession({ role, force, ledger });
   log.debug(
     `restore: tools=[${tools.join(", ")}] role=${role} force=${force} ` +
       `sourceOfTruth=${sourceOfTruth} dryRun=${dryRun}`,

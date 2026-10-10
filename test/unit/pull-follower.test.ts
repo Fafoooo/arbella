@@ -194,6 +194,23 @@ describe("arbella pull as a follower", () => {
     expect(await fsp.readFile(claudeHome("notes.md"), "utf8")).toBe("mine\n");
   });
 
+  it("adoption pull keeps an unbroken local MCP server; the next pull takes the repo version", async () => {
+    const serena = (command: string) => ({ mcpServers: { serena: { command } } });
+    const remoteFiles = (command: string) => ({
+      "claude/files/a.md": "a\n",
+      "claude/manifest.json": JSON.stringify({ tool: "claude", mcpServers: serena(command).mcpServers }),
+    });
+    await put(path.join(home, ".claude.json"), JSON.stringify(serena("local-cmd")));
+    await writeRemote(remoteFiles("repo-cmd"));
+
+    await run(URL, {});
+    const after = (): Promise<any> => fsp.readFile(path.join(home, ".claude.json"), "utf8").then(JSON.parse);
+    expect((await after()).mcpServers.serena.command).toBe("local-cmd");
+
+    await run(URL, {});
+    expect((await after()).mcpServers.serena.command).toBe("repo-cmd");
+  });
+
   it("summary lists kept paths and never prints 'restored'", async () => {
     await put(claudeHome("notes.md"), "mine\n");
     await put(path.join(home, ".local", "bin", "tool.sh"), "mine\n");
