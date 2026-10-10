@@ -15,6 +15,7 @@ import {
   MEMORY_DELETE_MIN,
   decidePushGate,
   plannedDeletions,
+  plannedSharedDeletions,
   pushRisks,
   replaceToolFiles,
   run,
@@ -86,6 +87,65 @@ describe("plannedDeletions", () => {
     const results = [result("claude", []), result("codex", [])];
     expect(plannedDeletions(committed, results, false)).toEqual(["codex/files/x.md"]);
     expect(plannedDeletions(committed, results, true).sort()).toEqual(committed.slice().sort());
+  });
+});
+
+describe("plannedSharedDeletions", () => {
+  let repo: string;
+  beforeEach(async () => {
+    repo = await mkdtemp(path.join(os.tmpdir(), "arbella-shared-"));
+  });
+  afterEach(async () => {
+    await rm(repo, { recursive: true, force: true });
+  });
+
+  const put = async (rel: string, content = "x"): Promise<void> => {
+    await mkdir(path.dirname(path.join(repo, rel)), { recursive: true });
+    await writeFile(path.join(repo, rel), content);
+  };
+
+  it("a source with empty extraPaths against 30 committed shared/home files is a risk", async () => {
+    const files = seq("shared/home/.config/x/f", 30);
+    for (const f of files) await put(f);
+    await put(
+      "shared/home-index.json",
+      JSON.stringify({ version: 1, files: Object.fromEntries(files.map((f) => [f, ["extraPaths"]])) }),
+    );
+
+    const deleted = await plannedSharedDeletions(repo, [], ["claude"], "keep");
+
+    expect(deleted.sort()).toEqual(files.slice().sort());
+    const risks = pushRisks({ machineId: "me", deleted });
+    expect(risks).toHaveLength(1);
+    expect(risks[0]).toContain("30");
+  });
+
+  it("counts exactly what the mirror removes: claimed files and absent origins stay", async () => {
+    await put("shared/home/.a/claimed.sh");
+    await put("shared/home/.a/codex-only.sh");
+    await put("shared/home/.a/gone.sh");
+    await put(
+      "shared/home-index.json",
+      JSON.stringify({
+        version: 1,
+        files: {
+          "shared/home/.a/claimed.sh": ["claude"],
+          "shared/home/.a/codex-only.sh": ["codex"],
+          "shared/home/.a/gone.sh": ["claude"],
+        },
+      }),
+    );
+    const claims = [{ repoPath: "shared/home/.a/claimed.sh", origin: "claude" }];
+
+    expect(await plannedSharedDeletions(repo, claims, ["claude"], "write")).toEqual(["shared/home/.a/gone.sh"]);
+  });
+
+  it("adds shared/instructions.md only when this run removes a committed one", async () => {
+    expect(await plannedSharedDeletions(repo, [], ["claude"], "remove")).toEqual([]);
+    await put("shared/instructions.md");
+    expect(await plannedSharedDeletions(repo, [], ["claude"], "remove")).toEqual(["shared/instructions.md"]);
+    expect(await plannedSharedDeletions(repo, [], ["claude"], "keep")).toEqual([]);
+    expect(await plannedSharedDeletions(repo, [], ["claude"], "write")).toEqual([]);
   });
 });
 

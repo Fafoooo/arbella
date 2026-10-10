@@ -92,6 +92,7 @@ import {
   shouldShareInstructions,
   buildSharedInstructionsFile,
   SHARED_INSTRUCTIONS_REPO_PATH,
+  type SharedInstructionsUpdate,
 } from "../core/manifest/index.js";
 import { sanitizer } from "../core/sanitizer/index.js";
 import { templater } from "../core/templater/index.js";
@@ -106,7 +107,7 @@ import {
   homeExcludeRoots,
   isSharedHomePath,
 } from "../core/homefiles/capture.js";
-import type { HomeIndexEntry } from "../core/homefiles/home-index.js";
+import type { HomeIndexEntry, HomeIndexMerge } from "../core/homefiles/home-index.js";
 import {
   EXTRA_PATHS_ORIGIN,
   HOME_INDEX_REPO_PATH,
@@ -527,18 +528,29 @@ export async function run(opts: BackupOptions = {}): Promise<void> {
   // back byte-for-byte instead of committing a pure timestamp churn).
   const previous = await readPreviousGenerated(repoRoot);
 
+  // Shared instructions (R9): write once when sharing, remove a stale file when
+  // this run saw BOTH producers and they are no longer identical — and otherwise
+  // (a producer missing here) keep whatever is committed, because the shared file
+  // is the only copy of the absent tool's instructions. See
+  // decideSharedInstructionsUpdate.
+  const sharedUpdate = decideSharedInstructionsUpdate({
+    share: sharedContent !== undefined,
+    capturedTools,
+    configuredTools: config.tools,
+  });
+
   // --- Push guards, decided BEFORE the working tree is touched so a refusal
-  //     never has to undo anything. ---------------------------------------------
+  //     never has to undo anything. Deletions count the tool mirrors and the
+  //     shared files this run removes. -------------------------------------------
   const risks = pushRisks({
     machineId,
     lastPushMachine: previous.meta?.lastPushMachine,
     metaCreatedAt: previous.meta?.createdAt,
     lastSyncedPush: config.lastSyncedPush,
-    deleted: plannedDeletions(
-      await committedFiles(repoRoot),
-      toolResults,
-      config.includeMemories,
-    ),
+    deleted: [
+      ...plannedDeletions(await committedFiles(repoRoot), toolResults, config.includeMemories),
+      ...(await plannedSharedDeletions(repoRoot, home.claims, capturedTools, sharedUpdate)),
+    ],
   });
   const gate = decidePushGate({
     risks,
@@ -572,16 +584,6 @@ export async function run(opts: BackupOptions = {}): Promise<void> {
   }
   await writeSharedHome(repoRoot, home.entries, home.claims, capturedTools);
 
-  // Shared instructions (R9): write once when sharing, remove a stale file when
-  // this run saw BOTH producers and they are no longer identical — and otherwise
-  // (a producer missing here) keep whatever is committed, because the shared file
-  // is the only copy of the absent tool's instructions. See
-  // decideSharedInstructionsUpdate.
-  const sharedUpdate = decideSharedInstructionsUpdate({
-    share: sharedContent !== undefined,
-    capturedTools,
-    configuredTools: config.tools,
-  });
   if (sharedUpdate === "write" && sharedContent !== undefined) {
     const shared = buildSharedInstructionsFile(sharedContent);
     await writeCapturedFile(repoRoot, shared);
@@ -820,7 +822,7 @@ function sameMetaIgnoringCreatedAt(a: ArbellaMeta, b: ArbellaMeta): boolean {
 /* Push guards                                                                 */
 /* -------------------------------------------------------------------------- */
 
-/** A push that would delete this many tool files from the repo needs a yes. */
+/** A push that would delete this many files from the repo (tool roots, shared files) needs a yes. */
 export const MASS_DELETE_MIN = 25;
 /** ...and so does one that would delete this many memory files. */
 export const MEMORY_DELETE_MIN = 3;
@@ -1056,19 +1058,8 @@ export async function writeSharedHome(
   capturedTools: readonly ToolId[],
 ): Promise<void> {
   const indexPath = repoJoin(repoRoot, HOME_INDEX_REPO_PATH);
-  const merge = mergeHomeIndex(
-    parseHomeIndex(await readJsonIfExists(indexPath)),
-    claims,
-    new Set<string>([...capturedTools, EXTRA_PATHS_ORIGIN]),
-  );
-
-  const expected = new Set(merge.expected);
-  const committed = await listRepoFiles(
-    repoJoin(repoRoot, SHARED_HOME_REPO_PREFIX),
-    SHARED_HOME_REPO_PREFIX,
-  );
-  for (const repoPath of committed) {
-    if (expected.has(repoPath)) continue;
+  const { merge, stale } = await sharedHomeMirror(repoRoot, claims, capturedTools);
+  for (const repoPath of stale) {
     await fs.rmrf(repoJoin(repoRoot, repoPath));
   }
 
@@ -1093,6 +1084,46 @@ export async function writeSharedHome(
       `Kept ${merge.kept.length} shared home file(s) captured by tool(s) not present here.`,
     );
   }
+}
+
+/**
+ * The shared/home mirror as writeSharedHome applies it: the merged provenance
+ * index, and the committed shared/home files no origin claims any more (the
+ * ones it deletes).
+ */
+async function sharedHomeMirror(
+  repoRoot: string,
+  claims: readonly HomeIndexEntry[],
+  capturedTools: readonly ToolId[],
+): Promise<{ merge: HomeIndexMerge; stale: string[] }> {
+  const merge = mergeHomeIndex(
+    parseHomeIndex(await readJsonIfExists(repoJoin(repoRoot, HOME_INDEX_REPO_PATH))),
+    claims,
+    new Set<string>([...capturedTools, EXTRA_PATHS_ORIGIN]),
+  );
+  const expected = new Set(merge.expected);
+  const committed = await listRepoFiles(
+    repoJoin(repoRoot, SHARED_HOME_REPO_PREFIX),
+    SHARED_HOME_REPO_PREFIX,
+  );
+  return { merge, stale: committed.filter((repoPath) => !expected.has(repoPath)) };
+}
+
+/**
+ * The shared files this push would delete from the repo: the shared/home files
+ * the mirror drops, plus shared/instructions.md when this run removes it.
+ */
+export async function plannedSharedDeletions(
+  repoRoot: string,
+  claims: readonly HomeIndexEntry[],
+  capturedTools: readonly ToolId[],
+  sharedUpdate: SharedInstructionsUpdate,
+): Promise<string[]> {
+  const { stale } = await sharedHomeMirror(repoRoot, claims, capturedTools);
+  const instructions =
+    sharedUpdate === "remove" &&
+    (await fs.exists(repoJoin(repoRoot, SHARED_INSTRUCTIONS_REPO_PATH)));
+  return instructions ? [...stale, SHARED_INSTRUCTIONS_REPO_PATH] : stale;
 }
 
 /** Every repo-relative POSIX file path under `absRoot`. [] when it is absent. */
