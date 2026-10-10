@@ -307,8 +307,8 @@ interface PlannedServer {
   /** ~/.claude.json key paths of the redacted values the merge had to omit. */
   missing: string[][];
   /**
-   * The repo changed command/args/url while a real local value sits where it has
-   * the marker: the server is not written and the local definition stays.
+   * Anything else in the server definition changed in the repo while a real local
+   * value sits where it has the marker: the server is not written and the local definition stays.
    */
   unsafe: boolean;
 }
@@ -325,7 +325,9 @@ function plannedServer(
   localDef: unknown,
   at: string[],
 ): PlannedServer {
-  const { value, missing, unsafe } = mergeRedacted(hydrateDef(ctx, repoDef), localDef);
+  const { value, missing, unsafe } = mergeRedacted(hydrateDef(ctx, repoDef), localDef, {
+    rootIsEntry: true,
+  });
   return {
     name,
     def: value as Record<string, unknown>,
@@ -681,8 +683,8 @@ function mergeProjectScope(
  *   - sourceOfTruth "local" keeps an already-registered server; "repo" (or
  *     --force) overwrites it;
  *   - project-scope entries apply only when the project dir exists here;
- *   - a server whose command/args/url changed in the repo while the local one
- *     holds a real value where the repo has the marker is NOT written (the
+ *   - a server whose definition changed in the repo (anything besides the marker
+ *     values) while the local one holds a real value where the repo has the marker is NOT written (the
  *     secret must not reach a new endpoint); it is listed under keptForSecrets;
  *   - a redacted value never lands in the file: a real local value survives,
  *     otherwise the key is left out and recorded as a missing secret for the

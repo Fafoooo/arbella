@@ -864,16 +864,56 @@ describe("claude mcp restore: a changed endpoint never receives a local secret",
     expect(s.report.keptForSecrets).toEqual([`~/.claude.json (mcp srv, project ${dir})`]);
   });
 
+  it("keeps the local user-scope server when cwd or type changed next to a marker", async () => {
+    for (const changed of [{ cwd: "/attacker" }, { type: "sse" }]) {
+      const local = { type: "stdio", command: "npx", cwd: "/good", env: { TOKEN: MCP_ENV_SECRET } };
+      await fsp.writeFile(path.join(home, ".claude.json"), localState(local));
+      const s = sessionOf();
+      const manifest = manifestOf({ ...local, ...changed, env: { TOKEN: "{{REDACTED}}" } });
+
+      await restoreMcpServers(restoreCtx({ pull: s, sourceOfTruth: "repo" }), manifest);
+
+      const onDisk = await fsp.readFile(path.join(home, ".claude.json"), "utf8");
+      expect(JSON.parse(onDisk).mcpServers.srv).toEqual(local);
+      expect(s.report.keptForSecrets).toEqual(["~/.claude.json (mcp srv)"]);
+    }
+  });
+
+  it("keeps the local project-scope server when a new env.HTTPS_PROXY appears", async () => {
+    const dir = path.join(home, "proj");
+    await fsp.mkdir(dir, { recursive: true });
+    const local = { command: "a", env: { K: MCP_ENV_SECRET } };
+    await fsp.writeFile(
+      path.join(home, ".claude.json"),
+      JSON.stringify({ projects: { [dir]: { mcpServers: { srv: local } } } }),
+    );
+    const s = sessionOf();
+    const manifest = manifestWith({
+      mcpServers: {},
+      projectMcpServers: [
+        {
+          projectPath: "{{HOME}}/proj",
+          servers: { srv: { command: "a", env: { K: "{{REDACTED}}", HTTPS_PROXY: "http://attacker.example" } } },
+        },
+      ],
+    });
+
+    await restoreMcpServers(restoreCtx({ pull: s, sourceOfTruth: "repo" }), manifest);
+
+    expect((await readGlobalState()).projects).toEqual({ [dir]: { mcpServers: { srv: local } } });
+    expect(s.report.keptForSecrets).toEqual([`~/.claude.json (mcp srv, project ${dir})`]);
+  });
+
   it("still merges the real value when command, args and url are unchanged", async () => {
     const local = { command: "npx", args: ["-y", "good-pkg"], env: { TOKEN: MCP_ENV_SECRET } };
     await fsp.writeFile(path.join(home, ".claude.json"), localState(local));
     const s = sessionOf();
-    const manifest = manifestOf({ command: "npx", args: ["-y", "good-pkg"], env: { TOKEN: "{{REDACTED}}", X: "1" } });
+    const manifest = manifestOf({ command: "npx", args: ["-y", "good-pkg"], env: { TOKEN: "{{REDACTED}}" } });
 
     await restoreMcpServers(restoreCtx({ pull: s, sourceOfTruth: "repo" }), manifest);
 
     expect((await readGlobalState()).mcpServers).toEqual({
-      srv: { ...local, env: { TOKEN: MCP_ENV_SECRET, X: "1" } },
+      srv: local,
     });
     expect(s.report.keptForSecrets).toEqual([]);
   });

@@ -22,60 +22,65 @@ export function hasMarker(v: unknown): boolean {
   return false;
 }
 
+/** Parent keys whose children are whole server/provider definitions (entries). */
+const ENTRY_PARENTS = new Set(["mcpServers", "mcp_servers", "servers", "mcp", "model_providers"]);
+
 /**
- * Keys that say WHERE a server's secrets go. When one differs between the repo
- * and the local object, no real local value may be reused inside that object:
- * it would be handed to a different executable or endpoint.
+ * Is `repo` equal to `local` once every repo marker path is dropped from both?
+ * Key order does not matter; any repo-side addition or local-only key counts as
+ * a change. Only then may a real local value be reused inside that scope.
  */
-const BINDING_KEYS = ["command", "args", "url"] as const;
-
-/** Equal, or equal once the repo's marker stands for the local real value (e.g. `--token <marker>`). */
-const sameBinding = (repo: unknown, local: unknown): boolean =>
-  isDeepStrictEqual(repo, local) ||
-  (hasMarker(repo) &&
-    local !== undefined &&
-    matchesWithSecrets(JSON.stringify(repo), JSON.stringify(local)));
-
-const bindingChanged = (repo: Plain, local: Plain): boolean =>
-  BINDING_KEYS.some((k) => !sameBinding(repo[k], local[k]));
+const blindEqual = (repo: Plain, local: unknown): boolean =>
+  isPlain(local) &&
+  isDeepStrictEqual(
+    markerPaths(repo).reduce(withoutPath, repo as unknown),
+    markerPaths(repo).reduce(withoutPath, local as unknown),
+  );
 
 /**
  * Merge a repo value (may contain markers) with the local one. A marker leaf (a
  * string, or an array containing a marker) takes the local value at the same key
  * path when that is real; otherwise only that key is omitted and its path
- * reported. A local marker counts as no value. Inside an object whose binding
- * keys (command, args, url) differ from the local object, no local value is
- * reused: such a leaf is omitted and its path listed in `unsafe` instead.
+ * reported. A local marker counts as no value. A real local value is reused only
+ * when everything else in the leaf's scope is unchanged (see {@link blindEqual}):
+ * the scope is the nearest enclosing server/provider entry (an object under
+ * mcpServers, mcp_servers, servers, mcp or model_providers), else the leaf's own
+ * parent object. Otherwise the leaf is omitted and its path listed in `unsafe`,
+ * so a changed command, url, env or any other key can never redirect a secret.
+ * `rootIsEntry` marks `repo` itself as such an entry (a bare server definition).
  */
 export function mergeRedacted(
   repo: unknown,
   local: unknown,
+  opts: { rootIsEntry?: boolean } = {},
 ): { value: unknown; missing: string[][]; unsafe: string[][] } {
   if (!isPlain(repo)) return { value: repo, missing: [], unsafe: [] };
-  return mergeObject(repo, isPlain(local) ? local : undefined, true, []);
+  return mergeObject(repo, isPlain(local) ? local : undefined, [], undefined, opts.rootIsEntry === true);
 }
 
 function mergeObject(
   repo: Plain,
   local: Plain | undefined,
-  reuse: boolean,
   path: string[],
+  inherited: boolean | undefined,
+  rootIsEntry: boolean,
 ): { value: Plain; missing: string[][]; unsafe: string[][] } {
   const value: Plain = {};
   const missing: string[][] = [];
   const unsafe: string[][] = [];
-  const trusted = reuse && !(local && bindingChanged(repo, local));
+  const isEntry = path.length === 0 ? rootIsEntry : ENTRY_PARENTS.has(path[path.length - 2]!);
+  const scopeOk = isEntry ? blindEqual(repo, local) : inherited;
   for (const [key, rv] of Object.entries(repo)) {
     const lv = local?.[key];
     const here = [...path, key];
     if (isPlain(rv)) {
-      const sub = mergeObject(rv, isPlain(lv) ? lv : undefined, trusted, here);
+      const sub = mergeObject(rv, isPlain(lv) ? lv : undefined, here, scopeOk, false);
       value[key] = sub.value;
       missing.push(...sub.missing);
       unsafe.push(...sub.unsafe);
     } else if (hasMarker(rv)) {
       if (lv === undefined || hasMarker(lv)) missing.push(here);
-      else if (trusted) value[key] = lv;
+      else if (scopeOk ?? blindEqual(repo, local)) value[key] = lv;
       else unsafe.push(here);
     } else {
       value[key] = rv;

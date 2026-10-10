@@ -389,7 +389,7 @@ describe("incident replay: a machine broken by the old sanitizer pulls as a foll
     expect((await readConfig()).role).toBe("follower");
 
     const out = output();
-    expect(out).toContain(`kept ~${memory.slice(home.length)}`);
+    expect(out).toContain(`kept ~${memory.slice(home.length).split(path.sep).join("/")}`);
     expect(out).toContain("secret missing: codex mcp unifi → UNIFI_PASSWORD");
     expect(out).toContain("secret missing: claude mcp serena → SERENA_TOKEN");
     expect(out).toContain("secret missing: claude ~/.claude/settings.json → env.API_TOKEN");

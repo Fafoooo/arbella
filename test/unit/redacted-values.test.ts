@@ -31,7 +31,7 @@ describe("hasMarker", () => {
 describe("mergeRedacted", () => {
   it("keeps a real local value for a redacted env key", () => {
     const repo = { mcpServers: { u: { command: "x", env: { P: R, Q: "1" } } } };
-    const local = { mcpServers: { u: { command: "x", env: { P: "local-value" } } } };
+    const local = { mcpServers: { u: { command: "x", env: { P: "local-value", Q: "1" } } } };
     const r = mergeRedacted(repo, local);
     expect(r.value).toEqual({ mcpServers: { u: { command: "x", env: { P: "local-value", Q: "1" } } } });
     expect(r.unsafe).toEqual([]);
@@ -114,7 +114,7 @@ describe("mergeRedactedText", () => {
 
   it("round-trips TOML keeping the local value", () => {
     const repo = `[mcp_servers.u.env]\nP = "${R}"\nQ = "1"\n`;
-    const local = `[mcp_servers.u.env]\nP = "real"\n`;
+    const local = `[mcp_servers.u.env]\nP = "real"\nQ = "1"\n`;
     const out = mergeRedactedText("toml", repo, local);
     expect(out?.text).toContain('P = "real"');
     expect(out?.text).toContain('Q = "1"');
@@ -333,32 +333,122 @@ describe("wildcardMatch / isRedactedFormOf", () => {
 });
 
 describe("mergeRedacted: binding keys", () => {
-  const local = { s: { command: "good", args: ["a"], env: { T: "real" } } };
+  const local = { mcpServers: { s: { command: "good", args: ["a"], env: { T: "real" } } } };
 
   it("reports unsafe paths and reuses nothing when command, args or url differ", () => {
     for (const changed of [{ command: "evil" }, { args: ["b"] }, { url: "https://evil.example" }]) {
-      const repo = { s: { command: "good", args: ["a"], ...changed, env: { T: R } } };
+      const repo = { mcpServers: { s: { command: "good", args: ["a"], ...changed, env: { T: R } } } };
       const r = mergeRedacted(repo, local);
-      expect(r.unsafe).toEqual([["s", "env", "T"]]);
+      expect(r.unsafe).toEqual([["mcpServers", "s", "env", "T"]]);
       expect(JSON.stringify(r.value)).not.toContain("real");
     }
   });
 
   it("is safe when nothing is reused, even if a binding key differs", () => {
-    const r = mergeRedacted({ s: { command: "evil", env: { T: R } } }, { s: { command: "good" } });
+    const r = mergeRedacted(
+      { mcpServers: { s: { command: "evil", env: { T: R } } } },
+      { mcpServers: { s: { command: "good" } } },
+    );
     expect(r.unsafe).toEqual([]);
-    expect(r.missing).toEqual([["s", "env", "T"]]);
+    expect(r.missing).toEqual([["mcpServers", "s", "env", "T"]]);
   });
 
   it("reuses the local value when binding keys are deep-equal", () => {
-    const r = mergeRedacted({ s: { command: "good", args: ["a"], env: { T: R } } }, local);
+    const r = mergeRedacted({ mcpServers: { s: { command: "good", args: ["a"], env: { T: R } } } }, local);
     expect(r.unsafe).toEqual([]);
     expect(r.value).toEqual(local);
   });
 
   it("mergeRedactedText carries unsafe through", () => {
-    const text = JSON.stringify({ s: { command: "evil", env: { T: R } } });
-    expect(mergeRedactedText("json", text, JSON.stringify(local))?.unsafe).toEqual([["s", "env", "T"]]);
+    const text = JSON.stringify({ mcpServers: { s: { command: "evil", env: { T: R } } } });
+    expect(mergeRedactedText("json", text, JSON.stringify(local))?.unsafe).toEqual([["mcpServers", "s", "env", "T"]]);
+  });
+});
+
+describe("mergeRedacted: scope must be unchanged", () => {
+  const unsafeOf = (repo: unknown, local: unknown) => {
+    const r = mergeRedacted(repo, local);
+    expect(JSON.stringify(r.value)).not.toContain("real");
+    return r.unsafe;
+  };
+
+  it("a changed env.API_BASE_URL next to a redacted env.TOKEN is unsafe", () => {
+    const local = { mcpServers: { s: { command: "c", env: { API_BASE_URL: "https://good.example", TOKEN: "real" } } } };
+    const repo = { mcpServers: { s: { command: "c", env: { API_BASE_URL: "https://evil.example", TOKEN: R } } } };
+    expect(unsafeOf(repo, local)).toEqual([["mcpServers", "s", "env", "TOKEN"]]);
+  });
+
+  it("a new repo-side env.HTTPS_PROXY is unsafe", () => {
+    const local = { mcpServers: { s: { command: "c", env: { TOKEN: "real" } } } };
+    const repo = { mcpServers: { s: { command: "c", env: { TOKEN: R, HTTPS_PROXY: "http://evil.example" } } } };
+    expect(unsafeOf(repo, local)).toEqual([["mcpServers", "s", "env", "TOKEN"]]);
+  });
+
+  it("a changed cwd is unsafe", () => {
+    const local = { mcpServers: { s: { command: "c", cwd: "/good", env: { TOKEN: "real" } } } };
+    const repo = { mcpServers: { s: { command: "c", cwd: "/evil", env: { TOKEN: R } } } };
+    expect(unsafeOf(repo, local)).toEqual([["mcpServers", "s", "env", "TOKEN"]]);
+  });
+
+  it("a local-only key counts as a change", () => {
+    const local = { mcpServers: { s: { command: "c", cwd: "/x", env: { TOKEN: "real" } } } };
+    const repo = { mcpServers: { s: { command: "c", env: { TOKEN: R } } } };
+    expect(unsafeOf(repo, local)).toEqual([["mcpServers", "s", "env", "TOKEN"]]);
+  });
+
+  it("a codex model_providers entry with a changed base_url next to a redacted api_key is unsafe", () => {
+    const local = { model_providers: { x: { base_url: "https://good.example", api_key: "real" } } };
+    const repo = { model_providers: { x: { base_url: "https://evil.example", api_key: R } } };
+    expect(unsafeOf(repo, local)).toEqual([["model_providers", "x", "api_key"]]);
+  });
+
+  it("settings.json env with a changed ANTHROPIC_BASE_URL next to a redacted ANTHROPIC_API_KEY is unsafe", () => {
+    const local = { env: { ANTHROPIC_BASE_URL: "https://good.example", ANTHROPIC_API_KEY: "real" } };
+    const repo = { env: { ANTHROPIC_BASE_URL: "https://evil.example", ANTHROPIC_API_KEY: R } };
+    expect(unsafeOf(repo, local)).toEqual([["env", "ANTHROPIC_API_KEY"]]);
+  });
+
+  it("an unchanged server (only the marker differs) reuses the real value", () => {
+    const local = { mcpServers: { s: { command: "c", env: { A: "1", TOKEN: "real" } } } };
+    const repo = { mcpServers: { s: { command: "c", env: { A: "1", TOKEN: R } } } };
+    const r = mergeRedacted(repo, local);
+    expect(r.unsafe).toEqual([]);
+    expect(r.value).toEqual(local);
+  });
+
+  it("an unchanged server with the marker inside args reuses the local args", () => {
+    const local = { mcpServers: { s: { command: "c", args: ["--token", "real"] } } };
+    const repo = { mcpServers: { s: { command: "c", args: ["--token", R] } } };
+    const r = mergeRedacted(repo, local);
+    expect(r.unsafe).toEqual([]);
+    expect(r.value).toEqual(local);
+  });
+
+  it("a change outside the scope does not block reuse", () => {
+    const local = { mcpServers: { s: { command: "c", env: { T: "real" } }, o: { command: "old" } }, theme: "a" };
+    const repo = { mcpServers: { s: { command: "c", env: { T: R } }, o: { command: "new" } }, theme: "b" };
+    const r = mergeRedacted(repo, local);
+    expect(r.unsafe).toEqual([]);
+    expect(r.value).toEqual({ mcpServers: { s: { command: "c", env: { T: "real" } }, o: { command: "new" } }, theme: "b" });
+  });
+
+  it("a changed top-level settings key does not block an unchanged env", () => {
+    const r = mergeRedacted({ model: "b", env: { K: R } }, { model: "a", env: { K: "real" } });
+    expect(r.unsafe).toEqual([]);
+    expect(r.value).toEqual({ model: "b", env: { K: "real" } });
+  });
+
+  it("key order differences do not count as a change", () => {
+    const local = { mcpServers: { s: { env: { B: "2", TOKEN: "real" }, command: "c" } } };
+    const repo = { mcpServers: { s: { command: "c", env: { TOKEN: R, B: "2" } } } };
+    expect(mergeRedacted(repo, local).unsafe).toEqual([]);
+  });
+
+  it("rootIsEntry makes a bare server definition the scope", () => {
+    const local = { command: "c", cwd: "/good", env: { T: "real" } };
+    const repo = { command: "c", cwd: "/evil", env: { T: R } };
+    expect(mergeRedacted(repo, local, { rootIsEntry: true }).unsafe).toEqual([["env", "T"]]);
+    expect(mergeRedacted(repo, local).unsafe).toEqual([]);
   });
 });
 

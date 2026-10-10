@@ -120,10 +120,10 @@ describe("placeFile", () => {
 
   it("keeps an unsafe file for a follower with a matching ledger hash too", async () => {
     const dest = path.join(dir, "m.json");
-    const local = '{"s":{"command":"good","env":{"T":"real"}}}';
+    const local = '{"mcpServers":{"s":{"command":"good","env":{"T":"real"}}}}';
     await fsp.writeFile(dest, local);
     const s = session("follower", false, { ...emptyLedger(), files: { [dest]: sha256(local) } });
-    const repo = `{"s":{"command":"evil","env":{"T":"${R}"}}}`;
+    const repo = `{"mcpServers":{"s":{"command":"evil","env":{"T":"${R}"}}}}`;
     expect(await placeFile(ctxOf(s), { bucket: "cursor", dest, content: repo })).toBe("kept");
     expect(await fsp.readFile(dest, "utf8")).toBe(local);
     expect(s.report.keptForSecrets).toEqual([dest]);

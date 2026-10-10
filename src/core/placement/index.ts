@@ -178,7 +178,7 @@ export async function planPlacement(ctx: PlaceCtx, req: PlaceRequest): Promise<P
   // Replacing the local file loses nothing real when the repo has no marker,
   // there is no local text or it holds markers itself, or the structured merge
   // carries its values over.
-  // An unsafe merge (a changed command/args/url next to a marker) never counts:
+  // An unsafe merge (anything else changed in a server/provider/env block next to a marker) never counts:
   // the real value would stay behind or go to a new endpoint, so the file is kept.
   const secretSafe =
     !unsafe &&
