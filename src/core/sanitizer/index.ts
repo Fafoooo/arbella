@@ -341,14 +341,17 @@ function cloneRedact(
     );
   }
 
-  // Plain objects: clone key-by-key. The keys of an entry map (mcpServers,
-  // enabledPlugins, ...) name entries: identifiers, never secret names.
+  // Plain objects: clone key-by-key. In a root-level entry map (mcpServers,
+  // enabledPlugins, ...) the key of an ENTRY — an object, or a plugin's on/off
+  // switch — is an identifier, never a secret name; a string beside the
+  // entries keeps the usual rules.
   if (isPlainObject(node)) {
     const out: Record<string, unknown> = {};
-    const entryNames = ENTRY_MAPS.has(parentKey);
+    const entryMap = ENTRY_MAP_PATHS.has(keyPath);
     for (const [k, v] of Object.entries(node)) {
-      const inner = entryNames ? container : enterContainer(container, k);
-      out[k] = cloneRedact(v, tool, source, joinPath(keyPath, k), found, k, inner, entryNames);
+      const isEntry = entryMap && (isPlainObject(v) || typeof v === "boolean");
+      const inner = isEntry ? container : enterContainer(container, k);
+      out[k] = cloneRedact(v, tool, source, joinPath(keyPath, k), found, k, inner, isEntry);
     }
     return out;
   }
@@ -397,14 +400,16 @@ function cloneRedact(
 type Container = "none" | "settings" | "credentials";
 
 /**
- * Maps whose keys name entries — an MCP server called "token-optimizer", a
- * plugin "github-token@market" — rather than settings. Their keys are
- * identifiers, as in codex's TOML pass.
+ * Paths, from the document root, of maps whose keys name entries — an MCP
+ * server called "token-optimizer", a plugin "github-token@market" — rather than
+ * settings. Their entry keys are identifiers, as in codex's TOML pass. Matched
+ * by path, not by key name, so a nested `servers` stays an ordinary object.
  */
-const ENTRY_MAPS: ReadonlySet<string> = new Set([
+const ENTRY_MAP_PATHS: ReadonlySet<string> = new Set([
   "mcpServers",
   "servers",
   "mcp",
+  "mcp.servers",
   "enabledPlugins",
   "extraKnownMarketplaces",
   "marketplaces",
