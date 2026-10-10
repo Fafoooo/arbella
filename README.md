@@ -132,6 +132,10 @@ arbella push --dry-run   # show exactly what goes in (and what's skipped), write
 
 Worth a `--dry-run` before your first real push, so there are no surprises.
 
+Before it builds on the repo, `push` pulls in whatever is already there, and if that does not merge cleanly it stops with nothing pushed. It then asks before two things: another machine pushed since you last pushed or pulled, or the push would delete a lot from the repo (25 or more files, or 3 or more memories). In a terminal you get a prompt (default No); without one, or from the auto-push hook, it does not push. `--yes` pushes through both.
+
+A machine set up by `arbella pull` is a **follower**: it only pulls. `push` refuses there (`--yes` does not change that), the auto-push hook does nothing, and `--dry-run` still works. To make it a **source** that pushes, run `arbella init`; it asks first, since that machine's setup can then overwrite the repo. Memories are only mirrored when `includeMemories` is on; otherwise a push leaves the ones in the repo alone.
+
 ### `arbella pull`
 
 The reason the whole thing exists.
@@ -228,6 +232,8 @@ This is the part I most wanted to get right.
 - Shared home files go through the same sanitizer, plus a home-specific denylist — `.env`, `*.pem`, `*.key`, `id_rsa*`, `.netrc`, `.npmrc`, `.git-credentials`, and friends are never captured even when something points at them.
 - Any token Arbella holds for itself lives in one local file with `0600` permissions — not in the repo, not in a logged command, not baked into a Git remote.
 - A test fails the build if a credential can reach the repo. This isn't on the honor system.
+
+- Arbella's own auto-push hook is never stored in the repo, so a pulled machine does not inherit it.
 
 Putting secrets in the repo is opt-in, and the default is off. It's your private repo and your call — but I'd leave it there.
 

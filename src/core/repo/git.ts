@@ -313,6 +313,24 @@ export async function pull(cwd: string): Promise<void> {
   await git(cwd, ["pull", "--rebase", "--autostash"]);
 }
 
+/** Abort an in-progress rebase (e.g. after a failed pull). Never throws. */
+export async function abortRebase(cwd: string): Promise<void> {
+  await git(cwd, ["rebase", "--abort"], { reject: false });
+}
+
+/**
+ * Every file tracked at `ref` (repo-relative, "/"-separated), via
+ * `git ls-tree -r -z --name-only`. [] for a ref that does not resolve (no
+ * upstream, no commits yet). Never throws.
+ */
+export async function listTrackedFiles(cwd: string, ref: string): Promise<string[]> {
+  const res = await git(cwd, ["ls-tree", "-r", "-z", "--name-only", ref], {
+    reject: false,
+  });
+  if (res.exitCode !== 0) return [];
+  return splitNul(res.stdout);
+}
+
 /**
  * Pull from an EXPLICIT url (one-shot) without mutating the stored remote. Used
  * by the auth layer's retry: when arbella obtains a token it builds a

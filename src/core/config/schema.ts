@@ -54,6 +54,11 @@ export const arbellaConfigSchema = z.object({
   /** Random id of this machine, generated lazily on first push. Never shared. */
   machineId: z.string().min(1).optional(),
   /**
+   * The arbella.json `createdAt` this machine last pushed or pulled. LOCAL only:
+   * it tells a push whether another machine pushed since this one last synced.
+   */
+  lastSyncedPush: z.string().optional(),
+  /**
    * Source-of-truth direction (R12):
    *  - "local": this machine pushes; backup is authoritative from here.
    *  - "repo":  the repo wins; restore overwrites local on conflict.

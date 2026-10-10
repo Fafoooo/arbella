@@ -272,6 +272,40 @@ export async function pullWithAuth(
 }
 
 /**
+ * Integrate whatever the remote already has before a push is built on top of it.
+ * No upstream (fresh repo) means nothing to integrate. On any failure the rebase
+ * is aborted so the clone is left as it was, and the error says nothing was pushed.
+ */
+export async function syncBeforePush(
+  repo: RepoConfig,
+  auth?: RepoAuthHooks,
+): Promise<void> {
+  if (!(await git.hasUpstream(repo.localPath))) return;
+  try {
+    await pullWithAuth(repo, auth);
+  } catch (err) {
+    await git.abortRebase(repo.localPath);
+    const cause = err instanceof Error ? err.message : String(err);
+    throw new Error(
+      "Nothing was pushed: could not integrate the latest changes from the " +
+        `backup repo. ${cause}`,
+    );
+  }
+}
+
+/**
+ * Files the backup repo currently holds: the upstream tree, else HEAD, else [].
+ * Upstream first so unpushed local commits (e.g. from an older arbella) are
+ * judged against what the remote really has.
+ */
+export async function committedFiles(localPath: string): Promise<string[]> {
+  if (await git.hasUpstream(localPath)) {
+    return git.listTrackedFiles(localPath, "@{upstream}");
+  }
+  return git.listTrackedFiles(localPath, "HEAD");
+}
+
+/**
  * Create the remote repo if missing and return the resolved RepoConfig (R11).
  *
  * Behavior:
