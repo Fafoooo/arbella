@@ -331,6 +331,10 @@ describe("sanitizer: secret-named assignments never break code", () => {
     ['secretKey: "abc123def456ghi"', `secretKey: "${REDACTED}"`],
     ["SECRETKEY=abc123def456ghi", `SECRETKEY=${REDACTED}`],
     ['tokenValue: "abc123def456ghi"', `tokenValue: "${REDACTED}"`],
+    // Any letter case, as on main: only a same-case run-on (TOKENS) is excluded.
+    ["secretkey=abc123def456ghi", `secretkey=${REDACTED}`],
+    ["Api_KEY=abc123def456ghi", `Api_KEY=${REDACTED}`],
+    ["PassWord=abc123def456ghi", `PassWord=${REDACTED}`],
     ['apiKeyValue = "abc123def456ghi"', `apiKeyValue = "${REDACTED}"`],
     ["X-API-Key: abc123def456ghi", `X-API-Key: "${REDACTED}"`],
     // A webhook carries its secret in the URL path (host kept generic so the

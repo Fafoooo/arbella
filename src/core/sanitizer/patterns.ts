@@ -64,11 +64,9 @@ function isLiteralSecret(written: string): boolean {
 }
 
 /**
- * NAME [:=] VALUE where NAME carries a secret stem that ends a word: an UPPER
- * stem may not run on into capitals (TOKENS) and a lower/camel stem not into
- * lower case (tokens, tokenizer, secretary), so secretKey, tokenValue and
- * SECRETKEY stay in. The name parts are bounded so a megabyte-long identifier
- * stays linear. The
+ * NAME [:=] VALUE where NAME contains a secret stem in any letter case; the
+ * replacer decides with isSecretName whether the stem ends a word. The name
+ * parts are bounded so a megabyte-long identifier stays linear. The
  * operator never spans a line, and `:-`/`:=` cover shell defaults. A quoted
  * value honours backslash escapes, falling back to the plain form (in sh, `\'`
  * ends a single-quoted string); an unquoted one stops at control characters so
@@ -76,13 +74,32 @@ function isLiteralSecret(written: string): boolean {
  * 1 name, 2 operator with spacing, 3 value as written.
  */
 const ENV_ASSIGNMENT =
-  /\b([A-Za-z0-9_]{0,64}(?:(?:API[_-]?KEY|SECRET|TOKEN|PASSWORD|PASSWD|PRIVATE[_-]?KEY|ACCESS[_-]?KEY|CLIENT[_-]?SECRET)(?![A-JL-Z])|(?:(?:API|[Aa]pi)[_-]?[Kk]ey|[Ss]ecret|[Tt]oken|[Pp]assw(?:or)?d|[Pp]rivate[_-]?[Kk]ey|[Aa]ccess[_-]?[Kk]ey|[Cc]lient[_-]?[Ss]ecret)(?![a-z]))[A-Za-z0-9_]{0,64})([ \t]*(?::[-=]?(?![=>~:+?])|=(?![=>~:?]))[ \t]*)("(?:\\.|[^"\\\n])*"|"[^"\n]*"|'(?:\\.|[^'\\\n])*'|'[^'\n]*'|`[^`\n]*`|[^\s\0-\x1f\uFFFD"'`;,)\]}#]+)/g;
+  /\b([A-Za-z0-9_]{0,64}(?:API[_-]?KEY|SECRET|TOKEN|PASSWORD|PASSWD|PRIVATE[_-]?KEY|ACCESS[_-]?KEY|CLIENT[_-]?SECRET)[A-Za-z0-9_]{0,64})([ \t]*(?::[-=]?(?![=>~:+?])|=(?![=>~:?]))[ \t]*)("(?:\\.|[^"\\\n])*"|"[^"\n]*"|'(?:\\.|[^'\\\n])*'|'[^'\n]*'|`[^`\n]*`|[^\s\0-\x1f\uFFFD"'`;,)\]}#]+)/gi;
 
 /**
  * "…" > ${X:-…} > literal is as deep as real code nests. Deeper is
  * pathological; it is redacted whole rather than recursed into.
  */
 const MAX_ASSIGNMENT_DEPTH = 4;
+
+/** Secret stems inside a name, in any letter case. */
+const SECRET_NAME_STEM =
+  /api[_-]?key|secret|token|passw(?:or)?d|private[_-]?key|access[_-]?key|client[_-]?secret/gi;
+
+/**
+ * True when a stem in `name` ends a word: nothing or a non-letter follows, a
+ * `k` follows (secretKey, SECRETKEY, secretkey), or a camel hump does
+ * (tokenValue, apiKeyValue). A same-case run-on is another word: TOKENS,
+ * tokenizer, secretary.
+ */
+function isSecretName(name: string): boolean {
+  for (const m of name.matchAll(SECRET_NAME_STEM)) {
+    const next = name[(m.index ?? 0) + m[0].length] ?? "";
+    if (!/[A-Za-z]/.test(next) || /k/i.test(next)) return true;
+    if (/[a-z]/.test(m[0].slice(-1)) && /[A-Z]/.test(next)) return true;
+  }
+  return false;
+}
 
 /**
  * Replacer that swaps only the literal VALUE of a secret-named assignment. A
@@ -92,13 +109,20 @@ const MAX_ASSIGNMENT_DEPTH = 4;
  * and its `}}` closes a shell `${X:-…}` early.
  */
 function literalRedactor(depth: number) {
-  return (_match: string, name: string, op: string, written: string): string => {
-    // Past the nesting limit the value is redacted whole: fail closed.
-    if (depth >= MAX_ASSIGNMENT_DEPTH || isLiteralSecret(written)) {
+  return (match: string, name: string, op: string, written: string): string => {
+    const secretName = isSecretName(name);
+    const atLimit = depth >= MAX_ASSIGNMENT_DEPTH;
+    // Past the nesting limit a value that may hold a secret is redacted whole:
+    // fail closed rather than recurse further.
+    const redact = atLimit
+      ? secretName || new RegExp(SECRET_NAME_STEM.source, "i").test(written)
+      : secretName && isLiteralSecret(written);
+    if (redact) {
       const own = /^["'`]/.test(written) ? written[0] : "";
       const quote = own || (op.includes(":") ? '"' : "");
       return `${name}${op}${quote}${REDACTED}${quote}`;
     }
+    if (atLimit) return match;
     return `${name}${op}${written.replace(new RegExp(ENV_ASSIGNMENT), literalRedactor(depth + 1))}`;
   };
 }
