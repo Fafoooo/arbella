@@ -256,9 +256,11 @@ const MCP_SECRET_MAPS = new Set(["env", "headers", "http_headers", "env_http_hea
 /** Text safe for one report line: no control characters (escape sequences, newlines). */
 export const plain = (s: string): string => s.replace(/\p{C}/gu, "");
 
-/** `p` with the home directory shown as "~". */
-export const tildify = (p: string, home: string): string =>
-  p === home ? "~" : p.startsWith(home + "/") || p.startsWith(home + "\\") ? "~" + p.slice(home.length) : p;
+/** `p` as printed: home shown as "~", always with "/" separators (Windows too). Display only. */
+export function tildify(p: string, home: string): string {
+  const under = p === home || p.startsWith(home + "/") || p.startsWith(home + "\\");
+  return (under ? "~" + p.slice(home.length) : p).replace(/\\/g, "/");
+}
 
 /**
  * One report line body, e.g. "codex mcp unifi-network → UNIFI_NETWORK_PASSWORD"

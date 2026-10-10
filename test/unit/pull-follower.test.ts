@@ -39,7 +39,9 @@ vi.mock("../../src/core/homefiles/restore.js", async (importOriginal) => {
 });
 
 import { run } from "../../src/commands/restore.js";
-import { saveConfig, defaultConfig } from "../../src/core/config/index.js";
+import { saveConfig, defaultConfig, configPath } from "../../src/core/config/index.js";
+import { dataDir } from "../../src/platform/os.js";
+import { ledgerPath } from "../../src/core/placement/ledger.js";
 import { HOOK_TAG } from "../../src/core/autobackup/hook.js";
 import { REDACTED as R } from "../../src/core/sanitizer/patterns.js";
 
@@ -55,7 +57,7 @@ let stderr: string[];
 
 // Set on the real process.env (never replace the object): os.homedir() reads
 // the C-level environment, which only assignments to process.env reach.
-const ENV_KEYS = ["HOME", "USERPROFILE", "XDG_CONFIG_HOME", "XDG_DATA_HOME"] as const;
+const ENV_KEYS = ["HOME", "USERPROFILE", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "APPDATA", "LOCALAPPDATA"] as const;
 const savedEnv = Object.fromEntries(ENV_KEYS.map((k) => [k, process.env[k]]));
 
 const exists = (p: string): Promise<boolean> => fsp.access(p).then(() => true, () => false);
@@ -72,6 +74,8 @@ beforeEach(async () => {
     USERPROFILE: home,
     XDG_CONFIG_HOME: xdgConfig,
     XDG_DATA_HOME: xdgData,
+    APPDATA: xdgConfig,
+    LOCALAPPDATA: xdgData,
   });
 
   gitMocks.isGitRepo.mockReset().mockImplementation((p: string) => exists(path.join(p, "arbella.json")));
@@ -127,9 +131,9 @@ async function writeRemote(
   );
 }
 
-const ledgerFile = (): string => path.join(xdgData, "arbella", "pull-ledger.json");
+const ledgerFile = (): string => ledgerPath();
 
-const configFile = (): string => path.join(xdgConfig, "arbella", "config.json");
+const configFile = (): string => configPath();
 const readConfig = async (): Promise<Record<string, any>> =>
   JSON.parse(await fsp.readFile(configFile(), "utf8"));
 const claudeHome = (...p: string[]): string => path.join(home, ".claude", ...p);
@@ -158,7 +162,7 @@ describe("arbella pull as a follower", () => {
     expect(cfg.sourceOfTruth).toBe("repo");
     expect(cfg.autoBackup).toBe("off");
     expect(cfg.repo.url).toBe(URL);
-    expect(cfg.repo.localPath).toBe(path.join(xdgData, "arbella", "restore", "me-cfg"));
+    expect(cfg.repo.localPath).toBe(path.join(dataDir(), "restore", "me-cfg"));
     expect(cfg.machineId).toEqual(expect.any(String));
     expect(cfg.tools).toEqual(["claude", "codex"]);
     expect(cfg.includeMemories).toBe(true);

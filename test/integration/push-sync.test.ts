@@ -19,6 +19,10 @@ const IDENT = {
   GIT_AUTHOR_EMAIL: "t@example.com",
   GIT_COMMITTER_NAME: "t",
   GIT_COMMITTER_EMAIL: "t@example.com",
+  // Windows autocrlf would turn "a\n" into "a\r\n" in the checked-out files.
+  GIT_CONFIG_COUNT: "1",
+  GIT_CONFIG_KEY_0: "core.autocrlf",
+  GIT_CONFIG_VALUE_0: "false",
 };
 const saved: Record<string, string | undefined> = {};
 let tmp: string;

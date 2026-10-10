@@ -20,7 +20,7 @@ import { followerConfig, saveConfig } from "../../src/core/config/index.js";
 import { saveLedger } from "../../src/core/placement/ledger.js";
 import { fs as realFs } from "../../src/utils/fs.js";
 
-const ENV_KEYS = ["HOME", "USERPROFILE", "XDG_CONFIG_HOME", "XDG_DATA_HOME"] as const;
+const ENV_KEYS = ["HOME", "USERPROFILE", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "APPDATA", "LOCALAPPDATA"] as const;
 const savedEnv = Object.fromEntries(ENV_KEYS.map((k) => [k, process.env[k]]));
 
 let root: string;
@@ -36,6 +36,8 @@ beforeEach(async () => {
     USERPROFILE: home,
     XDG_CONFIG_HOME: path.join(root, "xdg-config"),
     XDG_DATA_HOME: path.join(root, "xdg-data"),
+    APPDATA: path.join(root, "xdg-config"),
+    LOCALAPPDATA: path.join(root, "xdg-data"),
   });
   stderr = [];
   vi.spyOn(process.stderr, "write").mockImplementation((chunk: string | Uint8Array) => {

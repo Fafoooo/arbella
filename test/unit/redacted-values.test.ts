@@ -13,6 +13,7 @@ import {
   repairRedacted,
   repairRedactedText,
   structuredKind,
+  tildify,
 } from "../../src/core/placement/redacted.js";
 import { REDACTED } from "../../src/core/sanitizer/patterns.js";
 
@@ -358,5 +359,13 @@ describe("mergeRedacted: binding keys", () => {
   it("mergeRedactedText carries unsafe through", () => {
     const text = JSON.stringify({ s: { command: "evil", env: { T: R } } });
     expect(mergeRedactedText("json", text, JSON.stringify(local))?.unsafe).toEqual([["s", "env", "T"]]);
+  });
+});
+
+describe("tildify", () => {
+  it("shows a Windows home as ~ with forward slashes", () => {
+    expect(tildify("C:\\Users\\u\\.claude\\settings.json", "C:\\Users\\u")).toBe("~/.claude/settings.json");
+    expect(tildify("C:\\Users\\u", "C:\\Users\\u")).toBe("~");
+    expect(tildify("/home/u/.claude/a.md", "/home/u")).toBe("~/.claude/a.md");
   });
 });
