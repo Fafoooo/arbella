@@ -17,6 +17,172 @@ export interface SecretPattern {
   name: string;
   /** Regex matching the secret token. SHOULD be global so all hits are replaced. */
   regex: RegExp;
+  /**
+   * Builds the replacement for one match (a String#replace callback). Absent,
+   * the whole match becomes REDACTED; returning the match itself keeps it.
+   */
+  replace?: (match: string, ...captures: string[]) => string;
+}
+
+/** Apply one pattern to `text`. Returns `text` itself when nothing was redacted. */
+export function applySecretPattern(text: string, pat: SecretPattern): string {
+  // A fresh copy: a shared global regex carries lastIndex between calls.
+  const re = new RegExp(pat.regex.source, pat.regex.flags);
+  return pat.replace ? text.replace(re, pat.replace) : text.replace(re, REDACTED);
+}
+
+/** Shortest assigned literal treated as a credential (below that: flags, words). */
+const LITERAL_SECRET_MIN_LENGTH = 8;
+
+/**
+ * True when the value side of a secret-named assignment, as written (quotes
+ * included), is a LITERAL credential rather than code that produces one.
+ *
+ * Kept: shell expansions (`$(...)`, `${...}`, `$VAR`, backticks — except inside
+ * single quotes or after a backslash; a `$` before anything else, as in
+ * `Pa$$w0rd`, is literal), already-redacted text, plain URLs, paths,
+ * environment variable names, numbers, unquoted words (a generated credential
+ * mixes letters and digits; a bare word is an identifier or a type), quoted
+ * prose or commands, and unquoted expressions such as `process.env.X` or
+ * `os.environ[`. A run of 20+ letters/digits is a token even when it looks like
+ * a URL, a path or a dotted name (a webhook path, `/9xR4k…`, Vault `hvs.CAES…`).
+ */
+function isLiteralSecret(written: string): boolean {
+  const quote = /^["'`]/.test(written) ? written[0] : "";
+  const value = quote ? written.slice(1, -1) : written;
+  // Control characters only occur in a binary view: fail closed there.
+  if (/[\0-\x08\x0e-\x1f\uFFFD]/.test(value)) return true;
+  // Backticks run their content in sh, like $(…): code, not a value.
+  if (quote === "`") return false;
+  // A backslash escape (`\$`) is literal data; drop escapes before looking for expansions.
+  const unescaped = value.replace(/\\[\s\S]/g, "");
+  if (quote !== "'" && /(?<!\$)\$[({A-Za-z_]|`/.test(unescaped)) return false;
+  // Already redacted (idempotence): the value IS the marker — unquoted, it stops
+  // at `}`. A value that merely contains braces or the marker is data.
+  if (value === REDACTED || value === "{{REDACTED") return false;
+  const tokenRun = /[A-Za-z0-9]{20,}/.test(value);
+  // A webhook URL carries its secret in the path: hooks.slack.com/services/T…/B…/<token>.
+  if (/^[A-Za-z][A-Za-z0-9+.-]*:\/\//.test(value)) return tokenRun || isCredentialBearingUrl(value);
+  // Quoted, four or more plain words are a passphrase; other whitespace means
+  // prose or a command ("gh auth token", "Enter your password:").
+  if (/\s/.test(value)) return quote !== "" && /^[A-Za-z0-9]+(?:[ \t]+[A-Za-z0-9]+){3,}$/.test(value);
+  if (value.length < LITERAL_SECRET_MIN_LENGTH) return false;
+  if (!/[A-Za-z]/.test(value)) return false;
+  // An environment variable NAME is a reference: "OPENAI_API_KEY", GITHUB_TOKEN_2.
+  if (/^[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+$/.test(value)) return false;
+  if (!tokenRun && isPathLike(value)) return false;
+  // Quoted, a single word is a literal even without digits ("correcthorse",
+  // "P@ssword!"); a separated identifier ("refresh_token", "your-api-key") is not.
+  if (quote) return /\d/.test(value) || !/[_.\/-]/.test(value);
+  // Unquoted, a word without digits is an identifier or a type: `token: string`.
+  if (!/\d/.test(value)) return false;
+  return !/[(\[{<>|\\]/.test(unescaped) && (tokenRun || !/^[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+$/.test(value));
+}
+
+/**
+ * Absolute, home- or dot-relative paths, and relative ones that end in a file
+ * extension or are all lower case (config/token2.json, secrets/db_password_v2)
+ * — unlike mixed-case base64 such as `aB3xY9zQ/1kLmN0pQ`.
+ */
+function isPathLike(value: string): boolean {
+  if (/^(?:\/|~\/|\.{1,2}\/)/.test(value)) return true;
+  return /^[\w.-]+(?:\/[\w.-]+)+$/.test(value) && (/\.[A-Za-z]\w{0,5}$/.test(value) || !/[A-Z]/.test(value));
+}
+
+/**
+ * NAME [:=] VALUE where NAME contains a secret stem in any letter case; the
+ * replacer decides with isSecretName whether the stem ends a word. The name
+ * parts are bounded so a megabyte-long identifier stays linear. The
+ * operator never spans a line, and `:-`/`:=` cover shell defaults. A `${…}`
+ * without nested braces is one unit, on its own and inside "…", as in sh (the
+ * alternatives inside "…" are disjoint, so an unclosed quote cannot backtrack
+ * exponentially), so
+ * `"${X:-"default"}"` is read whole. A quoted
+ * value honours backslash escapes, falling back to the plain form (in sh, `\'`
+ * ends a single-quoted string); an unquoted one stops at control characters so
+ * a NUL-separated binary view still trips the binary fail-safe, and treats `#`
+ * as a comment only where a word starts (in sh, `abc#123` is one word). Captures:
+ * 1 name, 2 operator with spacing, 3 value as written.
+ */
+const ENV_ASSIGNMENT =
+  /\b([A-Za-z0-9_]{0,64}(?:API[_-]?KEY|SECRET|TOKEN|PASSWORD|PASSWD|PRIVATE[_-]?KEY|ACCESS[_-]?KEY|CLIENT[_-]?SECRET)[A-Za-z0-9_]{0,64})([ \t]*(?::[-=]?(?![=>~:+?])|=(?![=>~:?]))[ \t]*)(\$\{[^{}\n]*\}|"(?:\\.|\$\{[^{}\n]*\}|\$(?!\{)|[^"\\\n$])*"|"[^"\n]*"|'(?:\\.|[^'\\\n])*'|'[^'\n]*'|`[^`\n]*`|[^\s\0-\x1f\uFFFD"'`;,)\]}#][^\s\0-\x1f\uFFFD"'`;,)\]}]*)/gi;
+
+/**
+ * "…" > ${X:-…} > literal is as deep as real code nests. Deeper is
+ * pathological; it is redacted whole rather than recursed into.
+ */
+const MAX_ASSIGNMENT_DEPTH = 4;
+
+/**
+ * The default of a shell expansion, `${VAR:-default}` / `${VAR:=default}` (or
+ * without the colon), when it is a plain or quoted word; backslash escapes such
+ * as `\$` are part of the word. The closing brace may lie just past an unquoted
+ * value, which stops at `}`.
+ */
+const SHELL_DEFAULT = /(\$\{[A-Za-z_]\w*:?[-=])("(?:\\.|[^"\\\n])*"|'[^'\n]*'|(?:\\.|[^\s{}$`"'\\])+)(?=\}|$)/g;
+
+/** Expansions inside a value: `${…}`, `$(…)`, `$NAME`, `` `…` ``. */
+const EXPANSION = /\$\{[^{}]*\}|\$\([^()]*\)|\$[A-Za-z_]\w*|`[^`]*`/g;
+
+/**
+ * True when the part of a value outside its expansions is itself a literal
+ * secret: `"${PREFIX}Sup3rS3cret9"` hard-codes a credential next to the code.
+ */
+function hasLiteralResidue(written: string): boolean {
+  const value = /^["']/.test(written) ? written.slice(1, -1) : written;
+  const residue = value.replace(EXPANSION, "");
+  return residue !== value && isLiteralSecret(residue);
+}
+
+/** Secret stems inside a name, in any letter case. */
+const SECRET_NAME_STEM =
+  /api[_-]?key|secret|token|passw(?:or)?d|private[_-]?key|access[_-]?key|client[_-]?secret/gi;
+
+/**
+ * True when a stem in `name` ends a word: nothing or a non-letter follows, a
+ * `k` follows (secretKey, SECRETKEY, secretkey), or a camel hump does
+ * (tokenValue, apiKeyValue). A same-case run-on is another word: TOKENS,
+ * tokenizer, secretary.
+ */
+function isSecretName(name: string): boolean {
+  for (const m of name.matchAll(SECRET_NAME_STEM)) {
+    const next = name[(m.index ?? 0) + m[0].length] ?? "";
+    if (!/[A-Za-z]/.test(next) || /k/i.test(next)) return true;
+    if (/[a-z]/.test(m[0].slice(-1)) && /[A-Z]/.test(next)) return true;
+  }
+  return false;
+}
+
+/**
+ * Replacer that swaps only the literal VALUE of a secret-named assignment. A
+ * value that is code is kept but scanned again, because it can carry a literal
+ * default: `"${DB_PASSWORD:-…}"` keeps its expansion and loses the literal.
+ * After `:` an unquoted marker is quoted — bare, `{{REDACTED}}` is a YAML map
+ * and its `}}` closes a shell `${X:-…}` early.
+ */
+function literalRedactor(depth: number) {
+  return (match: string, name: string, op: string, written: string): string => {
+    const secretName = isSecretName(name);
+    const atLimit = depth >= MAX_ASSIGNMENT_DEPTH;
+    // Past the nesting limit a value that may hold a secret is redacted whole:
+    // fail closed rather than recurse further.
+    const redact = atLimit
+      ? secretName || new RegExp(SECRET_NAME_STEM.source, "i").test(written)
+      : secretName && (isLiteralSecret(written) || hasLiteralResidue(written));
+    if (redact) {
+      const own = /^["'`]/.test(written) ? written[0] : "";
+      const quote = own || (op.includes(":") ? '"' : "");
+      return `${name}${op}${quote}${REDACTED}${quote}`;
+    }
+    if (atLimit) return match;
+    // A secret-named value's fallbacks are its value too: "${OTHER:-<literal>}".
+    const fallbacks = secretName
+      ? written.replace(SHELL_DEFAULT, (whole: string, head: string, fallback: string) =>
+          isLiteralSecret(fallback) ? `${head}"${REDACTED}"` : whole,
+        )
+      : written;
+    return `${name}${op}${fallbacks.replace(new RegExp(ENV_ASSIGNMENT), literalRedactor(depth + 1))}`;
+  };
 }
 
 /**
@@ -25,8 +191,9 @@ export interface SecretPattern {
  *
  * Each regex uses the `g` flag so String#replace swaps every occurrence, and is
  * written to match the TOKEN itself (not surrounding quotes/keys) so the redacted
- * marker drops cleanly in place. Patterns are intentionally specific to keep the
- * false-positive rate low on ordinary prose and paths.
+ * marker drops cleanly in place — or carries a `replace` that keeps them.
+ * Patterns are intentionally specific to keep the false-positive rate low on
+ * ordinary prose and paths.
  */
 export const SECRET_PATTERNS: readonly SecretPattern[] = [
   // OpenAI-style keys: sk-..., sk-proj-..., sk-ant-... (>= 20 token chars).
@@ -104,17 +271,16 @@ export const SECRET_PATTERNS: readonly SecretPattern[] = [
     regex: /-----BEGIN (?:[A-Z0-9 ]+ )?PRIVATE KEY-----[\s\S]*?-----END (?:[A-Z0-9 ]+ )?PRIVATE KEY-----/g,
   },
   // Generic "<SECRETKEY>=<value>" / "<SECRETKEY>: <value>" assignments where the
-  // key name itself screams secret (env-style). Captures the VALUE only via a
-  // replacer-aware group reference is NOT possible from a flat list, so this
-  // pattern matches the whole assignment; the sanitizer treats SECRET_KEY_NAMES
-  // structurally for JSON/TOML and uses this for free-text fallback (shell/python
-  // hook scripts). Case-INSENSITIVE (the "i" flag) + a mixed-case key class so
-  // lowercase assignments like `export my_api_key=...` / `api_token=...` that
-  // real users write in hooks are caught too, not just SCREAMING_CASE.
+  // key name itself screams secret (env-style), for the free-text fallback
+  // (shell/python hook scripts, YAML, docs); JSON/TOML use SECRET_KEY_NAMES
+  // structurally. Case-INSENSITIVE so `export my_api_key=...` is caught too.
+  // Only a LITERAL value is replaced (see ENV_ASSIGNMENT): rewriting the whole
+  // assignment turned `TOTAL_INPUT_TOKENS=$(echo ...)` into
+  // `{{REDACTED}} "$input" ...` and broke every script it touched.
   {
     name: "env-assignment-secret",
-    regex:
-      /\b([A-Za-z0-9_]*(?:API[_-]?KEY|SECRET|TOKEN|PASSWORD|PASSWD|PRIVATE[_-]?KEY|ACCESS[_-]?KEY|CLIENT[_-]?SECRET)[A-Za-z0-9_]*)\s*[:=]\s*["']?[^\s"'#]{6,}["']?/gi,
+    regex: ENV_ASSIGNMENT,
+    replace: literalRedactor(0),
   },
 ];
 
@@ -156,7 +322,9 @@ export const SECRET_KEY_NAMES: readonly string[] = [
  * Container key names whose ENTIRE subtree holds secret leaves: MCP server env
  * maps and request headers. Env vars are named arbitrarily (KEY, OPENAI_KEY,
  * GROQ_WHATEVER), so key-name matching alone cannot catch them — anything a user
- * puts under one of these maps is treated as a credential. Shared by the JSON
+ * puts under one of these maps is treated as a credential, except — under an
+ * env map only — a switch under a non-secret name
+ * (isSwitchValue). Shared by the JSON
  * structural pass (sanitizeJson) and codex's TOML pass so both stay consistent.
  */
 export const SECRET_CONTAINER_KEYS: readonly string[] = ["env", "environment", "headers"];
@@ -164,6 +332,31 @@ export const SECRET_CONTAINER_KEYS: readonly string[] = ["env", "environment", "
 /** True if a JSON/TOML key introduces a secret container (env/environment/headers). */
 export function isSecretContainerKey(key: string): boolean {
   return SECRET_CONTAINER_KEYS.includes(key.toLowerCase());
+}
+
+/**
+ * The containers that hold settings rather than request credentials: env maps.
+ * Only below these does isSwitchValue spare a flag or a number; header
+ * values stay redacted whatever they look like (a numeric OTP is a credential).
+ */
+export function isSettingsContainerKey(key: string): boolean {
+  return ["env", "environment"].includes(key.toLowerCase());
+}
+
+/** true/false, yes/no, on/off or a single digit. */
+const SWITCH = /^(?:true|false|yes|no|on|off|\d)$/i;
+
+/**
+ * True for a feature switch ("1", "false", "on", true), which is never a
+ * credential. Exempts such leaves from the blanket env-container rule only; a
+ * secret KEY NAME still redacts them. Multi-digit numbers stay redacted: under
+ * names like AUTH_CODE, OTP or MFA_CODE they are live one-time codes.
+ */
+export function isSwitchValue(value: unknown): boolean {
+  return (
+    typeof value === "boolean" ||
+    ((typeof value === "string" || typeof value === "number") && SWITCH.test(String(value)))
+  );
 }
 
 /* -------------------------------------------------------------------------- */

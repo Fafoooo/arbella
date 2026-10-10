@@ -45,6 +45,88 @@ env = { SERVICE_TOKEN = "opaque-private-token", bearer_token_env_var = "nested-p
   expect(result.sanitizedToml).not.toContain("opaque-private");
 });
 
+it("redacts password-named TOML numbers and every header value, keeps env flags", () => {
+  const result = processConfigToml(`
+[mcp_servers.db.env]
+PGPASSWORD = 123456
+YUBIKEY_PIN = 4711
+MCP_TIMEOUT = 30000
+DEBUG = true
+
+[mcp_servers.db.headers]
+X_OTP = "123456"
+X_DEBUG = "true"
+`, createTemplater(), makeVariables("/home/test", "test", "linux", "/home/test/.codex"));
+  expect(parseToml(result.sanitizedToml).mcp_servers).toEqual({ db: {
+    env: { PGPASSWORD: "{{REDACTED}}", YUBIKEY_PIN: "{{REDACTED}}", MCP_TIMEOUT: "{{REDACTED}}", DEBUG: true },
+    headers: { X_OTP: "{{REDACTED}}", X_DEBUG: "{{REDACTED}}" },
+  } });
+});
+
+it("keeps the key when an env value is an array, and redacts secret-named top-level numbers", () => {
+  const result = processConfigToml(`
+api_key = 12345678
+
+[mcp_servers.db.env]
+PGPASSWORD = ["123456"]
+DB_PASS = [4711]
+RETRIES = [3]
+`, createTemplater(), makeVariables("/home/test", "test", "linux", "/home/test/.codex"));
+  const parsed = parseToml(result.sanitizedToml);
+  expect(parsed.api_key).toBe("{{REDACTED}}");
+  expect(parsed.mcp_servers).toEqual({ db: { env: {
+    PGPASSWORD: ["{{REDACTED}}"],
+    DB_PASS: ["{{REDACTED}}"],
+    RETRIES: [3],
+  } } });
+});
+
+it("keeps a TOML MCP server whose NAME contains a secret stem, still redacting its secrets", () => {
+  const result = processConfigToml(`
+[mcp_servers.github-token]
+command = "npx"
+args = ["-y", "github-token-mcp"]
+api_token = "opaque-private-token"
+`, createTemplater(), makeVariables("/home/test", "test", "linux", "/home/test/.codex"));
+  expect(parseToml(result.sanitizedToml).mcp_servers).toEqual({ "github-token": {
+    command: "npx",
+    args: ["-y", "github-token-mcp"],
+    api_token: "{{REDACTED}}",
+  } });
+});
+
+it("keeps entry names as identifiers but redacts secret-named tables elsewhere", () => {
+  const result = processConfigToml(`
+[profiles.token-saver]
+model = "o3"
+
+[profiles.default.auth]
+value = "opaque-private-value"
+`, createTemplater(), makeVariables("/home/test", "test", "linux", "/home/test/.codex"));
+  expect(parseToml(result.sanitizedToml).profiles).toEqual({
+    "token-saver": { model: "o3" },
+    default: { auth: { value: "{{REDACTED}}" } },
+  });
+});
+
+it("keeps switch-valued MCP env flags in config.toml, redacts the rest", () => {
+  const result = processConfigToml(`
+[mcp_servers.unifi.env]
+UNIFI_NETWORK_VERIFY_SSL = "false"
+NODE_REPL_NATIVE_PIPE_CONNECT_TIMEOUT_MS = "30000"
+UNIFI_NETWORK_PASSWORD = "1234567"
+UNIFI_NETWORK_HOST = "opaque-host-value"
+PGPASSWORD = "123456"
+`, createTemplater(), makeVariables("/home/test", "test", "linux", "/home/test/.codex"));
+  expect(parseToml(result.sanitizedToml).mcp_servers).toEqual({ unifi: { env: {
+    UNIFI_NETWORK_VERIFY_SSL: "false",
+    NODE_REPL_NATIVE_PIPE_CONNECT_TIMEOUT_MS: "{{REDACTED}}",
+    UNIFI_NETWORK_PASSWORD: "{{REDACTED}}",
+    UNIFI_NETWORK_HOST: "{{REDACTED}}",
+    PGPASSWORD: "{{REDACTED}}",
+  } } });
+});
+
 /** Minimal no-op Logger fake shared by the restore-planning tests below. */
 function fakeLogger(): Logger {
   return {

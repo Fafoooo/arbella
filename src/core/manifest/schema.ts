@@ -115,8 +115,9 @@ export const npmGlobalEntrySchema = z.object({
 
 /**
  * One MCP server definition, stored VERBATIM apart from two transformations the
- * capture side always applies: secret values are redacted (every leaf under an
- * env/environment/headers map becomes {{REDACTED}} unless includeSecrets), and
+ * capture side always applies: secret values are redacted (every headers value,
+ * and every env/environment value except a switch such as "1" or "false"
+ * under a non-secret name, becomes {{REDACTED}} unless includeSecrets), and
  * machine paths are folded to {{HOME}}/{{TOOL_HOME}} placeholders. The shape is
  * intentionally open (`unknown` values): MCP server configs are vendor-defined
  * and arbella must round-trip fields it has never heard of.

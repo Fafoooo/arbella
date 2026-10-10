@@ -34,9 +34,12 @@ import { COMMON_DENY, matchesDeny } from "./denylist.js";
 import {
   REDACTED,
   SECRET_PATTERNS,
+  applySecretPattern,
   isCredentialBearingUrl,
+  isSwitchValue,
   isSecretContainerKey,
   isSecretKey,
+  isSettingsContainerKey,
   isUrlKey,
   type SecretPattern,
 } from "./patterns.js";
@@ -74,11 +77,10 @@ export function redactValue(
   let firstMatch: string | null = null;
   let out = value;
   for (const pat of SECRET_PATTERNS) {
-    const re = freshRegex(pat.regex);
-    if (re.test(out)) {
-      if (firstMatch === null) firstMatch = pat.name;
-      out = out.replace(freshRegex(pat.regex), REDACTED);
-    }
+    const next = applySecretPattern(out, pat);
+    if (next === out) continue;
+    if (firstMatch === null) firstMatch = pat.name;
+    out = next;
   }
   return { value: out, matched: firstMatch };
 }
@@ -113,8 +115,9 @@ export function createSanitizer(): SanitizerService {
     let changed = false;
 
     for (const pat of SECRET_PATTERNS) {
-      if (!freshRegex(pat.regex).test(out)) continue;
-      out = out.replace(freshRegex(pat.regex), REDACTED);
+      const next = applySecretPattern(out, pat);
+      if (next === out) continue;
+      out = next;
       changed = true;
       found.push(valueSecretRef(tool, source, pat));
     }
@@ -315,10 +318,11 @@ function detectJsonIndent(content: string): number | string {
  * Recursively clone `node`, redacting secret values. `keyPath` is the dotted
  * path to `node` from the root (for SecretRef.source); `parentKey` is the
  * immediate key under which `node` sits (drives isSecretKey for scalars).
- * `inSecretContainer` is set once the walk descends under an env/environment/
- * headers map and stays set for the whole subtree: env vars are named
- * arbitrarily (KEY, OPENAI_KEY, ...), so EVERY leaf below such a container is
- * treated as secret — mirroring codex's TOML structural pass.
+ * `container` is set once the walk descends under an env/environment/headers
+ * map and stays set for the whole subtree: env vars are named arbitrarily (KEY,
+ * OPENAI_KEY, ...), so every leaf below such a container is treated as secret —
+ * except, below an env map only, a switch (isSwitchValue).
+ * Mirrors codex's TOML structural pass.
  */
 function cloneRedact(
   node: unknown,
@@ -327,21 +331,24 @@ function cloneRedact(
   keyPath: string,
   found: SecretRef[],
   parentKey = "",
-  inSecretContainer = false,
+  container: Container = "none",
+  parentIsEntryName = false,
 ): unknown {
   // Arrays: clone element-wise, preserving index in the path.
   if (Array.isArray(node)) {
     return node.map((el, i) =>
-      cloneRedact(el, tool, source, joinPath(keyPath, String(i)), found, parentKey, inSecretContainer),
+      cloneRedact(el, tool, source, joinPath(keyPath, String(i)), found, parentKey, container, parentIsEntryName),
     );
   }
 
-  // Plain objects: clone key-by-key.
+  // Plain objects: clone key-by-key. The keys of an entry map (mcpServers,
+  // enabledPlugins, ...) name entries: identifiers, never secret names.
   if (isPlainObject(node)) {
     const out: Record<string, unknown> = {};
+    const entryNames = ENTRY_MAPS.has(parentKey);
     for (const [k, v] of Object.entries(node)) {
-      const childInContainer = inSecretContainer || isSecretContainerKey(k);
-      out[k] = cloneRedact(v, tool, source, joinPath(keyPath, k), found, k, childInContainer);
+      const inner = entryNames ? container : enterContainer(container, k);
+      out[k] = cloneRedact(v, tool, source, joinPath(keyPath, k), found, k, inner, entryNames);
     }
     return out;
   }
@@ -362,8 +369,13 @@ function cloneRedact(
     return REDACTED;
   }
 
-  // Scalars (string/number/boolean/null/undefined): redact if warranted.
-  const keyIsSecret = parentKey.length > 0 && (isSecretKey(parentKey) || inSecretContainer);
+  // Scalars (string/number/boolean/null/undefined): redact if warranted. Under
+  // an env map a switch survives; a secret NAME still redacts it.
+  const keyIsSecret =
+    parentKey.length > 0 &&
+    ((!parentIsEntryName && isSecretKey(parentKey)) ||
+      container === "credentials" ||
+      (container === "settings" && !isSwitchValue(node)));
   const { value: redacted, matched } = redactValue(node, keyIsSecret);
   if (matched !== null && redacted !== node) {
     found.push({
@@ -380,6 +392,37 @@ function cloneRedact(
 /* -------------------------------------------------------------------------- */
 /* Helpers                                                                     */
 /* -------------------------------------------------------------------------- */
+
+/** Where a leaf sits: outside any container, under an env map, under headers. */
+type Container = "none" | "settings" | "credentials";
+
+/**
+ * Maps whose keys name entries — an MCP server called "token-optimizer", a
+ * plugin "github-token@market" — rather than settings. Their keys are
+ * identifiers, as in codex's TOML pass.
+ */
+const ENTRY_MAPS: ReadonlySet<string> = new Set([
+  "mcpServers",
+  "servers",
+  "mcp",
+  "enabledPlugins",
+  "extraKnownMarketplaces",
+  "marketplaces",
+  "plugins",
+  "projects",
+  "profiles",
+]);
+
+/**
+ * The container a child of `key` sits in: a secret key name or a credentials
+ * container (headers) makes the whole subtree credentials, as in codex's TOML
+ * pass; credentials win over settings.
+ */
+function enterContainer(current: Container, key: string): Container {
+  if (current === "credentials" || isSecretKey(key)) return "credentials";
+  if (!isSecretContainerKey(key)) return current;
+  return isSettingsContainerKey(key) ? "settings" : "credentials";
+}
 
 /** A SecretRef for a free-text pattern hit. */
 function valueSecretRef(tool: ToolId, source: string, pat: SecretPattern): SecretRef {
@@ -403,14 +446,6 @@ function describeMatch(matched: string, parentKey: string, keyPath: string): str
 /** Turn a pattern id like "github-token" into "GitHub token"-ish prose. */
 function humanizePattern(name: string): string {
   return name.replace(/[-_]/g, " ");
-}
-
-/**
- * Return a fresh, lastIndex-reset copy of a (possibly global) regex so that
- * stateful `.test()`/`.replace()` calls never interfere with one another.
- */
-function freshRegex(re: RegExp): RegExp {
-  return new RegExp(re.source, re.flags);
 }
 
 /** Join two dotted-path segments, skipping empties. */

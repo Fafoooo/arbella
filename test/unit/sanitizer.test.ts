@@ -233,6 +233,230 @@ describe("sanitizer: sanitizeFile is the key-name-aware production path (§0.6)"
   });
 });
 
+describe("sanitizer: secret-named assignments never break code", () => {
+  // A live push replaced `NAME=<first chunk of the value>` with the marker in 58
+  // scripts, e.g. `TOTAL_INPUT_TOKENS=$(echo ...)` -> `{{REDACTED}} "$input" ...`.
+  // Only a LITERAL value is a secret; the name, the operator and the quotes stay.
+
+  it("leaves a statusline script that counts tokens byte-identical", () => {
+    const script = [
+      "#!/bin/bash",
+      'input=$(cat)',
+      "TOTAL_INPUT_TOKENS=$(echo \"$input\" | jq -r '.context_window.total_input_tokens // 0')",
+      "TOTAL_OUTPUT_TOKENS=$(echo \"$input\" | jq -r '.context_window.total_output_tokens // 0')",
+      'echo "in=$TOTAL_INPUT_TOKENS out=$TOTAL_OUTPUT_TOKENS"',
+    ].join("\n");
+    const res = sanitizer.sanitizeFile(script, "claude", "statusline.sh");
+    expect(res.content).toBe(script);
+    expect(res.changed).toBe(false);
+  });
+
+  it.each([
+    "NPM_TOKEN=$(security find-generic-password -s npm -w)",
+    'export API_TOKEN="${API_TOKEN:-}"',
+    "SECRET=${1:-}",
+    'api_key = os.environ["OPENAI_API_KEY"]',
+    "const apiKey = process.env.OPENAI_API_KEY_V2;",
+    "  token: string;",
+    "  password: z.string().min(8),",
+    "const token = `${prefix}-${id}`;",
+    "API_TOKEN=`readtoken`",
+    "TOKEN=`get_key2`",
+    "TOKEN_URL=https://oauth2.googleapis.com/token",
+    "PASSWORD_FILE=/run/secrets/db_password_v2",
+    "TOKEN_FILE=config/token2.json",
+    'TOKEN_FILE="${XDG_CONFIG_HOME}/app/token2.json"',
+    'TOKEN_URL="${BASE_URL}/v1/token"',
+    'TOKEN_CMD="gh auth token"',
+    'PASSWORD_PROMPT="Enter your password:"',
+    "PASSWORD_FILE=secrets/db_password_v2",
+    'token_type_hint: "refresh_token"',
+    'api_key_env = "OPENAI_API_KEY"',
+    'GITHUB_TOKEN_VAR="GITHUB_TOKEN_2"',
+    "GITHUB_TOKEN=<your-token>",
+    'API_KEY="your-api-key-here"',
+    'tokenizer_model = "bert-base-v2"',
+    "MAX_OUTPUT_TOKENS=128000",
+  ])("keeps %s intact (expansion, lookup, type, path, URL or placeholder)", (line) => {
+    const res = sanitizer.sanitizeFile(line, "claude", "scripts/hook.sh");
+    expect(res.content).toBe(line);
+  });
+
+  it("redacts a literal value but keeps the name, operator and quotes", () => {
+    const script = [
+      'export my_api_key="literal-opaque-value-123456"',
+      "api_token=plainsecretvalue7890",
+      "export AWS_SECRET_ACCESS_KEY=uppercasevalue123456",
+      "password: 'Sup3r-Secret-Pw'",
+    ].join("\n");
+    const res = sanitizer.sanitizeFile(script, "claude", "hooks/session.sh");
+    expect(res.content).toBe(
+      [
+        `export my_api_key="${REDACTED}"`,
+        `api_token=${REDACTED}`,
+        `export AWS_SECRET_ACCESS_KEY=${REDACTED}`,
+        `password: '${REDACTED}'`,
+      ].join("\n"),
+    );
+    expect(res.found.map((ref) => ref.key)).toEqual(["env-assignment-secret"]);
+  });
+
+  it("never pulls the next line into an assignment", () => {
+    const yaml = "secret:\n  rotation_days: 30\napi_token:\n  - abc123def456\ntoken:\nabc123def456\n";
+    expect(sanitizer.sanitizeFile(yaml, "claude", "skills/x/config.yaml").content).toBe(yaml);
+  });
+
+  it("is idempotent on already-redacted text", () => {
+    const once = `export X_TOKEN="${REDACTED}"\nY_SECRET=${REDACTED}\n`;
+    const res = sanitizer.sanitizeFile(once, "claude", "hooks/x.sh");
+    expect(res.content).toBe(once);
+    expect(res.changed).toBe(false);
+  });
+
+  it("leaves a hook command string in settings.json intact", () => {
+    const command = "OPENAI_API_KEY=$(security find-generic-password -s openai -w) npx -y some-mcp";
+    const settings = JSON.stringify({ hooks: { SessionStart: [{ hooks: [{ command }] }] } }, null, 2);
+    const res = sanitizer.sanitizeFile(settings, "claude", "settings.json");
+    expect(res.content).toBe(settings);
+  });
+
+  // Leak paths an adversarial review proved against the first cut of this rule:
+  // each input below was redacted before the rewrite and must stay redacted.
+  it.each([
+    ["DB_PASSWORD=P@ssw0rd!2024", `DB_PASSWORD=${REDACTED}`],
+    [
+      'curl -s "https://api.example.com/v1/data?api_key=abc123def456ghi&limit=10"',
+      `curl -s "https://api.example.com/v1/data?api_key=${REDACTED}"`,
+    ],
+    [
+      'export DB_PASSWORD="${DB_PASSWORD:-Sup3rS3cretPw}"',
+      `export DB_PASSWORD="\${DB_PASSWORD:-"${REDACTED}"}"`,
+    ],
+    [
+      "export API_TOKEN=${API_TOKEN:-abc123def456ghi}",
+      `export API_TOKEN=\${API_TOKEN:-"${REDACTED}"}`,
+    ],
+    ["VAULT_TOKEN=hvs.CAESIFakeFakeFakeFakeFake1234567890abcd", `VAULT_TOKEN=${REDACTED}`],
+    ["AWS_SECRET_ACCESS_KEY=/9xR4kFakeFakeFakeFakeFakeFakeuP8o", `AWS_SECRET_ACCESS_KEY=${REDACTED}`],
+    ["AWS_SECRET_ACCESS_KEY=+9xR4kFakeFakeFakeFakeFakeFakeuP8o", `AWS_SECRET_ACCESS_KEY=${REDACTED}`],
+    ['secretKey: "abc123def456ghi"', `secretKey: "${REDACTED}"`],
+    ["SECRETKEY=abc123def456ghi", `SECRETKEY=${REDACTED}`],
+    ['tokenValue: "abc123def456ghi"', `tokenValue: "${REDACTED}"`],
+    // Any letter case, as on main: only a same-case run-on (TOKENS) is excluded.
+    ["secretkey=abc123def456ghi", `secretkey=${REDACTED}`],
+    // A literal glued to an expansion is still a hard-coded secret.
+    ['DB_PASSWORD="${PREFIX}Sup3rS3cret9"', `DB_PASSWORD="${REDACTED}"`],
+    // A quoted passphrase of four or more plain words.
+    ['DB_PASSWORD="Correct Horse Battery Staple"', `DB_PASSWORD="${REDACTED}"`],
+    // Only arbella's own marker means "already redacted"; other braces are data.
+    ['DB_PASSWORD="s3cr3t{{not_a_template}}"', `DB_PASSWORD="${REDACTED}"`],
+    // Only a value that IS the marker counts as redacted, not one that contains it.
+    [`DB_PASSWORD="${REDACTED}abc123real"`, `DB_PASSWORD="${REDACTED}"`],
+    // In sh, `#` inside a word is literal; only a word-initial `#` starts a comment.
+    ["DB_PASSWORD=abc123#456", `DB_PASSWORD=${REDACTED}`],
+    // `\$` is a literal dollar in sh, not an expansion.
+    ['DB_PASSWORD="correct\\$horse123"', `DB_PASSWORD="${REDACTED}"`],
+    // The default of any ${VAR:-…} inside a secret-named value is classified itself.
+    [
+      'DB_PASSWORD="${FALLBACK_VALUE:-Sup3rS3cretPw}"',
+      `DB_PASSWORD="\${FALLBACK_VALUE:-"${REDACTED}"}"`,
+    ],
+    [
+      'DB_PASSWORD="${FALLBACK_VALUE:-correct\\$horse123}"',
+      `DB_PASSWORD="\${FALLBACK_VALUE:-"${REDACTED}"}"`,
+    ],
+    [
+      `DB_PASSWORD="\${FALLBACK_VALUE:-"Sup3rS3cretPw"}"`,
+      `DB_PASSWORD="\${FALLBACK_VALUE:-"${REDACTED}"}"`,
+    ],
+    [
+      `DB_PASSWORD=\${FALLBACK_VALUE:-'Sup3rS3cretPw'}`,
+      `DB_PASSWORD=\${FALLBACK_VALUE:-"${REDACTED}"}`,
+    ],
+    // Quoted, a single word is a literal even without digits.
+    ['DB_PASSWORD="correcthorse"', `DB_PASSWORD="${REDACTED}"`],
+    ["password: 'P@ssword!'", `password: '${REDACTED}'`],
+    // Slash-separated but mixed case, no extension: base64, not a path.
+    ["API_TOKEN=aB3xY9zQ/1kLmN0pQ", `API_TOKEN=${REDACTED}`],
+    ["Api_KEY=abc123def456ghi", `Api_KEY=${REDACTED}`],
+    ["PassWord=abc123def456ghi", `PassWord=${REDACTED}`],
+    ['apiKeyValue = "abc123def456ghi"', `apiKeyValue = "${REDACTED}"`],
+    ["X-API-Key: abc123def456ghi", `X-API-Key: "${REDACTED}"`],
+    // A webhook carries its secret in the URL path (host kept generic so the
+    // fixture does not trip GitHub's secret scanning).
+    [
+      "WEBHOOK_TOKEN=https://hooks.example.com/services/T0000/B0000/FakeFakeFakeFakeFake1234",
+      `WEBHOOK_TOKEN=${REDACTED}`,
+    ],
+  ])("still redacts %s", (input, expected) => {
+    expect(sanitizer.sanitizeFile(input, "claude", "hooks/x.sh").content).toBe(expected);
+  });
+
+  it.each([
+    // `$$`, `$9` are literal outside a shell; only $( ${ $NAME and backticks expand.
+    ['DB_PASSWORD="Pa$$w0rd123"', `DB_PASSWORD="${REDACTED}"`],
+    ['password: "Xy$9abc!def"', `password: "${REDACTED}"`],
+    // An escaped quote does not end the string.
+    ['TOKEN="abcd1234\\"rest-of-secret99"', `TOKEN="${REDACTED}"`],
+    ["password = 'abcdefgh1234\\'rest99'", `password = '${REDACTED}'`],
+    // After `:` the marker is quoted: YAML keeps a string, ${X:-} keeps its brace.
+    ["api_token: abc123def456", `api_token: "${REDACTED}"`],
+  ])("redacts %s without breaking the syntax around it", (input, expected) => {
+    expect(sanitizer.sanitizeFile(input, "claude", "skills/x/config.yaml").content).toBe(expected);
+  });
+
+  it.each(['TOKEN="$API_KEY_V2"', 'TOKEN_FILE="$HOME/.config/token2"'])(
+    "keeps the variable expansion %s",
+    (line) => {
+      expect(sanitizer.sanitizeFile(line, "claude", "hooks/x.sh").content).toBe(line);
+    },
+  );
+
+  it("fails closed past the nesting limit instead of shipping the literal", () => {
+    const line = 'X_TOKEN="${A_TOKEN:-${B_TOKEN:-${C_TOKEN:-${D_TOKEN:-${E_TOKEN:-abc123def456ghi}}}}}"';
+    expect(sanitizer.sanitizeText(line, "claude", "x.sh").content).not.toContain("abc123def456ghi");
+  });
+
+  it("redacts a shell single-quoted value that ends in a backslash", () => {
+    // In sh, `\'` closes a single-quoted string; the escape-aware form must
+    // not make the whole value unmatchable.
+    expect(sanitizer.sanitizeFile("TOKEN='abc123def456\\'", "claude", "x.sh").content).toBe(
+      `TOKEN='${REDACTED}'`,
+    );
+  });
+
+  it("flags a quoted secret followed by binary junk inside a binary view", () => {
+    const view = '\0API_TOKEN="abc123def456ghi\0\x01 junk"\0';
+    expect(sanitizer.sanitizeText(view, "claude", "bin/tool").changed).toBe(true);
+  });
+
+  it("handles pathological lines without blowing the stack or the clock", () => {
+    expect(() => sanitizer.sanitizeText("TOKEN=$".repeat(2000), "claude", "x.sh")).not.toThrow();
+    expect(() =>
+      sanitizer.sanitizeText(`\${A_TOKEN:-`.repeat(2000), "claude", "x.sh"),
+    ).not.toThrow();
+    const started = performance.now();
+    sanitizer.sanitizeText("TOKEN_".repeat(35000), "claude", "bundle.js");
+    // An unclosed quote over ${…} units must not backtrack exponentially.
+    sanitizer.sanitizeText('X_TOKEN="' + "${a}".repeat(40), "claude", "x.sh");
+    expect(performance.now() - started).toBeLessThan(1000);
+  });
+
+  it("redacts a literal inside an auto-approved Bash rule in settings.local.json", () => {
+    const rule = "Bash(PGPASSWORD=Pg!pass2024 psql -h db -U app:*)";
+    const settings = JSON.stringify({ permissions: { allow: [rule] } }, null, 2);
+    const res = sanitizer.sanitizeFile(settings, "claude", "settings.local.json");
+    expect(JSON.parse(res.content).permissions.allow).toEqual([
+      `Bash(PGPASSWORD=${REDACTED} psql -h db -U app:*)`,
+    ]);
+  });
+
+  it("still flags secret-shaped bytes inside a binary blob (binary fail-safe)", () => {
+    const view = "\x7fELF\0\0API_TOKEN=abc123def456ghi\0\0rest";
+    expect(sanitizer.sanitizeText(view, "claude", "bin/tool").changed).toBe(true);
+  });
+});
+
 describe("sanitizer: credential-bearing URLs", () => {
   const TOKEN = "s3cr3t-signed-value-0123456789";
 
@@ -419,6 +643,87 @@ describe("sanitizer: env/environment/headers containers (E2E leak regression)", 
     const res = sanitizer.sanitizeFile(blob, "cursor", "mcp.json");
     expect(res.content).not.toContain("opaque-vendor-key-000111");
     expect(res.content).not.toContain("opaque-header-cred-222333");
+  });
+
+  it("keeps switches under env (settings.json feature flags)", () => {
+    // `{{REDACTED}}` in place of "1" switches a feature off on every machine
+    // that pulls; a switch is never a credential.
+    const env = { CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: "1", DISABLE_TELEMETRY: "true", DEBUG: false, LEVEL: 3 };
+    const res = sanitizer.sanitizeFile(JSON.stringify({ env }, null, 2), "claude", "settings.json");
+    expect(JSON.parse(res.content).env).toEqual(env);
+  });
+
+  it("still redacts multi-digit numbers under env: they may be one-time codes", () => {
+    // AUTH_CODE / OTP / MFA_CODE carry live codes under names no list knows.
+    const env = { AUTH_CODE: "123456", OTP: 4711, MCP_TIMEOUT: "60000" };
+    const res = sanitizer.sanitizeFile(JSON.stringify({ env }, null, 2), "claude", "settings.json");
+    expect(JSON.parse(res.content).env).toEqual({ AUTH_CODE: REDACTED, OTP: REDACTED, MCP_TIMEOUT: REDACTED });
+  });
+
+  it("still redacts flag-shaped values under a secret NAME, and long digit strings", () => {
+    const blob = JSON.stringify(
+      { env: { DB_PASSWORD: "123456", ACCOUNT_NUMBER: "123456789012", ENABLE_X: "1" } },
+      null,
+      2,
+    );
+    const env = JSON.parse(sanitizer.sanitizeFile(blob, "claude", "settings.json").content).env;
+    expect(env).toEqual({ DB_PASSWORD: REDACTED, ACCOUNT_NUMBER: REDACTED, ENABLE_X: "1" });
+  });
+
+  it("keeps blanket redaction under headers, even for flag-shaped values", () => {
+    const blob = JSON.stringify(
+      { mcpServers: { s: { headers: { "X-Custom-Auth": "123456", "X-Debug": "true" }, env: { DEBUG: "1" } } } },
+      null,
+      2,
+    );
+    const out = JSON.parse(sanitizer.sanitizeFile(blob, "claude", "mcp.json").content).mcpServers.s;
+    expect(out.headers).toEqual({ "X-Custom-Auth": REDACTED, "X-Debug": REDACTED });
+    expect(out.env).toEqual({ DEBUG: "1" });
+  });
+
+  it("treats everything below a secret-named key as a credential, as the TOML pass does", () => {
+    const blob = JSON.stringify({ env: { DB_PASSWORD: { value: "1" } } }, null, 2);
+    const out = JSON.parse(sanitizer.sanitizeFile(blob, "claude", "mcp.json").content);
+    expect(out.env.DB_PASSWORD).toEqual({ value: REDACTED });
+  });
+
+  it("keeps an MCP server whose NAME contains a secret stem (an identifier, not a secret)", () => {
+    const servers = { "token-optimizer": { command: "npx", args: ["-y", "token-optimizer-mcp"] } };
+    const blob = JSON.stringify({ mcpServers: servers }, null, 2);
+    expect(JSON.parse(sanitizer.sanitizeFile(blob, "claude", "mcp.json").content).mcpServers).toEqual(servers);
+  });
+
+  it("treats objects under secret names as credentials at every level, like the TOML pass", () => {
+    const blob = JSON.stringify({ credentials: { pass: "x1" }, auth: { value: "opaque" } }, null, 2);
+    const out = JSON.parse(sanitizer.sanitizeFile(blob, "claude", "x.json").content);
+    expect(out).toEqual({ credentials: { pass: REDACTED }, auth: { value: REDACTED } });
+  });
+
+  it("keeps entry names of plugin and marketplace maps (identifiers, not secrets)", () => {
+    const settings = {
+      enabledPlugins: { "token-optimizer@market": true },
+      extraKnownMarketplaces: { "secret-tools": { source: { source: "github", repo: "acme/secret-tools" } } },
+    };
+    const res = sanitizer.sanitizeFile(JSON.stringify(settings, null, 2), "claude", "settings.json");
+    expect(JSON.parse(res.content)).toEqual(settings);
+  });
+
+  it("keeps flags whose name merely ends in BYPASS", () => {
+    const env = { CLAUDE_BYPASS: "1", ENABLE_BYPASS: "true" };
+    const res = sanitizer.sanitizeFile(JSON.stringify({ env }, null, 2), "claude", "settings.json");
+    expect(JSON.parse(res.content).env).toEqual(env);
+  });
+
+  it("still redacts numeric passwords and PINs under names isSecretKey does not know", () => {
+    const env = { PGPASSWORD: "123456", MYSQL_PWD: "4711", DB_PASS: "2024", YUBIKEY_PIN: 123456 };
+    const blob = JSON.stringify({ mcpServers: { db: { env } } }, null, 2);
+    const out = JSON.parse(sanitizer.sanitizeFile(blob, "claude", "mcp.json").content);
+    expect(out.mcpServers.db.env).toEqual({
+      PGPASSWORD: REDACTED,
+      MYSQL_PWD: REDACTED,
+      DB_PASS: REDACTED,
+      YUBIKEY_PIN: REDACTED,
+    });
   });
 
   it("isSecretKey catches separator-suffixed *_key / *-key names anywhere", () => {

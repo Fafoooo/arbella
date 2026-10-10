@@ -14,8 +14,11 @@
  * past the parse: the parsed object is read for those two keys and dropped.
  *
  * Both directions go through the injected services:
- *   capture  -> sanitizer.sanitizeJson (every leaf under env/environment/headers
- *               becomes {{REDACTED}}, unless includeSecrets) then templater
+ *   capture  -> sanitizer.sanitizeJson (every headers value, and every
+ *               env/environment value except a switch such as "1" or
+ *               "false" under a non-secret name, becomes {{REDACTED}} unless
+ *               includeSecrets)
+ *               then templater
  *               .toTemplate over every string leaf, so an absolute command path
  *               folds to {{HOME}}/....
  *   restore  -> templater.fromTemplate over the serialized def, then a KEY-WISE
