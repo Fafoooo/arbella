@@ -339,7 +339,10 @@ export function formatPullSummary(r: PullReport, role: Role, home: string): stri
   }
   if (r.redactedText.length > 0) {
     lines.push(`Files still containing ${REDACTED}:`);
-    for (const p of r.redactedText) lines.push(`  ${shown(p)}`);
+    for (const p of r.redactedText.slice(0, MAX_KEPT_SHOWN)) lines.push(`  ${shown(p)}`);
+    if (r.redactedText.length > MAX_KEPT_SHOWN) {
+      lines.push(`  … and ${r.redactedText.length - MAX_KEPT_SHOWN} more`);
+    }
   }
   for (const e of r.missingSecrets) lines.push(`secret missing: ${describeMissingSecret(e, home)}`);
   return lines;

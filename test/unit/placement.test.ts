@@ -537,6 +537,18 @@ describe("formatPullSummary", () => {
     expect(text).not.toContain(home + "/");
   });
 
+  it("caps the files still containing the marker at 20", () => {
+    const redactedText = Array.from({ length: 25 }, (_, i) => `${home}/.claude/r${i}.md`);
+    const text = formatPullSummary(
+      { tools: {}, redactedText, missingSecrets: [], keptForSecrets: [] },
+      "source",
+      home,
+    ).join("\n");
+    expect(text).toContain("~/.claude/r19.md");
+    expect(text).not.toContain("r20.md");
+    expect(text).toContain("… and 5 more");
+  });
+
   it("uses source wording, shows exactly 20 without a tail, and a bare home path", () => {
     const kept = [home, ...Array.from({ length: 19 }, (_, i) => `/other/${i}`)];
     const text = formatPullSummary(
