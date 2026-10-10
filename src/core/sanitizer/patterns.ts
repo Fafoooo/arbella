@@ -39,16 +39,16 @@ const LITERAL_SECRET_MIN_LENGTH = 8;
  * included), is a LITERAL credential rather than code that produces one.
  *
  * Kept: shell expansions (`$(...)`, `${...}`, `$VAR`, backticks — except inside
- * single quotes, where `$` is literal), already-redacted/templated text, plain
- * URLs, paths, words and numbers (a generated credential mixes letters and
- * digits), and unquoted expressions such as `process.env.X` or `os.environ[`.
- * A run of 20+ letters/digits is a token even when it looks like a path or a
- * dotted name (`/9xR4k…` base64, Vault `hvs.CAES…`).
+ * single quotes; a `$` before anything else, as in `Pa$$w0rd`, is literal),
+ * already-redacted/templated text, plain URLs, paths, words and numbers (a
+ * generated credential mixes letters and digits), and unquoted expressions such
+ * as `process.env.X` or `os.environ[`. A run of 20+ letters/digits is a token
+ * even when it looks like a path or a dotted name (`/9xR4k…`, Vault `hvs.CAES…`).
  */
 function isLiteralSecret(written: string): boolean {
   const quote = /^["'`]/.test(written) ? written[0] : "";
   const value = quote ? written.slice(1, -1) : written;
-  if (quote !== "'" && /[$`]/.test(value)) return false;
+  if (quote !== "'" && /(?<!\$)\$[({A-Za-z_]|`/.test(value)) return false;
   if (value.includes("{{")) return false;
   if (/^[A-Za-z][A-Za-z0-9+.-]*:\/\//.test(value)) return isCredentialBearingUrl(value);
   if (value.length < LITERAL_SECRET_MIN_LENGTH || /\s/.test(value)) return false;
@@ -62,25 +62,35 @@ function isLiteralSecret(written: string): boolean {
 /**
  * NAME [:=] VALUE where NAME carries a secret stem not glued to more letters
  * (TOKENS, tokenizer, secretary stay out; secretKey/SECRETKEY stay in). The
- * operator never spans a line, and `:-`/`:=` cover shell defaults. An unquoted
- * value stops at control characters so a NUL-separated binary view still trips
- * the binary fail-safe. Captures: 1 name, 2 operator with spacing, 3 value as
- * written.
+ * name parts are bounded so a megabyte-long identifier stays linear. The
+ * operator never spans a line, and `:-`/`:=` cover shell defaults. A quoted
+ * value honours backslash escapes; an unquoted one stops at control characters
+ * so a NUL-separated binary view still trips the binary fail-safe. Captures:
+ * 1 name, 2 operator with spacing, 3 value as written.
  */
 const ENV_ASSIGNMENT =
-  /\b([A-Za-z0-9_]*(?:API[_-]?KEY|SECRET|TOKEN|PASSWORD|PASSWD|PRIVATE[_-]?KEY|ACCESS[_-]?KEY|CLIENT[_-]?SECRET)(?![a-jl-z])[A-Za-z0-9_]*)([ \t]*(?::[-=]?(?![=>~:+?])|=(?![=>~:?]))[ \t]*)("[^"\n]*"|'[^'\n]*'|`[^`\n]*`|[^\s\0-\x1f�"'`;,)\]}#]+)/gi;
+  /\b([A-Za-z0-9_]{0,64}(?:API[_-]?KEY|SECRET|TOKEN|PASSWORD|PASSWD|PRIVATE[_-]?KEY|ACCESS[_-]?KEY|CLIENT[_-]?SECRET)(?![a-jl-z])[A-Za-z0-9_]{0,64})([ \t]*(?::[-=]?(?![=>~:+?])|=(?![=>~:?]))[ \t]*)("(?:\\.|[^"\\\n])*"|'(?:\\.|[^'\\\n])*'|`[^`\n]*`|[^\s\0-\x1f\uFFFD"'`;,)\]}#]+)/gi;
+
+/** "…" > ${X:-…} > literal is as deep as real code nests; deeper is pathological. */
+const MAX_ASSIGNMENT_DEPTH = 4;
 
 /**
- * Replace only the literal VALUE of a secret-named assignment, quotes kept. A
- * value that is code is kept but still scanned, because it can carry a literal
+ * Replacer that swaps only the literal VALUE of a secret-named assignment. A
+ * value that is code is kept but scanned again, because it can carry a literal
  * default: `"${DB_PASSWORD:-…}"` keeps its expansion and loses the literal.
+ * After `:` an unquoted marker is quoted — bare, `{{REDACTED}}` is a YAML map
+ * and its `}}` closes a shell `${X:-…}` early.
  */
-function redactAssignedLiteral(_match: string, name: string, op: string, written: string): string {
-  if (!isLiteralSecret(written)) {
-    return `${name}${op}${written.replace(new RegExp(ENV_ASSIGNMENT), redactAssignedLiteral)}`;
-  }
-  const quote = /^["'`]/.test(written) ? written[0] : "";
-  return `${name}${op}${quote}${REDACTED}${quote}`;
+function literalRedactor(depth: number) {
+  return (_match: string, name: string, op: string, written: string): string => {
+    if (isLiteralSecret(written)) {
+      const own = /^["'`]/.test(written) ? written[0] : "";
+      const quote = own || (op.includes(":") ? '"' : "");
+      return `${name}${op}${quote}${REDACTED}${quote}`;
+    }
+    if (depth >= MAX_ASSIGNMENT_DEPTH) return `${name}${op}${written}`;
+    return `${name}${op}${written.replace(new RegExp(ENV_ASSIGNMENT), literalRedactor(depth + 1))}`;
+  };
 }
 
 /**
@@ -178,7 +188,7 @@ export const SECRET_PATTERNS: readonly SecretPattern[] = [
   {
     name: "env-assignment-secret",
     regex: ENV_ASSIGNMENT,
-    replace: redactAssignedLiteral,
+    replace: literalRedactor(0),
   },
 ];
 
@@ -242,7 +252,7 @@ const PLAIN_SETTING = /^(?:true|false|yes|no|on|off|\d{1,7})$/i;
  * Password and PIN names isSecretKey does not know (PGPASSWORD, MYSQL_PWD,
  * DB_PASS, PASSCODE, YUBIKEY_PIN): a short number under them is a credential.
  */
-const PASSWORD_LIKE_NAME = /pass(?:word|wd|code)?$|pwd$|(?:^|[_-])pin$/i;
+const PASSWORD_LIKE_NAME = /(?:password|passwd|passcode)$|(?:^|[_-])(?:pass|pwd|pin)$/i;
 
 /**
  * True for configuration such as "1", "false", "on" or 30000 under `key`, which

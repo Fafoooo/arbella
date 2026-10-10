@@ -291,7 +291,7 @@ describe("sanitizer: secret-named assignments never break code", () => {
   });
 
   it("never pulls the next line into an assignment", () => {
-    const yaml = "secret:\n  rotation_days: 30\napi_token:\n  - abc123def456\n";
+    const yaml = "secret:\n  rotation_days: 30\napi_token:\n  - abc123def456\ntoken:\nabc123def456\n";
     expect(sanitizer.sanitizeFile(yaml, "claude", "skills/x/config.yaml").content).toBe(yaml);
   });
 
@@ -319,11 +319,11 @@ describe("sanitizer: secret-named assignments never break code", () => {
     ],
     [
       'export DB_PASSWORD="${DB_PASSWORD:-Sup3rS3cretPw}"',
-      `export DB_PASSWORD="\${DB_PASSWORD:-${REDACTED}}"`,
+      `export DB_PASSWORD="\${DB_PASSWORD:-"${REDACTED}"}"`,
     ],
     [
       "export API_TOKEN=${API_TOKEN:-abc123def456ghi}",
-      `export API_TOKEN=\${API_TOKEN:-${REDACTED}}`,
+      `export API_TOKEN=\${API_TOKEN:-"${REDACTED}"}`,
     ],
     ["VAULT_TOKEN=hvs.CAESIFakeFakeFakeFakeFake1234567890abcd", `VAULT_TOKEN=${REDACTED}`],
     ["AWS_SECRET_ACCESS_KEY=/9xR4kFakeFakeFakeFakeFakeFakeuP8o", `AWS_SECRET_ACCESS_KEY=${REDACTED}`],
@@ -332,6 +332,36 @@ describe("sanitizer: secret-named assignments never break code", () => {
     ["SECRETKEY=abc123def456ghi", `SECRETKEY=${REDACTED}`],
   ])("still redacts %s", (input, expected) => {
     expect(sanitizer.sanitizeFile(input, "claude", "hooks/x.sh").content).toBe(expected);
+  });
+
+  it.each([
+    // `$$`, `$9` are literal outside a shell; only $( ${ $NAME and backticks expand.
+    ['DB_PASSWORD="Pa$$w0rd123"', `DB_PASSWORD="${REDACTED}"`],
+    ['password: "Xy$9abc!def"', `password: "${REDACTED}"`],
+    // An escaped quote does not end the string.
+    ['TOKEN="abcd1234\\"rest-of-secret99"', `TOKEN="${REDACTED}"`],
+    ["password = 'abcdefgh1234\\'rest99'", `password = '${REDACTED}'`],
+    // After `:` the marker is quoted: YAML keeps a string, ${X:-} keeps its brace.
+    ["api_token: abc123def456", `api_token: "${REDACTED}"`],
+  ])("redacts %s without breaking the syntax around it", (input, expected) => {
+    expect(sanitizer.sanitizeFile(input, "claude", "skills/x/config.yaml").content).toBe(expected);
+  });
+
+  it.each(['TOKEN="$API_KEY_V2"', 'TOKEN_FILE="$HOME/.config/token2"'])(
+    "keeps the variable expansion %s",
+    (line) => {
+      expect(sanitizer.sanitizeFile(line, "claude", "hooks/x.sh").content).toBe(line);
+    },
+  );
+
+  it("handles pathological lines without blowing the stack or the clock", () => {
+    expect(() => sanitizer.sanitizeText("TOKEN=$".repeat(2000), "claude", "x.sh")).not.toThrow();
+    expect(() =>
+      sanitizer.sanitizeText(`\${A_TOKEN:-`.repeat(2000), "claude", "x.sh"),
+    ).not.toThrow();
+    const started = performance.now();
+    sanitizer.sanitizeText("TOKEN_".repeat(35000), "claude", "bundle.js");
+    expect(performance.now() - started).toBeLessThan(1000);
   });
 
   it("redacts a literal inside an auto-approved Bash rule in settings.local.json", () => {
@@ -558,6 +588,12 @@ describe("sanitizer: env/environment/headers containers (E2E leak regression)", 
     );
     const env = JSON.parse(sanitizer.sanitizeFile(blob, "claude", "settings.json").content).env;
     expect(env).toEqual({ DB_PASSWORD: REDACTED, ACCOUNT_NUMBER: REDACTED, ENABLE_X: "1" });
+  });
+
+  it("keeps flags whose name merely ends in BYPASS", () => {
+    const env = { CLAUDE_BYPASS: "1", ENABLE_BYPASS: "true" };
+    const res = sanitizer.sanitizeFile(JSON.stringify({ env }, null, 2), "claude", "settings.json");
+    expect(JSON.parse(res.content).env).toEqual(env);
   });
 
   it("still redacts numeric passwords and PINs under names isSecretKey does not know", () => {
