@@ -9,8 +9,12 @@ import { REDACTED } from "../sanitizer/patterns.js";
 import { sha256, type Ledger, type MissingSecret } from "./ledger.js";
 import {
   describeMissingSecret,
+  isRedactedFormOf,
+  markerPaths,
   matchesWithSecrets,
   mergeRedactedText,
+  parseStructured,
+  secretBlindText,
   structuredKind,
 } from "./redacted.js";
 
@@ -50,6 +54,8 @@ export interface PlaceDecision {
   missing: string[][];
   recordHash?: string;
   repoHasMarkers: boolean;
+  /** The file will still contain the marker after this pass (placed bytes, or the kept local bytes). */
+  stillRedacted: boolean;
 }
 
 export type PlaceCtx = Pick<CoreServices, "fs" | "log"> & {
@@ -63,14 +69,15 @@ export function decide(i: {
   force: boolean;
   local?: Buffer;
   next: Buffer;
-  localHasMarker: boolean;
+  localBroken: boolean;
   keepsSecrets: boolean;
-  ledgerHash?: string;
+  /** Follower only: the local file is what the ledger says arbella last placed. */
+  ledgerMatch: boolean;
 }): PlaceOutcome {
   if (!i.local) return "written";
   if (i.keepsSecrets || i.local.equals(i.next)) return "identical";
-  if (i.localHasMarker || i.force) return "written";
-  if (i.role === "follower" && i.ledgerHash !== undefined && sha256(i.local) === i.ledgerHash) return "written";
+  if (i.localBroken || i.force) return "written";
+  if (i.role === "follower" && i.ledgerMatch) return "written";
   return "kept";
 }
 
@@ -94,10 +101,10 @@ export async function planPlacement(ctx: PlaceCtx, req: PlaceRequest): Promise<P
   const repoText = typeof req.content === "string" ? req.content : undefined;
   const repoHasMarkers = repoText?.includes(REDACTED) ?? false;
 
+  const kind = structuredKind(req.dest);
   let next: string | Buffer = req.content;
   let missing: string[][] = [];
   if (repoText !== undefined && repoHasMarkers) {
-    const kind = structuredKind(req.dest);
     const merged = kind ? mergeRedactedText(kind, repoText, localText) : undefined;
     if (merged) {
       next = merged.text;
@@ -107,27 +114,47 @@ export async function planPlacement(ctx: PlaceCtx, req: PlaceRequest): Promise<P
   const nextBytes = toBuffer(next);
   const keepsSecrets =
     repoHasMarkers && localText !== undefined && matchesWithSecrets(repoText!, localText);
+  // A structured config value is never legitimately the marker; free text may mention it.
+  const localBroken =
+    repoText === undefined || localText === undefined
+      ? false
+      : kind
+        ? localText.includes(REDACTED)
+        : isRedactedFormOf(localText, repoText);
+
+  // Secret-blind hashing: the marker paths are dropped so filling in a secret
+  // locally does not look like an edit.
+  const blindPaths = kind && repoHasMarkers ? markerPaths(parseStructured(kind, repoText!)) : undefined;
+  const blindHash = (text: string | undefined): string | undefined =>
+    kind && blindPaths && text !== undefined ? secretBlindText(kind, text, blindPaths) : undefined;
+  const hashOf = (b: Buffer): string => {
+    const blind = blindHash(b.toString("utf8"));
+    return sha256(blind ?? b);
+  };
+
+  const ledgerHash = ctx.pull?.ledger.files[req.dest];
+  const ledgerMatch =
+    ledgerHash !== undefined &&
+    local !== undefined &&
+    (sha256(local) === ledgerHash || (blindHash(localText) !== undefined && hashOf(local) === ledgerHash));
 
   const outcome = unreadable
     ? force ? "written" : "kept"
-    : decide({
-        role,
-        force,
-        local,
-        next: nextBytes,
-        localHasMarker: local?.includes(REDACTED) ?? false,
-        keepsSecrets,
-        ledgerHash: ctx.pull?.ledger.files[req.dest],
-      });
+    : decide({ role, force, local, next: nextBytes, localBroken, keepsSecrets, ledgerMatch });
 
   const plainIdentical = outcome === "identical" && !keepsSecrets;
+  const stillRedacted =
+    outcome === "kept" ? (local?.includes(REDACTED) ?? false)
+    : outcome === "identical" && keepsSecrets ? false
+    : nextBytes.includes(REDACTED);
   return {
     outcome,
     overwrites: local !== undefined && outcome === "written",
     bytes: next,
     missing: outcome === "written" ? missing : [],
-    recordHash: outcome === "written" ? sha256(nextBytes) : plainIdentical && local ? sha256(local) : undefined,
+    recordHash: outcome === "written" ? hashOf(nextBytes) : plainIdentical && local ? hashOf(local) : undefined,
     repoHasMarkers,
+    stillRedacted,
   };
 }
 
@@ -149,10 +176,7 @@ export async function applyPlacement(
   for (const keyPath of d.missing) {
     pull.report.missingSecrets.push({ tool: req.bucket, file: req.dest, keyPath });
   }
-  const viaSecrets = d.outcome === "identical" && d.recordHash === undefined;
-  if (d.outcome !== "kept" && !viaSecrets && toBuffer(d.bytes).includes(REDACTED)) {
-    pull.report.redactedText.push(req.dest);
-  }
+  if (d.stillRedacted) pull.report.redactedText.push(req.dest);
   return d.outcome;
 }
 

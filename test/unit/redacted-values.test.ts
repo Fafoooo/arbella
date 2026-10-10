@@ -2,7 +2,11 @@ import { describe, expect, it } from "vitest";
 import {
   describeMissingSecret,
   hasMarker,
+  isRedactedFormOf,
+  markerPaths,
   matchesWithSecrets,
+  secretBlindText,
+  wildcardMatch,
   mergeRedacted,
   mergeRedactedText,
   structuredKind,
@@ -191,5 +195,52 @@ describe("describeMissingSecret", () => {
     expect(
       describeMissingSecret({ tool: "claude", file: "/h/.claude.json", keyPath: ["mcpServers", "s", "command"] }),
     ).toBe("claude .claude.json → mcpServers.s.command");
+  });
+});
+
+describe("markerPaths", () => {
+  it("lists marker leaves with the mergeObject leaf rule", () => {
+    expect(markerPaths({ a: { b: R, c: "x" }, d: ["--t", R], e: [1], f: `Bearer ${R}` })).toEqual([
+      ["a", "b"],
+      ["d"],
+      ["f"],
+    ]);
+    expect(markerPaths("x")).toEqual([]);
+    expect(markerPaths([R])).toEqual([]);
+  });
+});
+
+describe("secretBlindText", () => {
+  it("drops the given paths and ignores everything else", () => {
+    const a = secretBlindText("json", '{"env":{"K":"real"},"x":1}', [["env", "K"]]);
+    const b = secretBlindText("json", `{"x":1,"env":{}}`, [["env", "K"]]);
+    expect(JSON.parse(a!)).toEqual({ env: {}, x: 1 });
+    expect(JSON.parse(b!)).toEqual({ env: {}, x: 1 });
+  });
+  it("handles toml, absent paths and non-object intermediates", () => {
+    expect(secretBlindText("toml", '[e]\nK = "v"\n', [["e", "K"]])).toBe('{"e":{}}');
+    expect(secretBlindText("json", '{"e":"s"}', [["e", "K"], ["zz", "y"]])).toBe('{"e":"s"}');
+  });
+  it("is undefined for unparseable or non-object text", () => {
+    expect(secretBlindText("json", "{nope", [["a"]])).toBeUndefined();
+    expect(secretBlindText("json", "[1]", [["a"]])).toBeUndefined();
+  });
+  it("does not mutate shared structure between calls", () => {
+    const text = '{"a":{"b":1,"c":2}}';
+    secretBlindText("json", text, [["a", "b"]]);
+    expect(secretBlindText("json", text, [])).toBe('{"a":{"b":1,"c":2}}');
+  });
+});
+
+describe("wildcardMatch / isRedactedFormOf", () => {
+  it("treats pattern markers as >=1 char wildcards", () => {
+    expect(wildcardMatch(`a${R}c`, "abc")).toBe(true);
+    expect(wildcardMatch(`a${R}c`, "ac")).toBe(false);
+  });
+  it("isRedactedFormOf needs a local marker and an exact wildcard match", () => {
+    expect(isRedactedFormOf(`T=${R}\nx`, "T=abc\nx")).toBe(true);
+    expect(isRedactedFormOf("T=abc", "T=abc")).toBe(false);
+    expect(isRedactedFormOf(`note ${R} edited`, "old")).toBe(false);
+    expect(isRedactedFormOf(`T=${R}`, `T=${R}`)).toBe(true);
   });
 });

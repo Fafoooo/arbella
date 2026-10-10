@@ -38,7 +38,7 @@ const ctxOf = (pull?: PullSession, extra: Partial<PlaceCtx> = {}): PlaceCtx =>
   ({ fs, log, sourceOfTruth: "local", pull, ...extra }) as PlaceCtx;
 const session = (role: "source" | "follower", force = false, ledger = emptyLedger()) =>
   newPullSession({ role, force, ledger });
-const base = { local: buf("old"), next: buf("new"), localHasMarker: false, keepsSecrets: false };
+const base = { local: buf("old"), next: buf("new"), localBroken: false, keepsSecrets: false, ledgerMatch: false };
 
 describe("decide", () => {
   it("row 1: missing target is written", () => {
@@ -51,20 +51,20 @@ describe("decide", () => {
     expect(decide({ ...base, role: "source", force: true, keepsSecrets: true })).toBe("identical");
   });
   it("row 3: local marker is written even without force", () => {
-    expect(decide({ ...base, role: "source", force: false, localHasMarker: true })).toBe("written");
+    expect(decide({ ...base, role: "source", force: false, localBroken: true })).toBe("written");
   });
   it("row 4: force writes", () => {
     expect(decide({ ...base, role: "source", force: true })).toBe("written");
   });
   it("row 5: follower with unchanged ledger hash is written", () => {
-    expect(decide({ ...base, role: "follower", force: false, ledgerHash: sha256("old") })).toBe("written");
+    expect(decide({ ...base, role: "follower", force: false, ledgerMatch: true })).toBe("written");
   });
   it("row 6: follower without ledger entry keeps a differing file", () => {
     expect(decide({ ...base, role: "follower", force: false })).toBe("kept");
   });
   it("row 6: follower with a changed file keeps it; source ignores the ledger", () => {
-    expect(decide({ ...base, role: "follower", force: false, ledgerHash: sha256("else") })).toBe("kept");
-    expect(decide({ ...base, role: "source", force: false, ledgerHash: sha256("old") })).toBe("kept");
+    expect(decide({ ...base, role: "follower", force: false, ledgerMatch: false })).toBe("kept");
+    expect(decide({ ...base, role: "source", force: false, ledgerMatch: true })).toBe("kept");
   });
 });
 
@@ -214,6 +214,80 @@ describe("placeFile", () => {
     noteMissingSecrets(ctxOf(s), [{ tool: "t", file: "/x", keyPath: ["a"] }]);
     expect(s.ledger.files["/x"]).toBe(sha256("abc"));
     expect(s.report.missingSecrets).toHaveLength(1);
+  });
+});
+
+describe("secret-blind ledger and narrow marker repair", () => {
+  const toml = (name: string, p?: string) =>
+    `name = "${name}"\n\n[mcp_servers.u.env]\n${p ? `P = "${p}"\n` : ""}Q = "1"\n`;
+  const repoToml = (name: string) => `name = "${name}"\n\n[mcp_servers.u.env]\nP = "${R}"\nQ = "1"\n`;
+
+  it("a filled-in secret does not make a follower config 'changed locally'", async () => {
+    const dest = path.join(dir, "config.toml");
+    const s1 = session("follower");
+    expect(await placeFile(ctxOf(s1), { bucket: "codex", dest, content: repoToml("a") })).toBe("written");
+    expect(s1.report.missingSecrets).toHaveLength(1);
+    await fsp.writeFile(dest, toml("a", "real-value"));
+    const s2 = session("follower", false, s1.ledger);
+    expect(await placeFile(ctxOf(s2), { bucket: "codex", dest, content: repoToml("b") })).toBe("written");
+    const out = await fsp.readFile(dest, "utf8");
+    expect(out).toContain('P = "real-value"');
+    expect(out).toContain('name = "b"');
+    expect(s2.report.missingSecrets).toEqual([]);
+  });
+
+  it("a real local edit of another key is still kept", async () => {
+    const dest = path.join(dir, "config.toml");
+    const s1 = session("follower");
+    await placeFile(ctxOf(s1), { bucket: "codex", dest, content: repoToml("a") });
+    await fsp.writeFile(dest, toml("mine", "real-value"));
+    const s2 = session("follower", false, s1.ledger);
+    expect(await placeFile(ctxOf(s2), { bucket: "codex", dest, content: repoToml("b") })).toBe("kept");
+  });
+
+  it("works for JSON settings too, and plain identical records the blind hash", async () => {
+    const dest = path.join(dir, "settings.json");
+    const repo = (a: number) => `{"a":${a},"env":{"K":"${R}"}}`;
+    const s1 = session("follower");
+    await placeFile(ctxOf(s1), { bucket: "claude", dest, content: repo(1) });
+    await fsp.writeFile(dest, '{"a":1,"env":{"K":"real"}}');
+    const s2 = session("follower", false, s1.ledger);
+    expect(await placeFile(ctxOf(s2), { bucket: "claude", dest, content: repo(1) })).toBe("identical");
+    expect(await placeFile(ctxOf(s2), { bucket: "claude", dest, content: repo(2) })).toBe("written");
+    expect(JSON.parse(await fsp.readFile(dest, "utf8"))).toEqual({ a: 2, env: { K: "real" } });
+  });
+
+  it("a memory note that mentions the marker and was edited locally is kept", async () => {
+    const dest = path.join(dir, "note.md");
+    await fsp.writeFile(dest, `The marker ${R} is used by arbella. Edited today.`);
+    const s = session("source", false);
+    expect(await placeFile(ctxOf(s), { bucket: "claude", dest, content: "older note" })).toBe("kept");
+    expect(s.report.redactedText).toEqual([dest]);
+  });
+
+  it("a local script equal to the repo except a marker value is repaired", async () => {
+    const dest = path.join(dir, "run.sh");
+    await fsp.writeFile(dest, `TOKEN=${R}\necho hi\n`);
+    const s = session("source", false);
+    expect(await placeFile(ctxOf(s), { bucket: "claude", dest, content: "TOKEN=abc\necho hi\n" })).toBe("written");
+    expect(await fsp.readFile(dest, "utf8")).toBe("TOKEN=abc\necho hi\n");
+    expect(s.report.redactedText).toEqual([]);
+  });
+
+  it("a local settings.json with a marker is replaced, real local values merged", async () => {
+    const dest = path.join(dir, "settings.json");
+    await fsp.writeFile(dest, `{"env":{"K":"real","L":"${R}"},"x":1}`);
+    const s = session("source", false);
+    const content = `{"env":{"K":"${R}","L":"${R}"},"x":2}`;
+    expect(await placeFile(ctxOf(s), { bucket: "claude", dest, content })).toBe("written");
+    expect(JSON.parse(await fsp.readFile(dest, "utf8"))).toEqual({ env: { K: "real" }, x: 2 });
+  });
+
+  it("binary content is never repaired", async () => {
+    const dest = path.join(dir, "b.bin");
+    await fsp.writeFile(dest, Buffer.from(`x${R}`));
+    const s = session("source", false);
+    expect(await placeFile(ctxOf(s), { bucket: "t", dest, content: Buffer.from("y") })).toBe("kept");
   });
 });
 

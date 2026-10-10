@@ -65,7 +65,7 @@ export function structuredKind(dest: string): "json" | "toml" | undefined {
   return undefined;
 }
 
-function parseKind(kind: "json" | "toml", text: string): unknown {
+export function parseStructured(kind: "json" | "toml", text: string): unknown {
   if (kind === "json") {
     const r = parseJsonOrJsonc(text);
     return r.ok ? r.value : undefined;
@@ -88,9 +88,9 @@ export function mergeRedactedText(
   localText?: string,
 ): { text: string; missing: string[][] } | undefined {
   if (!repoText.includes(REDACTED)) return { text: repoText, missing: [] };
-  const repo = parseKind(kind, repoText);
+  const repo = parseStructured(kind, repoText);
   if (!isPlain(repo)) return undefined;
-  const local = localText === undefined ? undefined : parseKind(kind, localText);
+  const local = localText === undefined ? undefined : parseStructured(kind, localText);
   const { value, missing } = mergeRedacted(repo, local);
   if (kind === "toml") return { text: stringifyToml(value as Plain), missing };
   const nl = repoText.endsWith("\n") ? "\n" : "";
@@ -98,26 +98,68 @@ export function mergeRedactedText(
 }
 
 /**
- * Does `localText` equal `repoText` with every marker replaced by a real value
- * of >= 1 char? Linear leftmost-first scan (exact for single-star globs); no
- * regex is built from file content. A local marker is never a real value.
+ * Does `text` equal `pattern` with every marker in the pattern replaced by >= 1
+ * char? Linear leftmost-first scan (exact for single-star globs); no regex is
+ * built from file content.
  */
-export function matchesWithSecrets(repoText: string, localText: string): boolean {
-  if (localText.includes(REDACTED)) return false;
-  const segs = repoText.split(REDACTED);
-  if (segs.length === 1) return repoText === localText;
+export function wildcardMatch(pattern: string, text: string): boolean {
+  const segs = pattern.split(REDACTED);
+  if (segs.length === 1) return pattern === text;
   const first = segs[0]!;
   const last = segs[segs.length - 1]!;
-  const end = localText.length - last.length;
-  if (!localText.startsWith(first) || !localText.endsWith(last)) return false;
+  const end = text.length - last.length;
+  if (!text.startsWith(first) || !text.endsWith(last)) return false;
   let pos = first.length;
   for (let i = 1; i < segs.length - 1; i++) {
     const seg = segs[i]!;
-    const j = localText.indexOf(seg, pos + 1);
+    const j = text.indexOf(seg, pos + 1);
     if (j < pos + 1 || j + seg.length > end) return false;
     pos = j + seg.length;
   }
   return end - pos >= 1;
+}
+
+/** Local text equals repo text with real values in place of markers. A local marker is never a real value. */
+export function matchesWithSecrets(repoText: string, localText: string): boolean {
+  return !localText.includes(REDACTED) && wildcardMatch(repoText, localText);
+}
+
+/** Local text is the repo text with some values replaced by markers (a file broken by the old sanitizer). */
+export function isRedactedFormOf(localText: string, repoText: string): boolean {
+  return localText.includes(REDACTED) && wildcardMatch(localText, repoText);
+}
+
+/** Key paths of the marker leaves (same leaf rule as the merge). */
+export function markerPaths(repo: unknown, path: string[] = []): string[][] {
+  if (!isPlain(repo)) return [];
+  return Object.entries(repo).flatMap(([k, v]) =>
+    isPlain(v) ? markerPaths(v, [...path, k]) : hasMarker(v) ? [[...path, k]] : [],
+  );
+}
+
+function withoutPath(node: unknown, path: string[]): unknown {
+  if (!isPlain(node)) return node;
+  const [head, ...rest] = path;
+  if (head === undefined || !(head in node)) return node;
+  if (rest.length === 0) {
+    const { [head]: _dropped, ...others } = node;
+    return others;
+  }
+  return { ...node, [head]: withoutPath(node[head], rest) };
+}
+
+/**
+ * Canonical text of a structured file with the given key paths removed, used as
+ * a ledger hash input so a locally filled-in secret does not look like an edit.
+ */
+export function secretBlindText(
+  kind: "json" | "toml",
+  text: string,
+  paths: string[][],
+): string | undefined {
+  const doc = parseStructured(kind, text);
+  if (!isPlain(doc)) return undefined;
+  return JSON.stringify(paths.reduce(withoutPath, doc as unknown));
 }
 
 const MCP_ROOTS = new Set(["mcpServers", "mcp_servers"]);
