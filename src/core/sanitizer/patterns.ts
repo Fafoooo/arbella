@@ -64,7 +64,10 @@ function isLiteralSecret(written: string): boolean {
   const tokenRun = /[A-Za-z0-9]{20,}/.test(value);
   // A webhook URL carries its secret in the path: hooks.slack.com/services/T…/B…/<token>.
   if (/^[A-Za-z][A-Za-z0-9+.-]*:\/\//.test(value)) return tokenRun || isCredentialBearingUrl(value);
-  if (value.length < LITERAL_SECRET_MIN_LENGTH || /\s/.test(value)) return false;
+  // Quoted, four or more plain words are a passphrase; other whitespace means
+  // prose or a command ("gh auth token", "Enter your password:").
+  if (/\s/.test(value)) return quote !== "" && /^[A-Za-z0-9]+(?:[ \t]+[A-Za-z0-9]+){3,}$/.test(value);
+  if (value.length < LITERAL_SECRET_MIN_LENGTH) return false;
   if (!/[A-Za-z]/.test(value)) return false;
   // An environment variable NAME is a reference: "OPENAI_API_KEY", GITHUB_TOKEN_2.
   if (/^[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+$/.test(value)) return false;
@@ -92,7 +95,9 @@ function isPathLike(value: string): boolean {
  * replacer decides with isSecretName whether the stem ends a word. The name
  * parts are bounded so a megabyte-long identifier stays linear. The
  * operator never spans a line, and `:-`/`:=` cover shell defaults. A `${…}`
- * without nested braces is one unit, on its own and inside "…", as in sh, so
+ * without nested braces is one unit, on its own and inside "…", as in sh (the
+ * alternatives inside "…" are disjoint, so an unclosed quote cannot backtrack
+ * exponentially), so
  * `"${X:-"default"}"` is read whole. A quoted
  * value honours backslash escapes, falling back to the plain form (in sh, `\'`
  * ends a single-quoted string); an unquoted one stops at control characters so
@@ -101,7 +106,7 @@ function isPathLike(value: string): boolean {
  * 1 name, 2 operator with spacing, 3 value as written.
  */
 const ENV_ASSIGNMENT =
-  /\b([A-Za-z0-9_]{0,64}(?:API[_-]?KEY|SECRET|TOKEN|PASSWORD|PASSWD|PRIVATE[_-]?KEY|ACCESS[_-]?KEY|CLIENT[_-]?SECRET)[A-Za-z0-9_]{0,64})([ \t]*(?::[-=]?(?![=>~:+?])|=(?![=>~:?]))[ \t]*)(\$\{[^{}\n]*\}|"(?:\\.|\$\{[^{}\n]*\}|[^"\\\n])*"|"[^"\n]*"|'(?:\\.|[^'\\\n])*'|'[^'\n]*'|`[^`\n]*`|[^\s\0-\x1f\uFFFD"'`;,)\]}#][^\s\0-\x1f\uFFFD"'`;,)\]}]*)/gi;
+  /\b([A-Za-z0-9_]{0,64}(?:API[_-]?KEY|SECRET|TOKEN|PASSWORD|PASSWD|PRIVATE[_-]?KEY|ACCESS[_-]?KEY|CLIENT[_-]?SECRET)[A-Za-z0-9_]{0,64})([ \t]*(?::[-=]?(?![=>~:+?])|=(?![=>~:?]))[ \t]*)(\$\{[^{}\n]*\}|"(?:\\.|\$\{[^{}\n]*\}|\$(?!\{)|[^"\\\n$])*"|"[^"\n]*"|'(?:\\.|[^'\\\n])*'|'[^'\n]*'|`[^`\n]*`|[^\s\0-\x1f\uFFFD"'`;,)\]}#][^\s\0-\x1f\uFFFD"'`;,)\]}]*)/gi;
 
 /**
  * "…" > ${X:-…} > literal is as deep as real code nests. Deeper is
@@ -116,6 +121,19 @@ const MAX_ASSIGNMENT_DEPTH = 4;
  * value, which stops at `}`.
  */
 const SHELL_DEFAULT = /(\$\{[A-Za-z_]\w*:?[-=])("(?:\\.|[^"\\\n])*"|'[^'\n]*'|(?:\\.|[^\s{}$`"'\\])+)(?=\}|$)/g;
+
+/** Expansions inside a value: `${…}`, `$(…)`, `$NAME`, `` `…` ``. */
+const EXPANSION = /\$\{[^{}]*\}|\$\([^()]*\)|\$[A-Za-z_]\w*|`[^`]*`/g;
+
+/**
+ * True when the part of a value outside its expansions is itself a literal
+ * secret: `"${PREFIX}Sup3rS3cret9"` hard-codes a credential next to the code.
+ */
+function hasLiteralResidue(written: string): boolean {
+  const value = /^["']/.test(written) ? written.slice(1, -1) : written;
+  const residue = value.replace(EXPANSION, "");
+  return residue !== value && isLiteralSecret(residue);
+}
 
 /** Secret stems inside a name, in any letter case. */
 const SECRET_NAME_STEM =
@@ -151,7 +169,7 @@ function literalRedactor(depth: number) {
     // fail closed rather than recurse further.
     const redact = atLimit
       ? secretName || new RegExp(SECRET_NAME_STEM.source, "i").test(written)
-      : secretName && isLiteralSecret(written);
+      : secretName && (isLiteralSecret(written) || hasLiteralResidue(written));
     if (redact) {
       const own = /^["'`]/.test(written) ? written[0] : "";
       const quote = own || (op.includes(":") ? '"' : "");

@@ -265,6 +265,10 @@ describe("sanitizer: secret-named assignments never break code", () => {
     "TOKEN_URL=https://oauth2.googleapis.com/token",
     "PASSWORD_FILE=/run/secrets/db_password_v2",
     "TOKEN_FILE=config/token2.json",
+    'TOKEN_FILE="${XDG_CONFIG_HOME}/app/token2.json"',
+    'TOKEN_URL="${BASE_URL}/v1/token"',
+    'TOKEN_CMD="gh auth token"',
+    'PASSWORD_PROMPT="Enter your password:"',
     "PASSWORD_FILE=secrets/db_password_v2",
     'token_type_hint: "refresh_token"',
     'api_key_env = "OPENAI_API_KEY"',
@@ -340,6 +344,10 @@ describe("sanitizer: secret-named assignments never break code", () => {
     ['tokenValue: "abc123def456ghi"', `tokenValue: "${REDACTED}"`],
     // Any letter case, as on main: only a same-case run-on (TOKENS) is excluded.
     ["secretkey=abc123def456ghi", `secretkey=${REDACTED}`],
+    // A literal glued to an expansion is still a hard-coded secret.
+    ['DB_PASSWORD="${PREFIX}Sup3rS3cret9"', `DB_PASSWORD="${REDACTED}"`],
+    // A quoted passphrase of four or more plain words.
+    ['DB_PASSWORD="Correct Horse Battery Staple"', `DB_PASSWORD="${REDACTED}"`],
     // Only arbella's own marker means "already redacted"; other braces are data.
     ['DB_PASSWORD="s3cr3t{{not_a_template}}"', `DB_PASSWORD="${REDACTED}"`],
     // Only a value that IS the marker counts as redacted, not one that contains it.
@@ -429,6 +437,8 @@ describe("sanitizer: secret-named assignments never break code", () => {
     ).not.toThrow();
     const started = performance.now();
     sanitizer.sanitizeText("TOKEN_".repeat(35000), "claude", "bundle.js");
+    // An unclosed quote over ${…} units must not backtrack exponentially.
+    sanitizer.sanitizeText('X_TOKEN="' + "${a}".repeat(40), "claude", "x.sh");
     expect(performance.now() - started).toBeLessThan(1000);
   });
 
