@@ -208,6 +208,38 @@ describe("claude hooks and enabledPlugins", () => {
     expect(actions.filter((a) => a.type === "enable-plugin")).toHaveLength(1);
     expect(session.ledger.files[settings]).toBe(sha256(onDisk));
   });
+
+  it("an overlay-written settings.json with a secret filled in later still takes repo updates", async () => {
+    const first = follower();
+    const ctx = restoreCtx("claude", "repo", first);
+    const settings = path.join(ctx.toolHome, "settings.json");
+    const repoSettings = (model: string): RestoreData => ({
+      manifest: { ...emptyManifest("claude"), enabledPlugins: { "a@m": true } },
+      files: [
+        {
+          repoPath: "claude/files/settings.json",
+          content: JSON.stringify({ env: { API_TOKEN: R }, model }, null, 2) + "\n",
+        },
+      ],
+      symlinks: [],
+    });
+    await claude.restore(ctx, repoSettings("a"));
+
+    // The user fills in the secret the pull reported as missing.
+    const placed = JSON.parse(await fsp.readFile(settings, "utf8"));
+    await fsp.writeFile(
+      settings,
+      JSON.stringify({ ...placed, env: { API_TOKEN: "filled-in-here" } }, null, 2) + "\n",
+    );
+
+    const second = newPullSession({ role: "follower", force: false, ledger: first.ledger });
+    await claude.restore(restoreCtx("claude", "repo", second), repoSettings("b"));
+
+    const after = JSON.parse(await fsp.readFile(settings, "utf8"));
+    expect(after.model).toBe("b");
+    expect(after.env.API_TOKEN).toBe("filled-in-here");
+    expect(second.report.tools.claude?.kept).toEqual([]);
+  });
 });
 
 describe("shared/home through the placement engine", () => {

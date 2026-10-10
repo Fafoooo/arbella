@@ -1128,7 +1128,8 @@ describe("restore: files reappear correctly in a fresh $HOME", () => {
     // ONLY the keys arbella owns exist — nothing was invented from the source file.
     expect(Object.keys(obj).sort()).toEqual(["mcpServers", "projects"]);
     expect(obj.mcpServers.serena.command).toBe(`${dstHome}/.local/bin/serena-mcp-start`);
-    expect(obj.mcpServers.serena.env.SERENA_TOKEN).toBe("{{REDACTED}}");
+    // A redacted value never lands in ~/.claude.json: with no local value the key is left out.
+    expect(obj.mcpServers.serena.env.SERENA_TOKEN).toBeUndefined();
     // The project dir exists in the fresh home only because the fixture created it
     // there too; the entry is keyed by THIS machine's absolute path.
     const projectDir = path.join(dstHome, "programming", "arbella");
@@ -1137,6 +1138,7 @@ describe("restore: files reappear correctly in a fresh $HOME", () => {
     const blob = await fsp.readFile(globalState, "utf8");
     expect(blob).not.toContain(GLOBAL_STATE_OAUTH_TOKEN);
     expect(blob).not.toContain(GLOBAL_MCP_ENV_SECRET);
+    expect(blob).not.toContain("{{REDACTED}}");
   });
 
   itPosixHost("writes the shared/home files back into the fresh $HOME (WP-B)", async () => {

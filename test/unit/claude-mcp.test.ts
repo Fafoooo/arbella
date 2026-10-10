@@ -12,8 +12,9 @@
  *   RESTORE  — a key-wise merge into ~/.claude.json: other keys survive
  *              untouched, sourceOfTruth decides who wins, the file is created
  *              0600 when absent, invalid JSON is never clobbered, project entries
- *              apply only when the project dir exists, and every redacted env key
- *              produces a warning.
+ *              apply only when the project dir exists, a real local env value
+ *              survives a redacted one, and every omitted key is recorded as a
+ *              missing secret.
  */
 
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
@@ -29,6 +30,7 @@ import {
   planMcpMerge,
   restoreMcpServers,
 } from "../../src/adapters/claude/mcp.js";
+import { formatPullSummary, newPullSession } from "../../src/core/placement/index.js";
 import { fs as realFs } from "../../src/utils/fs.js";
 import { createSanitizer } from "../../src/core/sanitizer/index.js";
 import { createTemplater } from "../../src/core/templater/index.js";
@@ -411,12 +413,50 @@ describe("claude mcp restore: key-wise merge into ~/.claude.json", () => {
     expect(projects[present].mcpServers.here).toEqual({ command: "a" });
   });
 
-  it("warns once per redacted env key the user must re-supply", async () => {
-    await restoreMcpServers(restoreCtx(), manifestWith());
-    const line = warnings.find((w) => w.includes("SERENA_TOKEN"));
-    expect(line).toBeDefined();
-    expect(line).toContain("MCP server serena needs env SERENA_TOKEN re-supplied");
-    expect(warnings.filter((w) => w.includes("SERENA_TOKEN"))).toHaveLength(1);
+  it("records one missing secret per omitted key", async () => {
+    const present = path.join(home, "programming", "arbella");
+    await fsp.mkdir(present, { recursive: true });
+    const session = newPullSession({
+      role: "follower",
+      force: false,
+      ledger: { version: 1, files: {}, missingSecrets: [] },
+    });
+    const manifest = manifestWith({
+      projectMcpServers: [
+        {
+          projectPath: "{{HOME}}/programming/arbella",
+          servers: { here: { command: "a", env: { HERE_KEY: "{{REDACTED}}" } } },
+        },
+      ],
+    });
+
+    await restoreMcpServers(restoreCtx({ pull: session }), manifest);
+
+    const file = path.join(home, ".claude.json");
+    const projectKey = Object.keys((await readGlobalState()).projects as object)[0]!;
+    expect(session.report.missingSecrets).toEqual([
+      { tool: "claude", file, keyPath: ["mcpServers", "serena", "env", "SERENA_TOKEN"] },
+      { tool: "claude", file, keyPath: ["projects", projectKey, "mcpServers", "here", "env", "HERE_KEY"] },
+    ]);
+    expect(formatPullSummary(session.report, "follower", home)).toEqual([
+      "secret missing: claude mcp serena → SERENA_TOKEN",
+      "secret missing: claude mcp here → HERE_KEY",
+    ]);
+    // The omitted keys are gone, never written as the marker.
+    expect(await fsp.readFile(file, "utf8")).not.toContain("{{REDACTED}}");
+    expect(warnings.filter((w) => w.includes("SERENA_TOKEN"))).toHaveLength(0);
+  });
+
+  it("replaces a local server an older pull left with the marker, even when local wins", async () => {
+    await fsp.writeFile(
+      path.join(home, ".claude.json"),
+      JSON.stringify({ mcpServers: { serena: { command: "old", env: { SERENA_TOKEN: "{{REDACTED}}" } } } }),
+    );
+
+    await restoreMcpServers(restoreCtx({ sourceOfTruth: "local" }), manifestWith());
+
+    const serena = (await readGlobalState()).mcpServers as Record<string, any>;
+    expect(serena.serena).toEqual({ command: `${home}/.agents/bin/serena.sh`, env: {} });
   });
 
   it("does NOT warn about a server whose local definition was kept", async () => {
@@ -537,9 +577,10 @@ describe("claude mcp: reserved keys and atomic writes", () => {
     // partial JSON, other keys intact.
     const after = await readGlobalState();
     expect(after.numStartups).toBe(412);
+    // The repo's redacted env value never replaces the real local one.
     expect((after.mcpServers as Record<string, unknown>).serena).toEqual({
       command: `${home}/.agents/bin/serena.sh`,
-      env: { SERENA_TOKEN: "{{REDACTED}}" },
+      env: { SERENA_TOKEN: MCP_ENV_SECRET },
     });
     const onDisk = await fsp.readFile(path.join(home, ".claude.json"), "utf8");
     expect(onDisk).toBe(JSON.stringify(after, null, 2) + "\n");
@@ -604,7 +645,7 @@ describe("claude mcp: dry-run planning", () => {
     const plan = await planMcpMerge(ctx, planningManifest());
 
     expect(plan.actions).toEqual([]);
-    expect(plan.needsEnv).toEqual([]);
+    expect(plan.missing).toEqual([]);
     expect(plan.userServers).toEqual([]);
     expect(plan.projectServers).toEqual([]);
 
@@ -615,7 +656,7 @@ describe("claude mcp: dry-run planning", () => {
     expect(warnings.filter((w) => w.includes("SERENA_TOKEN"))).toHaveLength(0);
   });
 
-  it("plans the registration AND the redacted env keys when the repo wins", async () => {
+  it("plans the registration, keeping real local env values, when the repo wins", async () => {
     const present = path.join(home, "programming", "arbella");
     await fsp.mkdir(present, { recursive: true });
     await writeGlobalState({
@@ -629,7 +670,8 @@ describe("claude mcp: dry-run planning", () => {
       `Register MCP server here for ${toPosix(present)}: a`,
       // playwright lives in the fixture only, not in the manifest.
     ]);
-    expect(plan.needsEnv).toEqual([{ name: "serena", key: "SERENA_TOKEN" }]);
+    // The local serena holds the real token, so the merge keeps it: nothing is missing.
+    expect(plan.missing).toEqual([]);
     expect(plan.existed).toBe(true);
     expect(plan.invalid).toBe(false);
   });
@@ -646,7 +688,7 @@ describe("claude mcp: dry-run planning", () => {
     expect(plan.actions.map((a) => a.description)).toEqual([
       `Register MCP server brandnew (user scope): ${home}/.local/bin/new-mcp`,
     ]);
-    expect(plan.needsEnv).toEqual([]);
+    expect(plan.missing).toEqual([]);
   });
 
   it("plans nothing at all when ~/.claude.json is not valid JSON", async () => {
@@ -658,7 +700,7 @@ describe("claude mcp: dry-run planning", () => {
 
     expect(plan.invalid).toBe(true);
     expect(plan.actions).toEqual([]);
-    expect(plan.needsEnv).toEqual([]);
+    expect(plan.missing).toEqual([]);
   });
 });
 

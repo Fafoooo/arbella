@@ -293,6 +293,13 @@ export async function syncBeforePush(
   }
 }
 
+/** Same repo? Compares urls ignoring a trailing `.git` and trailing slashes. */
+export function sameRepoUrl(a: string, b: string): boolean {
+  const norm = (u: string): string =>
+    u.trim().replace(/\/+$/, "").replace(/\.git$/, "").replace(/\/+$/, "");
+  return norm(a) !== "" && norm(a) === norm(b);
+}
+
 /**
  * Files the backup repo currently holds: the upstream tree, else HEAD, else [].
  * Upstream first so unpushed local commits (e.g. from an older arbella) are

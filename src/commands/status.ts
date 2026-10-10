@@ -56,6 +56,10 @@ import { log } from "../utils/log.js";
 import { detectOS, toolHomeDir } from "../platform/os.js";
 
 import { loadConfig } from "../core/config/index.js";
+import type { Role } from "../core/config/schema.js";
+import { withoutAutobackupHookInResult } from "../core/autobackup/hook.js";
+import { loadLedger, stillMissing, type MissingSecret } from "../core/placement/ledger.js";
+import { describeMissingSecret } from "../core/placement/redacted.js";
 import { ensureLocalClone } from "../core/repo/index.js";
 import { buildVariables } from "../core/templater/variables.js";
 import { sanitizer } from "../core/sanitizer/index.js";
@@ -171,6 +175,10 @@ export interface ToolStatus {
 export interface StatusReport {
   /** Absolute path to the local backup-repo working copy. */
   repoPath: string;
+  /** This machine's role: a follower only pulls. */
+  role: Role;
+  /** Keys the last pull had to leave out and that are still not filled in. */
+  missingSecrets: MissingSecret[];
   /** True when the working copy has at least one commit / existing content. */
   repoInitialized: boolean;
   /** R9: whether CLAUDE.md and AGENTS.md are shared as one file this run. */
@@ -277,7 +285,8 @@ export async function run(opts: StatusOptions): Promise<void> {
     let result: CaptureResult;
     try {
       // claude/codex captures honor skipInstructions for R9; cursor ignores it.
-      result = await capture(ctx, { skipInstructions: sharing });
+      // Without arbella's own hook, exactly as a push captures it.
+      result = withoutAutobackupHookInResult(await capture(ctx, { skipInstructions: sharing }));
     } catch (err) {
       // A capture failure for one tool must not abort the whole status run.
       toolStatuses.push({
@@ -346,8 +355,15 @@ export async function run(opts: StatusOptions): Promise<void> {
       (t) => t.files.length === 0 && t.manifest.length === 0,
     );
 
+  const missingSecrets: MissingSecret[] = [];
+  for (const e of (await loadLedger(fs, undefined, log)).missingSecrets) {
+    if (await stillMissing(fs, e)) missingSecrets.push(e);
+  }
+
   const report: StatusReport = {
     repoPath: repoRoot,
+    role: config.role,
+    missingSecrets,
     repoInitialized,
     sharedInstructions: sharing,
     includeSecrets: config.includeSecrets,
@@ -1026,15 +1042,21 @@ const SIGIL: Record<FileChangeKind, string> = {
 /** Print a human-readable status table to STDERR (stdout stays data-clean). */
 function printHuman(report: StatusReport): void {
   log.info(`Backup repo: ${report.repoPath}`);
+  log.step(`Role: ${report.role}`);
   if (!report.repoInitialized) {
+    // A follower never pushes, so it is never told to.
     log.warn(
-      "Backup repo has no prior backup yet — everything below would be added by the first `arbella push`.",
+      report.role === "follower"
+        ? "Backup repo has no prior backup yet."
+        : "Backup repo has no prior backup yet — everything below would be added by the first `arbella push`.",
     );
   }
   log.step(
     `Shared instructions (CLAUDE.md == AGENTS.md): ${report.sharedInstructions ? "yes" : "no"}`,
   );
   log.step(`Secrets in repo: ${report.includeSecrets ? "INCLUDED" : "excluded (default)"}`);
+
+  for (const e of report.missingSecrets) log.step(`secret missing: ${describeMissingSecret(e)}`);
 
   if (report.clean) {
     log.success("Up to date — a backup right now would change nothing.");

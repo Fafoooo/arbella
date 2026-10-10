@@ -122,21 +122,13 @@ export async function planPlacement(ctx: PlaceCtx, req: PlaceRequest): Promise<P
         ? localText.includes(REDACTED)
         : isRedactedFormOf(localText, repoText);
 
-  // Secret-blind hashing: the marker paths are dropped so filling in a secret
-  // locally does not look like an edit.
-  const blindPaths = kind && repoHasMarkers ? markerPaths(parseStructured(kind, repoText!)) : undefined;
-  const blindHash = (text: string | undefined): string | undefined =>
-    kind && blindPaths && text !== undefined ? secretBlindText(kind, text, blindPaths) : undefined;
-  const hashOf = (b: Buffer): string => {
-    const blind = blindHash(b.toString("utf8"));
-    return sha256(blind ?? b);
-  };
+  const hashOf = (b: Buffer): string => placementHash(req.dest, b, repoText);
 
   const ledgerHash = ctx.pull?.ledger.files[req.dest];
   const ledgerMatch =
     ledgerHash !== undefined &&
     local !== undefined &&
-    (sha256(local) === ledgerHash || (blindHash(localText) !== undefined && hashOf(local) === ledgerHash));
+    (sha256(local) === ledgerHash || hashOf(local) === ledgerHash);
 
   const outcome = unreadable
     ? force ? "written" : "kept"
@@ -201,9 +193,32 @@ export function hydratedContent(
   return file.binary ? Buffer.from(file.content, "base64") : ctx.templater.fromTemplate(file.content, ctx.vars);
 }
 
-/** For writes made outside placeFile (enabledPlugins overlay): keep the ledger hash current. */
-export function recordExternalWrite(ctx: PlaceCtx, dest: string, bytes: string | Buffer): void {
-  if (ctx.pull && !ctx.dryRun) ctx.pull.ledger.files[dest] = sha256(bytes);
+/**
+ * The ledger hash of `bytes` placed at `dest`. Secret-blind when `repoText` is
+ * a structured file carrying markers: the marker paths are dropped, so filling
+ * in a secret locally does not look like an edit. Otherwise a plain sha256.
+ */
+export function placementHash(dest: string, bytes: string | Buffer, repoText?: string): string {
+  const kind = structuredKind(dest);
+  if (kind && repoText?.includes(REDACTED)) {
+    const blind = secretBlindText(kind, bytes.toString(), markerPaths(parseStructured(kind, repoText)));
+    if (blind !== undefined) return sha256(blind);
+  }
+  return sha256(bytes);
+}
+
+/**
+ * For writes made outside placeFile (enabledPlugins overlay): keep the ledger
+ * hash current. Pass the repo text the file was placed from so the hash is
+ * secret-blind like placeFile's.
+ */
+export function recordExternalWrite(
+  ctx: PlaceCtx,
+  dest: string,
+  bytes: string | Buffer,
+  repoText?: string,
+): void {
+  if (ctx.pull && !ctx.dryRun) ctx.pull.ledger.files[dest] = placementHash(dest, bytes, repoText);
 }
 
 export function noteMissingSecrets(ctx: PlaceCtx, e: MissingSecret[]): void {

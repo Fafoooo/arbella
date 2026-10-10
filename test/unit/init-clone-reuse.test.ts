@@ -9,7 +9,8 @@ import path from "node:path";
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { resolveLocalPath, sameRepoUrl } from "../../src/commands/init.js";
+import { resolveLocalPath } from "../../src/commands/init.js";
+import { sameRepoUrl } from "../../src/core/repo/index.js";
 import { gitInit } from "../../src/core/repo/git.js";
 
 describe("sameRepoUrl", () => {

@@ -54,7 +54,7 @@ import {
   loadConfigOrDefault,
   saveConfig,
 } from "../core/config/index.js";
-import { ensureLocalClone, ensureRemoteRepo } from "../core/repo/index.js";
+import { ensureLocalClone, ensureRemoteRepo, sameRepoUrl } from "../core/repo/index.js";
 import { isGitRepo } from "../core/repo/git.js";
 import { homeExcludeRoots } from "../core/homefiles/capture.js";
 import { suggestExtraPaths } from "../core/homefiles/suggest.js";
@@ -807,13 +807,6 @@ async function ensureProviderSignedIn(
 /* -------------------------------------------------------------------------- */
 /* Small pure helpers                                                          */
 /* -------------------------------------------------------------------------- */
-
-/** Same repo? Compares urls ignoring a trailing `.git` and trailing slashes. */
-export function sameRepoUrl(a: string, b: string): boolean {
-  const norm = (u: string): string =>
-    u.trim().replace(/\/+$/, "").replace(/\.git$/, "").replace(/\/+$/, "");
-  return norm(a) !== "" && norm(a) === norm(b);
-}
 
 /**
  * Where the new config's clone lives: the current config's clone when it points

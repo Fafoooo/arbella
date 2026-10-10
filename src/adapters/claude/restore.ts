@@ -307,6 +307,7 @@ function withEnabledPlugins(text: string, enabled: Record<string, boolean>): str
 async function mergeEnabledPlugins(
   ctx: RestoreContext,
   enabled: Record<string, boolean>,
+  repoText: string | Buffer,
 ): Promise<void> {
   if (Object.keys(enabled).length === 0) return;
   const settings = await resolveContainedTarget(ctx.fs, ctx.toolHome, SETTINGS_REL);
@@ -328,7 +329,7 @@ async function mergeEnabledPlugins(
 
   // Rename-based: settings.json is a file Claude Code itself reads continuously.
   await ctx.fs.writeAtomic(settingsPath, next);
-  recordExternalWrite(ctx, settingsPath, next);
+  recordExternalWrite(ctx, settingsPath, next, repoText.toString());
   ctx.log.debug(`claude: merged ${Object.keys(enabled).length} enabledPlugins entries`);
 }
 
@@ -455,11 +456,12 @@ export async function restore(ctx: RestoreContext, data: RestoreData): Promise<v
 
   // ----- 1. Frozen files -----
   let written = 0;
-  let settingsWritten = false;
+  // The hydrated repo settings.json, when the file pass wrote it.
+  let settingsRepoText: string | Buffer | undefined;
   for (const file of data.files) {
     if ((await writeOne(ctx, file)) !== "written") continue;
     written++;
-    if (file.repoPath === SETTINGS_REPO_PATH) settingsWritten = true;
+    if (file.repoPath === SETTINGS_REPO_PATH) settingsRepoText = hydratedContent(ctx, file);
   }
   ctx.log.debug(`claude: wrote ${written}/${data.files.length} files`);
 
@@ -522,7 +524,9 @@ export async function restore(ctx: RestoreContext, data: RestoreData): Promise<v
   }
 
   // ----- 5. Re-enable plugins (authoritative: settings.enabledPlugins) -----
-  if (settingsWritten) await mergeEnabledPlugins(ctx, data.manifest.enabledPlugins);
+  if (settingsRepoText !== undefined) {
+    await mergeEnabledPlugins(ctx, data.manifest.enabledPlugins, settingsRepoText);
+  }
 
   // ----- 6. skills.sh skills (repopulate ~/.agents/skills) -----
   for (const skill of data.manifest.skills) {
