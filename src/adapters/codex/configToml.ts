@@ -70,32 +70,28 @@ function isTable(value: unknown): value is TomlTable {
 /**
  * Redact secret VALUES inside an arbitrary TOML subtree IN PLACE.
  *
- * A value is redacted when EITHER its key name denotes a secret (isSecretKey) OR
- * its string value matches a known secret pattern. Objects and arrays are walked
+ * A leaf is redacted when its key name denotes a secret (isSecretKey), when it
+ * sits under a credentials container (headers, secrets, ...), when it sits under
+ * an env-style map and is not a plain flag or number (isPlainSettingValue), or
+ * when its string value matches a known secret pattern. Numbers and booleans
+ * follow the same key/context rules as strings. Objects and arrays are walked
  * recursively. Every redaction appends a SecretRef (kind:"value") whose `source`
  * pinpoints the dotted path inside config.toml.
- *
- * `keyIsSecretContext` forces redaction of every string leaf but a plain flag or
- * number (isPlainSettingValue), regardless of the leaf key — used for env/headers
- * maps where the table key (e.g. "env") is itself a secret container and the
- * inner keys are arbitrary variable names.
  */
 function redactSubtree(
   node: unknown,
   dottedPath: string,
   secrets: SecretRef[],
-  keyIsSecretContext: boolean,
+  context: TomlContext,
 ): void {
   if (Array.isArray(node)) {
     for (let i = 0; i < node.length; i++) {
       const child = node[i];
-      if (typeof child === "string") {
-        if (keyIsSecretContext || valueLooksSecret(child)) {
-          node[i] = REDACTED;
-          secrets.push(makeValueSecret(`${dottedPath}[${i}]`));
-        }
-      } else if (isTable(child) || Array.isArray(child)) {
-        redactSubtree(child, `${dottedPath}[${i}]`, secrets, keyIsSecretContext);
+      if (isTable(child) || Array.isArray(child)) {
+        redactSubtree(child, `${dottedPath}[${i}]`, secrets, context);
+      } else if (shouldRedactLeaf("", child, context)) {
+        node[i] = REDACTED;
+        secrets.push(makeValueSecret(`${dottedPath}[${i}]`));
       }
     }
     return;
@@ -106,29 +102,40 @@ function redactSubtree(
   for (const key of Object.keys(node)) {
     const child = node[key];
     const childPath = dottedPath ? `${dottedPath}.${key}` : key;
-    const secretContext = keyIsSecretContext || isSecretKey(key) || isSecretContainerKey(key);
-
-    if (typeof child === "string") {
-      // A plain flag/number survives a container; a secret NAME still redacts it.
-      const redact =
-        isSecretKey(key) || valueLooksSecret(child) || (secretContext && !isPlainSettingValue(key, child));
-      if (redact) {
-        node[key] = REDACTED;
-        secrets.push(makeValueSecret(childPath));
-      }
-    } else if (isTable(child) || Array.isArray(child)) {
-      // For container keys ("env", "headers", "set", ...) every leaf below but
-      // a plain flag/number is secret; otherwise normal per-key detection.
-      redactSubtree(child, childPath, secrets, secretContext);
+    const inner = childContext(context, key);
+    if (isTable(child) || Array.isArray(child)) {
+      redactSubtree(child, childPath, secrets, inner);
+    } else if (shouldRedactLeaf(key, child, inner)) {
+      node[key] = REDACTED;
+      secrets.push(makeValueSecret(childPath));
     }
-    // numbers / booleans are never secret values we can meaningfully redact.
   }
 }
 
+/** Where a TOML value sits: outside any container, under an env map, under credentials. */
+type TomlContext = "none" | "settings" | "credentials";
+
+/** The context below `key`: a secret name or a credentials container wins. */
+function childContext(current: TomlContext, key: string): TomlContext {
+  if (current === "credentials" || isSecretKey(key)) return "credentials";
+  if (!isSecretContainerKey(key)) return current;
+  return isSettingsContainerKey(key) ? "settings" : "credentials";
+}
+
+/** Whether a scalar leaf under `key` in `context` is redacted. */
+function shouldRedactLeaf(key: string, value: unknown, context: TomlContext): boolean {
+  const scalar = typeof value === "string" || typeof value === "number" || typeof value === "boolean";
+  if (!scalar) return false;
+  if (context === "credentials") return true;
+  if (context === "settings" && !isPlainSettingValue(key, value)) return true;
+  return typeof value === "string" && valueLooksSecret(value);
+}
+
 /**
- * Keys whose entire SUBTREE of string values should be treated as secret,
- * regardless of the inner variable names. These are the standard MCP/credential
- * container maps.
+ * Keys whose entire SUBTREE of values should be treated as secret, regardless
+ * of the inner variable names. These are the standard MCP/credential container
+ * maps; the env-style ones among them (isSettingsContainerKey) spare plain flags
+ * and numbers.
  */
 function isSecretContainerKey(key: string): boolean {
   const k = key.toLowerCase();
@@ -141,6 +148,11 @@ function isSecretContainerKey(key: string): boolean {
     k === "secrets" ||
     k === "credentials"
   );
+}
+
+/** Env-style containers: settings, not request credentials. */
+function isSettingsContainerKey(key: string): boolean {
+  return ["env", "environment", "set"].includes(key.toLowerCase());
 }
 
 /** True if any known secret-value pattern would redact part of a free string. */
@@ -170,7 +182,7 @@ function redactMcpServers(servers: TomlTable, secrets: SecretRef[]): void {
   }
   // Only these documented server-level reference fields are exempt. Actual
   // env/http_headers values and similarly named nested keys remain protected.
-  redactSubtree(servers, "mcp_servers", secrets, false);
+  redactSubtree(servers, "mcp_servers", secrets, "none");
   for (const { server, key, value } of references) server[key] = value;
 }
 
@@ -291,7 +303,7 @@ export function processConfigToml(
     }
     const shellEnv = parsed["shell_environment_policy"];
     if (isTable(shellEnv)) {
-      redactSubtree(shellEnv, "shell_environment_policy", secrets, false);
+      redactSubtree(shellEnv, "shell_environment_policy", secrets, "none");
     }
     // Catch-all: any other secret-keyed scalar at the top level or in keep-sections.
     for (const key of Object.keys(parsed)) {
@@ -304,7 +316,7 @@ export function processConfigToml(
           secrets.push(makeValueSecret(key));
         }
       } else if (isTable(value) || Array.isArray(value)) {
-        redactSubtree(value, key, secrets, false);
+        redactSubtree(value, key, secrets, "none");
       }
     }
   }

@@ -40,8 +40,9 @@ const LITERAL_SECRET_MIN_LENGTH = 8;
  *
  * Kept: shell expansions (`$(...)`, `${...}`, `$VAR`, backticks — except inside
  * single quotes; a `$` before anything else, as in `Pa$$w0rd`, is literal),
- * already-redacted/templated text, plain URLs, paths, words and numbers (a
- * generated credential mixes letters and digits), and unquoted expressions such
+ * already-redacted/templated text, plain URLs, paths, environment variable
+ * names, numbers, unquoted words (a generated credential mixes letters and
+ * digits; a bare word is an identifier or a type) and unquoted expressions such
  * as `process.env.X` or `os.environ[`. A run of 20+ letters/digits is a token
  * even when it looks like a URL, a path or a dotted name (a webhook path,
  * `/9xR4k…`, Vault `hvs.CAES…`).
@@ -57,10 +58,26 @@ function isLiteralSecret(written: string): boolean {
   // A webhook URL carries its secret in the path: hooks.slack.com/services/T…/B…/<token>.
   if (/^[A-Za-z][A-Za-z0-9+.-]*:\/\//.test(value)) return tokenRun || isCredentialBearingUrl(value);
   if (value.length < LITERAL_SECRET_MIN_LENGTH || /\s/.test(value)) return false;
-  if (!/[A-Za-z]/.test(value) || !/\d/.test(value)) return false;
-  if (!tokenRun && /^(?:\/|~\/|\.{1,2}\/)/.test(value)) return false;
-  if (quote) return true;
+  if (!/[A-Za-z]/.test(value)) return false;
+  // An environment variable NAME is a reference: "OPENAI_API_KEY", GITHUB_TOKEN_2.
+  if (/^[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+$/.test(value)) return false;
+  if (!tokenRun && isPathLike(value)) return false;
+  // Quoted, a single word is a literal even without digits ("correcthorse",
+  // "P@ssword!"); a separated identifier ("refresh_token", "your-api-key") is not.
+  if (quote) return /\d/.test(value) || !/[_.\/-]/.test(value);
+  // Unquoted, a word without digits is an identifier or a type: `token: string`.
+  if (!/\d/.test(value)) return false;
   return !/[(\[{<>|\\]/.test(value) && (tokenRun || !/^[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+$/.test(value));
+}
+
+/**
+ * Absolute, home- or dot-relative paths, and relative ones that end in a file
+ * extension or are all lower case (config/token2.json, secrets/db_password_v2)
+ * — unlike mixed-case base64 such as `aB3xY9zQ/1kLmN0pQ`.
+ */
+function isPathLike(value: string): boolean {
+  if (/^(?:\/|~\/|\.{1,2}\/)/.test(value)) return true;
+  return /^[\w.-]+(?:\/[\w.-]+)+$/.test(value) && (/\.[A-Za-z]\w{0,5}$/.test(value) || !/[A-Z]/.test(value));
 }
 
 /**
@@ -264,8 +281,9 @@ export const SECRET_KEY_NAMES: readonly string[] = [
  * Container key names whose ENTIRE subtree holds secret leaves: MCP server env
  * maps and request headers. Env vars are named arbitrarily (KEY, OPENAI_KEY,
  * GROQ_WHATEVER), so key-name matching alone cannot catch them — anything a user
- * puts under one of these maps is treated as a credential, except a plain flag
- * or number (isPlainSettingValue) under a non-secret name. Shared by the JSON
+ * puts under one of these maps is treated as a credential, except — under an
+ * env map only — a plain flag or number under a non-secret name
+ * (isPlainSettingValue). Shared by the JSON
  * structural pass (sanitizeJson) and codex's TOML pass so both stay consistent.
  */
 export const SECRET_CONTAINER_KEYS: readonly string[] = ["env", "environment", "headers"];
@@ -273,6 +291,15 @@ export const SECRET_CONTAINER_KEYS: readonly string[] = ["env", "environment", "
 /** True if a JSON/TOML key introduces a secret container (env/environment/headers). */
 export function isSecretContainerKey(key: string): boolean {
   return SECRET_CONTAINER_KEYS.includes(key.toLowerCase());
+}
+
+/**
+ * The containers that hold settings rather than request credentials: env maps.
+ * Only below these does isPlainSettingValue spare a flag or a number; header
+ * values stay redacted whatever they look like (a numeric OTP is a credential).
+ */
+export function isSettingsContainerKey(key: string): boolean {
+  return ["env", "environment"].includes(key.toLowerCase());
 }
 
 /**

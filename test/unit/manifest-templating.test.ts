@@ -45,6 +45,24 @@ env = { SERVICE_TOKEN = "opaque-private-token", bearer_token_env_var = "nested-p
   expect(result.sanitizedToml).not.toContain("opaque-private");
 });
 
+it("redacts password-named TOML numbers and every header value, keeps env flags", () => {
+  const result = processConfigToml(`
+[mcp_servers.db.env]
+PGPASSWORD = 123456
+YUBIKEY_PIN = 4711
+MCP_TIMEOUT = 30000
+DEBUG = true
+
+[mcp_servers.db.headers]
+X_OTP = "123456"
+X_DEBUG = "true"
+`, createTemplater(), makeVariables("/home/test", "test", "linux", "/home/test/.codex"));
+  expect(parseToml(result.sanitizedToml).mcp_servers).toEqual({ db: {
+    env: { PGPASSWORD: "{{REDACTED}}", YUBIKEY_PIN: "{{REDACTED}}", MCP_TIMEOUT: 30000, DEBUG: true },
+    headers: { X_OTP: "{{REDACTED}}", X_DEBUG: "{{REDACTED}}" },
+  } });
+});
+
 it("keeps boolean and numeric MCP env flags in config.toml, redacts the rest", () => {
   const result = processConfigToml(`
 [mcp_servers.unifi.env]

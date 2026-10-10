@@ -39,6 +39,7 @@ import {
   isPlainSettingValue,
   isSecretContainerKey,
   isSecretKey,
+  isSettingsContainerKey,
   isUrlKey,
   type SecretPattern,
 } from "./patterns.js";
@@ -317,11 +318,11 @@ function detectJsonIndent(content: string): number | string {
  * Recursively clone `node`, redacting secret values. `keyPath` is the dotted
  * path to `node` from the root (for SecretRef.source); `parentKey` is the
  * immediate key under which `node` sits (drives isSecretKey for scalars).
- * `inSecretContainer` is set once the walk descends under an env/environment/
- * headers map and stays set for the whole subtree: env vars are named
- * arbitrarily (KEY, OPENAI_KEY, ...), so every leaf below such a container but a
- * plain flag or number (isPlainSettingValue) is treated as secret — mirroring
- * codex's TOML structural pass.
+ * `container` is set once the walk descends under an env/environment/headers
+ * map and stays set for the whole subtree: env vars are named arbitrarily (KEY,
+ * OPENAI_KEY, ...), so every leaf below such a container is treated as secret —
+ * except, below an env map only, a plain flag or number (isPlainSettingValue).
+ * Mirrors codex's TOML structural pass.
  */
 function cloneRedact(
   node: unknown,
@@ -330,12 +331,12 @@ function cloneRedact(
   keyPath: string,
   found: SecretRef[],
   parentKey = "",
-  inSecretContainer = false,
+  container: Container = "none",
 ): unknown {
   // Arrays: clone element-wise, preserving index in the path.
   if (Array.isArray(node)) {
     return node.map((el, i) =>
-      cloneRedact(el, tool, source, joinPath(keyPath, String(i)), found, parentKey, inSecretContainer),
+      cloneRedact(el, tool, source, joinPath(keyPath, String(i)), found, parentKey, container),
     );
   }
 
@@ -343,8 +344,7 @@ function cloneRedact(
   if (isPlainObject(node)) {
     const out: Record<string, unknown> = {};
     for (const [k, v] of Object.entries(node)) {
-      const childInContainer = inSecretContainer || isSecretContainerKey(k);
-      out[k] = cloneRedact(v, tool, source, joinPath(keyPath, k), found, k, childInContainer);
+      out[k] = cloneRedact(v, tool, source, joinPath(keyPath, k), found, k, enterContainer(container, k));
     }
     return out;
   }
@@ -365,11 +365,13 @@ function cloneRedact(
     return REDACTED;
   }
 
-  // Scalars (string/number/boolean/null/undefined): redact if warranted. Inside
-  // a container a plain flag/number survives; a secret NAME still redacts it.
+  // Scalars (string/number/boolean/null/undefined): redact if warranted. Under
+  // an env map a plain flag/number survives; a secret NAME still redacts it.
   const keyIsSecret =
     parentKey.length > 0 &&
-    (isSecretKey(parentKey) || (inSecretContainer && !isPlainSettingValue(parentKey, node)));
+    (isSecretKey(parentKey) ||
+      container === "credentials" ||
+      (container === "settings" && !isPlainSettingValue(parentKey, node)));
   const { value: redacted, matched } = redactValue(node, keyIsSecret);
   if (matched !== null && redacted !== node) {
     found.push({
@@ -386,6 +388,15 @@ function cloneRedact(
 /* -------------------------------------------------------------------------- */
 /* Helpers                                                                     */
 /* -------------------------------------------------------------------------- */
+
+/** Where a leaf sits: outside any container, under an env map, under headers. */
+type Container = "none" | "settings" | "credentials";
+
+/** The container a child of `key` sits in; credentials win over settings. */
+function enterContainer(current: Container, key: string): Container {
+  if (current === "credentials" || !isSecretContainerKey(key)) return current;
+  return isSettingsContainerKey(key) ? "settings" : "credentials";
+}
 
 /** A SecretRef for a free-text pattern hit. */
 function valueSecretRef(tool: ToolId, source: string, pat: SecretPattern): SecretRef {

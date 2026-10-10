@@ -262,6 +262,11 @@ describe("sanitizer: secret-named assignments never break code", () => {
     "const token = `${prefix}-${id}`;",
     "TOKEN_URL=https://oauth2.googleapis.com/token",
     "PASSWORD_FILE=/run/secrets/db_password_v2",
+    "TOKEN_FILE=config/token2.json",
+    "PASSWORD_FILE=secrets/db_password_v2",
+    'token_type_hint: "refresh_token"',
+    'api_key_env = "OPENAI_API_KEY"',
+    'GITHUB_TOKEN_VAR="GITHUB_TOKEN_2"',
     "GITHUB_TOKEN=<your-token>",
     'API_KEY="your-api-key-here"',
     'tokenizer_model = "bert-base-v2"',
@@ -333,6 +338,11 @@ describe("sanitizer: secret-named assignments never break code", () => {
     ['tokenValue: "abc123def456ghi"', `tokenValue: "${REDACTED}"`],
     // Any letter case, as on main: only a same-case run-on (TOKENS) is excluded.
     ["secretkey=abc123def456ghi", `secretkey=${REDACTED}`],
+    // Quoted, a single word is a literal even without digits.
+    ['DB_PASSWORD="correcthorse"', `DB_PASSWORD="${REDACTED}"`],
+    ["password: 'P@ssword!'", `password: '${REDACTED}'`],
+    // Slash-separated but mixed case, no extension: base64, not a path.
+    ["API_TOKEN=aB3xY9zQ/1kLmN0pQ", `API_TOKEN=${REDACTED}`],
     ["Api_KEY=abc123def456ghi", `Api_KEY=${REDACTED}`],
     ["PassWord=abc123def456ghi", `PassWord=${REDACTED}`],
     ['apiKeyValue = "abc123def456ghi"', `apiKeyValue = "${REDACTED}"`],
@@ -619,6 +629,17 @@ describe("sanitizer: env/environment/headers containers (E2E leak regression)", 
     );
     const env = JSON.parse(sanitizer.sanitizeFile(blob, "claude", "settings.json").content).env;
     expect(env).toEqual({ DB_PASSWORD: REDACTED, ACCOUNT_NUMBER: REDACTED, ENABLE_X: "1" });
+  });
+
+  it("keeps blanket redaction under headers, even for flag-shaped values", () => {
+    const blob = JSON.stringify(
+      { mcpServers: { s: { headers: { "X-Custom-Auth": "123456", "X-Debug": "true" }, env: { DEBUG: "1" } } } },
+      null,
+      2,
+    );
+    const out = JSON.parse(sanitizer.sanitizeFile(blob, "claude", "mcp.json").content).mcpServers.s;
+    expect(out.headers).toEqual({ "X-Custom-Auth": REDACTED, "X-Debug": REDACTED });
+    expect(out.env).toEqual({ DEBUG: "1" });
   });
 
   it("keeps flags whose name merely ends in BYPASS", () => {
