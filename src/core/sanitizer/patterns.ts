@@ -17,6 +17,50 @@ export interface SecretPattern {
   name: string;
   /** Regex matching the secret token. SHOULD be global so all hits are replaced. */
   regex: RegExp;
+  /**
+   * Builds the replacement for one match (a String#replace callback). Absent,
+   * the whole match becomes REDACTED; returning the match itself keeps it.
+   */
+  replace?: (match: string, ...captures: string[]) => string;
+}
+
+/** Apply one pattern to `text`. Returns `text` itself when nothing was redacted. */
+export function applySecretPattern(text: string, pat: SecretPattern): string {
+  // A fresh copy: a shared global regex carries lastIndex between calls.
+  const re = new RegExp(pat.regex.source, pat.regex.flags);
+  return pat.replace ? text.replace(re, pat.replace) : text.replace(re, REDACTED);
+}
+
+/** Shortest assigned literal treated as a credential (below that: flags, words). */
+const LITERAL_SECRET_MIN_LENGTH = 8;
+
+/**
+ * True when the value side of a secret-named assignment, as written (quotes
+ * included), is a LITERAL credential rather than code that produces one.
+ *
+ * Kept: shell expansions (`$(...)`, `${...}`, `$VAR`, backticks — except inside
+ * single quotes, where `$` is literal), already-redacted/templated text, plain
+ * URLs, paths, words and numbers (a generated credential mixes letters and
+ * digits), and unquoted expressions such as `process.env.X` or `os.environ[`.
+ */
+function isLiteralSecret(written: string): boolean {
+  const quote = /^["'`]/.test(written) ? written[0] : "";
+  const value = quote ? written.slice(1, -1) : written;
+  if (quote !== "'" && /[$`]/.test(value)) return false;
+  if (value.includes("{{")) return false;
+  if (/^[A-Za-z][A-Za-z0-9+.-]*:\/\//.test(value)) return isCredentialBearingUrl(value);
+  if (value.length < LITERAL_SECRET_MIN_LENGTH || /\s/.test(value)) return false;
+  if (!/[A-Za-z]/.test(value) || !/\d/.test(value)) return false;
+  if (/^(?:\/|~\/|\.{1,2}\/)/.test(value)) return false;
+  if (quote) return true;
+  return /^[A-Za-z0-9._~+/=:-]+$/.test(value) && !/^[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+$/.test(value);
+}
+
+/** Replace only the literal VALUE of a secret-named assignment, quotes kept. */
+function redactAssignedLiteral(match: string, name: string, op: string, written: string): string {
+  if (!isLiteralSecret(written)) return match;
+  const quote = /^["'`]/.test(written) ? written[0] : "";
+  return `${name}${op}${quote}${REDACTED}${quote}`;
 }
 
 /**
@@ -25,8 +69,9 @@ export interface SecretPattern {
  *
  * Each regex uses the `g` flag so String#replace swaps every occurrence, and is
  * written to match the TOKEN itself (not surrounding quotes/keys) so the redacted
- * marker drops cleanly in place. Patterns are intentionally specific to keep the
- * false-positive rate low on ordinary prose and paths.
+ * marker drops cleanly in place — or carries a `replace` that keeps them.
+ * Patterns are intentionally specific to keep the false-positive rate low on
+ * ordinary prose and paths.
  */
 export const SECRET_PATTERNS: readonly SecretPattern[] = [
   // OpenAI-style keys: sk-..., sk-proj-..., sk-ant-... (>= 20 token chars).
@@ -104,17 +149,20 @@ export const SECRET_PATTERNS: readonly SecretPattern[] = [
     regex: /-----BEGIN (?:[A-Z0-9 ]+ )?PRIVATE KEY-----[\s\S]*?-----END (?:[A-Z0-9 ]+ )?PRIVATE KEY-----/g,
   },
   // Generic "<SECRETKEY>=<value>" / "<SECRETKEY>: <value>" assignments where the
-  // key name itself screams secret (env-style). Captures the VALUE only via a
-  // replacer-aware group reference is NOT possible from a flat list, so this
-  // pattern matches the whole assignment; the sanitizer treats SECRET_KEY_NAMES
-  // structurally for JSON/TOML and uses this for free-text fallback (shell/python
-  // hook scripts). Case-INSENSITIVE (the "i" flag) + a mixed-case key class so
-  // lowercase assignments like `export my_api_key=...` / `api_token=...` that
-  // real users write in hooks are caught too, not just SCREAMING_CASE.
+  // key name itself screams secret (env-style), for the free-text fallback
+  // (shell/python hook scripts, YAML, docs); JSON/TOML use SECRET_KEY_NAMES
+  // structurally. Case-INSENSITIVE so `export my_api_key=...` is caught too. A
+  // stem glued to more letters (TOKENS, tokenizer, secretary) is not a secret
+  // name, the operator never spans a line, and `:-`/`:=` cover shell defaults.
+  // Captures: 1 name, 2 operator with its spacing, 3 value as written. Only a
+  // LITERAL value is replaced: rewriting the whole assignment turned
+  // `TOTAL_INPUT_TOKENS=$(echo ...)` into `{{REDACTED}} "$input" ...` and broke
+  // every script it touched.
   {
     name: "env-assignment-secret",
     regex:
-      /\b([A-Za-z0-9_]*(?:API[_-]?KEY|SECRET|TOKEN|PASSWORD|PASSWD|PRIVATE[_-]?KEY|ACCESS[_-]?KEY|CLIENT[_-]?SECRET)[A-Za-z0-9_]*)\s*[:=]\s*["']?[^\s"'#]{6,}["']?/gi,
+      /\b([A-Za-z0-9_]*(?:API[_-]?KEY|SECRET|TOKEN|PASSWORD|PASSWD|PRIVATE[_-]?KEY|ACCESS[_-]?KEY|CLIENT[_-]?SECRET)(?![A-Za-z])[A-Za-z0-9_]*)([ \t]*(?::[-=]?|=)(?![=>~:+?])[ \t]*)("[^"\n]*"|'[^'\n]*'|`[^`\n]*`|[^\s"'`;,)\]}#]+)/gi,
+    replace: redactAssignedLiteral,
   },
 ];
 

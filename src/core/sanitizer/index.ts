@@ -34,6 +34,7 @@ import { COMMON_DENY, matchesDeny } from "./denylist.js";
 import {
   REDACTED,
   SECRET_PATTERNS,
+  applySecretPattern,
   isCredentialBearingUrl,
   isSecretContainerKey,
   isSecretKey,
@@ -74,11 +75,10 @@ export function redactValue(
   let firstMatch: string | null = null;
   let out = value;
   for (const pat of SECRET_PATTERNS) {
-    const re = freshRegex(pat.regex);
-    if (re.test(out)) {
-      if (firstMatch === null) firstMatch = pat.name;
-      out = out.replace(freshRegex(pat.regex), REDACTED);
-    }
+    const next = applySecretPattern(out, pat);
+    if (next === out) continue;
+    if (firstMatch === null) firstMatch = pat.name;
+    out = next;
   }
   return { value: out, matched: firstMatch };
 }
@@ -113,8 +113,9 @@ export function createSanitizer(): SanitizerService {
     let changed = false;
 
     for (const pat of SECRET_PATTERNS) {
-      if (!freshRegex(pat.regex).test(out)) continue;
-      out = out.replace(freshRegex(pat.regex), REDACTED);
+      const next = applySecretPattern(out, pat);
+      if (next === out) continue;
+      out = next;
       changed = true;
       found.push(valueSecretRef(tool, source, pat));
     }
@@ -403,14 +404,6 @@ function describeMatch(matched: string, parentKey: string, keyPath: string): str
 /** Turn a pattern id like "github-token" into "GitHub token"-ish prose. */
 function humanizePattern(name: string): string {
   return name.replace(/[-_]/g, " ");
-}
-
-/**
- * Return a fresh, lastIndex-reset copy of a (possibly global) regex so that
- * stateful `.test()`/`.replace()` calls never interfere with one another.
- */
-function freshRegex(re: RegExp): RegExp {
-  return new RegExp(re.source, re.flags);
 }
 
 /** Join two dotted-path segments, skipping empties. */

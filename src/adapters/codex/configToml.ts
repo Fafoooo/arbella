@@ -39,7 +39,12 @@ import type {
   TemplaterService,
   TemplateVariables,
 } from "../../types.js";
-import { isSecretKey, REDACTED, SECRET_PATTERNS } from "../../core/sanitizer/patterns.js";
+import {
+  applySecretPattern,
+  isSecretKey,
+  REDACTED,
+  SECRET_PATTERNS,
+} from "../../core/sanitizer/patterns.js";
 
 /** Result of processing a raw config.toml on capture. */
 export interface ParsedCodexConfig {
@@ -133,15 +138,9 @@ function isSecretContainerKey(key: string): boolean {
   );
 }
 
-/** True if a free string value matches any known secret-value pattern. */
+/** True if any known secret-value pattern would redact part of a free string. */
 function valueLooksSecret(value: string): boolean {
-  for (const p of SECRET_PATTERNS) {
-    // Patterns carry the global flag; reset lastIndex before each test so a
-    // shared RegExp object does not skip on subsequent calls.
-    p.regex.lastIndex = 0;
-    if (p.regex.test(value)) return true;
-  }
-  return false;
+  return SECRET_PATTERNS.some((p) => applySecretPattern(value, p) !== value);
 }
 
 /** MCP auth references name environment variables; they do not contain tokens. */

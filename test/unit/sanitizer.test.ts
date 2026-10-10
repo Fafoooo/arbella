@@ -233,6 +233,83 @@ describe("sanitizer: sanitizeFile is the key-name-aware production path (§0.6)"
   });
 });
 
+describe("sanitizer: secret-named assignments never break code", () => {
+  // A live push replaced `NAME=<first chunk of the value>` with the marker in 58
+  // scripts, e.g. `TOTAL_INPUT_TOKENS=$(echo ...)` -> `{{REDACTED}} "$input" ...`.
+  // Only a LITERAL value is a secret; the name, the operator and the quotes stay.
+
+  it("leaves a statusline script that counts tokens byte-identical", () => {
+    const script = [
+      "#!/bin/bash",
+      'input=$(cat)',
+      "TOTAL_INPUT_TOKENS=$(echo \"$input\" | jq -r '.context_window.total_input_tokens // 0')",
+      "TOTAL_OUTPUT_TOKENS=$(echo \"$input\" | jq -r '.context_window.total_output_tokens // 0')",
+      'echo "in=$TOTAL_INPUT_TOKENS out=$TOTAL_OUTPUT_TOKENS"',
+    ].join("\n");
+    const res = sanitizer.sanitizeFile(script, "claude", "statusline.sh");
+    expect(res.content).toBe(script);
+    expect(res.changed).toBe(false);
+  });
+
+  it.each([
+    "NPM_TOKEN=$(security find-generic-password -s npm -w)",
+    'export API_TOKEN="${API_TOKEN:-}"',
+    "SECRET=${1:-}",
+    'api_key = os.environ["OPENAI_API_KEY"]',
+    "const apiKey = process.env.OPENAI_API_KEY_V2;",
+    "  token: string;",
+    "  password: z.string().min(8),",
+    "const token = `${prefix}-${id}`;",
+    "TOKEN_URL=https://oauth2.googleapis.com/token",
+    "PASSWORD_FILE=/run/secrets/db_password_v2",
+    "GITHUB_TOKEN=<your-token>",
+    'API_KEY="your-api-key-here"',
+    'tokenizer_model = "bert-base-v2"',
+    "MAX_OUTPUT_TOKENS=128000",
+  ])("keeps %s intact (expansion, lookup, type, path, URL or placeholder)", (line) => {
+    const res = sanitizer.sanitizeFile(line, "claude", "scripts/hook.sh");
+    expect(res.content).toBe(line);
+  });
+
+  it("redacts a literal value but keeps the name, operator and quotes", () => {
+    const script = [
+      'export my_api_key="literal-opaque-value-123456"',
+      "api_token=plainsecretvalue7890",
+      "export AWS_SECRET_ACCESS_KEY=uppercasevalue123456",
+      "password: 'Sup3r-Secret-Pw'",
+    ].join("\n");
+    const res = sanitizer.sanitizeFile(script, "claude", "hooks/session.sh");
+    expect(res.content).toBe(
+      [
+        `export my_api_key="${REDACTED}"`,
+        `api_token=${REDACTED}`,
+        `export AWS_SECRET_ACCESS_KEY=${REDACTED}`,
+        `password: '${REDACTED}'`,
+      ].join("\n"),
+    );
+    expect(res.found.map((ref) => ref.key)).toEqual(["env-assignment-secret"]);
+  });
+
+  it("never pulls the next line into an assignment", () => {
+    const yaml = "secret:\n  rotation_days: 30\napi_token:\n  - abc123def456\n";
+    expect(sanitizer.sanitizeFile(yaml, "claude", "skills/x/config.yaml").content).toBe(yaml);
+  });
+
+  it("is idempotent on already-redacted text", () => {
+    const once = `export X_TOKEN="${REDACTED}"\nY_SECRET=${REDACTED}\n`;
+    const res = sanitizer.sanitizeFile(once, "claude", "hooks/x.sh");
+    expect(res.content).toBe(once);
+    expect(res.changed).toBe(false);
+  });
+
+  it("leaves a hook command string in settings.json intact", () => {
+    const command = "OPENAI_API_KEY=$(security find-generic-password -s openai -w) npx -y some-mcp";
+    const settings = JSON.stringify({ hooks: { SessionStart: [{ hooks: [{ command }] }] } }, null, 2);
+    const res = sanitizer.sanitizeFile(settings, "claude", "settings.json");
+    expect(res.content).toBe(settings);
+  });
+});
+
 describe("sanitizer: credential-bearing URLs", () => {
   const TOKEN = "s3cr3t-signed-value-0123456789";
 
