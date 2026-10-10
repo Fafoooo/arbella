@@ -708,6 +708,18 @@ describe("sanitizer: env/environment/headers containers (E2E leak regression)", 
     expect(JSON.parse(res.content)).toEqual(settings);
   });
 
+  it("treats only entries (objects, plugin switches) of root-level entry maps as names", () => {
+    // A string under a secret name is a credential even inside `mcp` or `servers`,
+    // and an entry map nested elsewhere is no entry map at all.
+    const blob = JSON.stringify(
+      { mcp: { apiKey: "opaque-key-value-123" }, settings: { servers: { token: "opaque-x9" } } },
+      null,
+      2,
+    );
+    const out = JSON.parse(sanitizer.sanitizeFile(blob, "claude", "x.json").content);
+    expect(out).toEqual({ mcp: { apiKey: REDACTED }, settings: { servers: { token: REDACTED } } });
+  });
+
   it("keeps flags whose name merely ends in BYPASS", () => {
     const env = { CLAUDE_BYPASS: "1", ENABLE_BYPASS: "true" };
     const res = sanitizer.sanitizeFile(JSON.stringify({ env }, null, 2), "claude", "settings.json");
