@@ -104,7 +104,8 @@ function redactSubtree(
   for (const key of Object.keys(node)) {
     const child = node[key];
     const childPath = dottedPath ? `${dottedPath}.${key}` : key;
-    const inner = childContext(context, key);
+    // An entry name (mcp_servers."github-token") is an identifier, not a secret.
+    const inner = NAMED_ENTRY_MAPS.has(dottedPath) ? context : childContext(context, key);
     if (isTable(child) || Array.isArray(child)) {
       redactSubtree(child, childPath, secrets, inner, key);
     } else if (shouldRedactLeaf(key, child, inner)) {
@@ -118,14 +119,21 @@ function redactSubtree(
 type TomlContext = "none" | "settings" | "credentials";
 
 /**
- * The context below `key`. A credentials container makes its subtree
- * credentials, and so does a secret key name inside any container. Outside a
- * container a table name such as `mcp_servers.github-token` is an identifier.
+ * Top-level maps whose keys name entries; those keys are identifiers, so a
+ * server or profile called "github-token" is not a secret-named table.
  */
+const NAMED_ENTRY_MAPS: ReadonlySet<string> = new Set([
+  "mcp_servers",
+  "profiles",
+  "model_providers",
+  "projects",
+]);
+
+/** The context below `key`: a secret name or a credentials container wins. */
 function childContext(current: TomlContext, key: string): TomlContext {
-  if (current === "credentials") return "credentials";
-  if (isSecretContainerKey(key)) return isSettingsContainerKey(key) ? "settings" : "credentials";
-  return current !== "none" && isSecretKey(key) ? "credentials" : current;
+  if (current === "credentials" || isSecretKey(key)) return "credentials";
+  if (!isSecretContainerKey(key)) return current;
+  return isSettingsContainerKey(key) ? "settings" : "credentials";
 }
 
 /** Whether a scalar leaf under `key` in `context` is redacted. */

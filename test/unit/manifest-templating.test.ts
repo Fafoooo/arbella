@@ -95,6 +95,20 @@ api_token = "opaque-private-token"
   } });
 });
 
+it("keeps entry names as identifiers but redacts secret-named tables elsewhere", () => {
+  const result = processConfigToml(`
+[profiles.token-saver]
+model = "o3"
+
+[profiles.default.auth]
+value = "opaque-private-value"
+`, createTemplater(), makeVariables("/home/test", "test", "linux", "/home/test/.codex"));
+  expect(parseToml(result.sanitizedToml).profiles).toEqual({
+    "token-saver": { model: "o3" },
+    default: { auth: { value: "{{REDACTED}}" } },
+  });
+});
+
 it("keeps switch-valued MCP env flags in config.toml, redacts the rest", () => {
   const result = processConfigToml(`
 [mcp_servers.unifi.env]
