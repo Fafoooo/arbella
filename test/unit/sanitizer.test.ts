@@ -340,6 +340,10 @@ describe("sanitizer: secret-named assignments never break code", () => {
     ['tokenValue: "abc123def456ghi"', `tokenValue: "${REDACTED}"`],
     // Any letter case, as on main: only a same-case run-on (TOKENS) is excluded.
     ["secretkey=abc123def456ghi", `secretkey=${REDACTED}`],
+    // Only arbella's own marker means "already redacted"; other braces are data.
+    ['DB_PASSWORD="s3cr3t{{not_a_template}}"', `DB_PASSWORD="${REDACTED}"`],
+    // In sh, `#` inside a word is literal; only a word-initial `#` starts a comment.
+    ["DB_PASSWORD=abc123#456", `DB_PASSWORD=${REDACTED}`],
     // `\$` is a literal dollar in sh, not an expansion.
     ['DB_PASSWORD="correct\\$horse123"', `DB_PASSWORD="${REDACTED}"`],
     // The default of any ${VAR:-…} inside a secret-named value is classified itself.

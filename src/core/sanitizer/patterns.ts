@@ -41,7 +41,7 @@ const LITERAL_SECRET_MIN_LENGTH = 8;
  * Kept: shell expansions (`$(...)`, `${...}`, `$VAR`, backticks — except inside
  * single quotes or after a backslash; a `$` before anything else, as in
  * `Pa$$w0rd`, is literal),
- * already-redacted/templated text, plain URLs, paths, environment variable
+ * already-redacted text, plain URLs, paths, environment variable
  * names, numbers, unquoted words (a generated credential mixes letters and
  * digits; a bare word is an identifier or a type) and unquoted expressions such
  * as `process.env.X` or `os.environ[`. A run of 20+ letters/digits is a token
@@ -58,7 +58,8 @@ function isLiteralSecret(written: string): boolean {
   // A backslash escape (`\$`) is literal data; drop escapes before looking for expansions.
   const unescaped = value.replace(/\\[\s\S]/g, "");
   if (quote !== "'" && /(?<!\$)\$[({A-Za-z_]|`/.test(unescaped)) return false;
-  if (value.includes("{{")) return false;
+  // Already redacted (idempotence). Other braces are data: "s3cr3t{{x}}" is a literal.
+  if (value.includes("{{REDACTED")) return false;
   const tokenRun = /[A-Za-z0-9]{20,}/.test(value);
   // A webhook URL carries its secret in the path: hooks.slack.com/services/T…/B…/<token>.
   if (/^[A-Za-z][A-Za-z0-9+.-]*:\/\//.test(value)) return tokenRun || isCredentialBearingUrl(value);
@@ -92,11 +93,12 @@ function isPathLike(value: string): boolean {
  * operator never spans a line, and `:-`/`:=` cover shell defaults. A quoted
  * value honours backslash escapes, falling back to the plain form (in sh, `\'`
  * ends a single-quoted string); an unquoted one stops at control characters so
- * a NUL-separated binary view still trips the binary fail-safe. Captures:
+ * a NUL-separated binary view still trips the binary fail-safe, and treats `#`
+ * as a comment only where a word starts (in sh, `abc#123` is one word). Captures:
  * 1 name, 2 operator with spacing, 3 value as written.
  */
 const ENV_ASSIGNMENT =
-  /\b([A-Za-z0-9_]{0,64}(?:API[_-]?KEY|SECRET|TOKEN|PASSWORD|PASSWD|PRIVATE[_-]?KEY|ACCESS[_-]?KEY|CLIENT[_-]?SECRET)[A-Za-z0-9_]{0,64})([ \t]*(?::[-=]?(?![=>~:+?])|=(?![=>~:?]))[ \t]*)("(?:\\.|[^"\\\n])*"|"[^"\n]*"|'(?:\\.|[^'\\\n])*'|'[^'\n]*'|`[^`\n]*`|[^\s\0-\x1f\uFFFD"'`;,)\]}#]+)/gi;
+  /\b([A-Za-z0-9_]{0,64}(?:API[_-]?KEY|SECRET|TOKEN|PASSWORD|PASSWD|PRIVATE[_-]?KEY|ACCESS[_-]?KEY|CLIENT[_-]?SECRET)[A-Za-z0-9_]{0,64})([ \t]*(?::[-=]?(?![=>~:+?])|=(?![=>~:?]))[ \t]*)("(?:\\.|[^"\\\n])*"|"[^"\n]*"|'(?:\\.|[^'\\\n])*'|'[^'\n]*'|`[^`\n]*`|[^\s\0-\x1f\uFFFD"'`;,)\]}#][^\s\0-\x1f\uFFFD"'`;,)\]}]*)/gi;
 
 /**
  * "…" > ${X:-…} > literal is as deep as real code nests. Deeper is
