@@ -26,6 +26,7 @@ import { newPullSession, type PullSession } from "../../src/core/placement/index
 import { sha256 } from "../../src/core/placement/ledger.js";
 import { emptyManifest } from "../../src/core/manifest/index.js";
 import { REDACTED as R } from "../../src/core/sanitizer/patterns.js";
+import { HOOK_TAG } from "../../src/core/autobackup/hook.js";
 import { createSanitizer } from "../../src/core/sanitizer/index.js";
 import { createTemplater } from "../../src/core/templater/index.js";
 import { makeVariables } from "../../src/core/templater/variables.js";
@@ -149,6 +150,27 @@ describe("codex config.toml", () => {
     };
     expect(onDisk.mcp_servers.u.env.P).toBe("local-fixture-value");
     expect(onDisk.mcp_servers.u.command).toBe(`${ctx.vars.HOME}/bin/run`);
+  });
+});
+
+describe("arbella's own autobackup hook", () => {
+  const ours = { hooks: [{ type: "command", command: `arbella push --auto >/dev/null 2>&1 & # ${HOOK_TAG}` }] };
+  const cases = [
+    { id: "claude", restore: claude.restore, repoPath: "claude/files/settings.json", rel: "settings.json" },
+    { id: "codex", restore: codex.restore, repoPath: "codex/files/hooks.json", rel: "hooks.json" },
+  ] as const;
+
+  it.each(cases)("$id: the reinstalled hook alone does not make $rel differ", async ({ id, restore, repoPath, rel }) => {
+    const session = forcedSource();
+    const ctx = restoreCtx(id, "repo", session);
+    const dest = path.join(ctx.toolHome, rel);
+    const local = JSON.stringify({ hooks: { SessionStart: [ours] }, x: 1 }, null, 2) + "\n";
+    await put(dest, local);
+
+    await restore(ctx, data(id, [{ repoPath, content: '{"hooks":{},"x":1}' }]));
+
+    expect(await fsp.readFile(dest, "utf8")).toBe(local);
+    expect(session.report.tools[id]).toEqual({ written: 0, identical: 1, kept: [] });
   });
 });
 

@@ -53,7 +53,7 @@ import type { CaptureContext } from "../adapters/adapter.interface.js";
 
 import { fs } from "../utils/fs.js";
 import { log } from "../utils/log.js";
-import { detectOS, toolHomeDir } from "../platform/os.js";
+import { detectOS, homeDir, toolHomeDir } from "../platform/os.js";
 
 import { loadConfig } from "../core/config/index.js";
 import type { Role } from "../core/config/schema.js";
@@ -1056,7 +1056,7 @@ function printHuman(report: StatusReport): void {
   );
   log.step(`Secrets in repo: ${report.includeSecrets ? "INCLUDED" : "excluded (default)"}`);
 
-  for (const e of report.missingSecrets) log.step(`secret missing: ${describeMissingSecret(e)}`);
+  for (const e of report.missingSecrets) log.step(`secret missing: ${describeMissingSecret(e, homeDir())}`);
 
   if (report.clean) {
     log.success("Up to date — a backup right now would change nothing.");

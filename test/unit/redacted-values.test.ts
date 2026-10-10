@@ -9,6 +9,9 @@ import {
   wildcardMatch,
   mergeRedacted,
   mergeRedactedText,
+  parseStructured,
+  repairRedacted,
+  repairRedactedText,
   structuredKind,
 } from "../../src/core/placement/redacted.js";
 import { REDACTED } from "../../src/core/sanitizer/patterns.js";
@@ -170,31 +173,106 @@ describe("matchesWithSecrets", () => {
 describe("describeMissingSecret", () => {
   it("formats the mcp form", () => {
     expect(
-      describeMissingSecret({
-        tool: "codex",
-        file: "/h/.codex/config.toml",
-        keyPath: ["mcp_servers", "unifi-network", "env", "UNIFI_NETWORK_PASSWORD"],
-      }),
+      describeMissingSecret(
+        {
+          tool: "codex",
+          file: "/h/.codex/config.toml",
+          keyPath: ["mcp_servers", "unifi-network", "env", "UNIFI_NETWORK_PASSWORD"],
+        },
+        "/h",
+      ),
     ).toBe("codex mcp unifi-network → UNIFI_NETWORK_PASSWORD");
     expect(
-      describeMissingSecret({
-        tool: "claude",
-        file: "/h/.claude.json",
-        keyPath: ["projects", "/p", "mcpServers", "s", "headers", "Authorization"],
-      }),
+      describeMissingSecret(
+        {
+          tool: "claude",
+          file: "/h/.claude.json",
+          keyPath: ["projects", "/p", "mcpServers", "s", "headers", "Authorization"],
+        },
+        "/h",
+      ),
     ).toBe("claude mcp s → Authorization");
   });
 
-  it("formats the generic form relative to the tool home", () => {
+  it("formats the generic form with the tildified absolute file path", () => {
     expect(
-      describeMissingSecret({ tool: "claude", file: "/h/.claude/settings.json", keyPath: ["env", "API_KEY"] }),
-    ).toBe("claude settings.json → env.API_KEY");
+      describeMissingSecret({ tool: "claude", file: "/h/.claude/settings.json", keyPath: ["env", "API_KEY"] }, "/h"),
+    ).toBe("claude ~/.claude/settings.json → env.API_KEY");
     expect(
-      describeMissingSecret({ tool: "claude", file: "/h/.claude/sub/x.json", keyPath: ["a"] }),
-    ).toBe("claude sub/x.json → a");
+      describeMissingSecret({ tool: "home", file: "/h/.config/x/c.json", keyPath: ["a"] }, "/h"),
+    ).toBe("home ~/.config/x/c.json → a");
     expect(
-      describeMissingSecret({ tool: "claude", file: "/h/.claude.json", keyPath: ["mcpServers", "s", "command"] }),
-    ).toBe("claude .claude.json → mcpServers.s.command");
+      describeMissingSecret({ tool: "claude", file: "/h/.claude.json", keyPath: ["mcpServers", "s", "command"] }, "/h"),
+    ).toBe("claude ~/.claude.json → mcpServers.s.command");
+    expect(describeMissingSecret({ tool: "t", file: "/elsewhere/c.json", keyPath: ["a"] }, "/h")).toBe(
+      "t /elsewhere/c.json → a",
+    );
+  });
+
+  it("strips control characters from key segments and paths", () => {
+    const esc = "\x1b[31m";
+    expect(
+      describeMissingSecret(
+        { tool: "codex", file: "/h/c.toml", keyPath: ["mcp_servers", `s${esc}\n`, "env", `K\r\n${esc}`] },
+        "/h",
+      ),
+    ).toBe("codex mcp s[31m → K[31m");
+    const line = describeMissingSecret(
+      { tool: "claude", file: `/h/.claude/a${esc}\n.json`, keyPath: ["env", `X\u0007\nY`] },
+      "/h",
+    );
+    expect(line).toBe("claude ~/.claude/a[31m.json → env.XY");
+    expect(line).not.toMatch(/\p{C}/u);
+  });
+});
+
+describe("repairRedacted", () => {
+  it("starts from the local document and keeps local-only keys", () => {
+    const local = { model: R, projects: { "/p": { trust_level: "trusted" } }, permissions: { allow: ["Bash(ls)"] } };
+    const repo = { model: "o3" };
+    expect(repairRedacted(local, repo)).toEqual({
+      value: { model: "o3", projects: { "/p": { trust_level: "trusted" } }, permissions: { allow: ["Bash(ls)"] } },
+      missing: [],
+    });
+  });
+
+  it("omits a local marker leaf the repo has no real value for, and reports it", () => {
+    const local = { env: { A: R, B: R, C: "real" }, x: 1 };
+    const repo = { env: { A: R, C: "other" } };
+    expect(repairRedacted(local, repo)).toEqual({
+      value: { env: { C: "real" }, x: 1 },
+      missing: [["env", "A"], ["env", "B"]],
+    });
+  });
+
+  it("treats an array containing a marker as one leaf", () => {
+    expect(repairRedacted({ args: ["--t", R] }, { args: ["--t", "v"] }).value).toEqual({ args: ["--t", "v"] });
+    expect(repairRedacted({ args: ["--t", R] }, { args: ["--t", R] })).toEqual({ value: {}, missing: [["args"]] });
+  });
+
+  it("returns a non-object local untouched", () => {
+    expect(repairRedacted([R], {})).toEqual({ value: [R], missing: [] });
+  });
+});
+
+describe("repairRedactedText", () => {
+  it("keeps the local JSON indent and trailing newline", () => {
+    const local = `{\n    "env": { "S": "${R}" },\n    "permissions": { "allow": [] }\n}`;
+    const out = repairRedactedText("json", local, '{"env":{"S":"1"}}');
+    expect(out?.text).toBe('{\n    "env": {\n        "S": "1"\n    },\n    "permissions": {\n        "allow": []\n    }\n}');
+    expect(repairRedactedText("json", `{"k":"${R}"}\n`, "{nope")).toEqual({ text: "{}\n", missing: [["k"]] });
+  });
+
+  it("round-trips TOML and keeps a local-only table", () => {
+    const local = `model = "${R}"\n\n[projects."/home/u/p"]\ntrust_level = "trusted"\n`;
+    const out = repairRedactedText("toml", local, 'model = "o3"\n');
+    expect(out?.missing).toEqual([]);
+    expect(parseStructured("toml", out!.text)).toEqual({ model: "o3", projects: { "/home/u/p": { trust_level: "trusted" } } });
+  });
+
+  it("is undefined when the local text does not parse to an object", () => {
+    expect(repairRedactedText("json", `{ ${R}`, "{}")).toBeUndefined();
+    expect(repairRedactedText("json", `["${R}"]`, "{}")).toBeUndefined();
   });
 });
 
@@ -242,5 +320,12 @@ describe("wildcardMatch / isRedactedFormOf", () => {
     expect(isRedactedFormOf("T=abc", "T=abc")).toBe(false);
     expect(isRedactedFormOf(`note ${R} edited`, "old")).toBe(false);
     expect(isRedactedFormOf(`T=${R}`, `T=${R}`)).toBe(true);
+  });
+  it("a marker never stands for more than one line", () => {
+    expect(isRedactedFormOf(`note: ${R}`, "note: abc\nmore\nlines\n")).toBe(false);
+    expect(isRedactedFormOf(`a ${R} b\nc`, "a x\ny b\nc")).toBe(false);
+    expect(isRedactedFormOf(`a ${R} b\nc ${R}`, "a x b\nc y")).toBe(true);
+    expect(matchesWithSecrets(`K=${R}\n`, "K=line1\nline2\n")).toBe(false);
+    expect(wildcardMatch(`${R}\n`, "\n\n")).toBe(false);
   });
 });

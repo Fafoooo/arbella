@@ -10,7 +10,7 @@ import { detectJsonIndent, parseJsonOrJsonc } from "../sanitizer/index.js";
 
 type Plain = Record<string, unknown>;
 
-const isPlain = (v: unknown): v is Plain =>
+export const isPlain = (v: unknown): v is Plain =>
   typeof v === "object" && v !== null && !Array.isArray(v);
 
 /** Deep check: does any string inside `v` contain the marker? */
@@ -92,15 +92,71 @@ export function mergeRedactedText(
   if (!isPlain(repo)) return undefined;
   const local = localText === undefined ? undefined : parseStructured(kind, localText);
   const { value, missing } = mergeRedacted(repo, local);
-  if (kind === "toml") return { text: stringifyToml(value as Plain), missing };
-  const nl = repoText.endsWith("\n") ? "\n" : "";
-  return { text: JSON.stringify(value, null, detectJsonIndent(repoText)) + nl, missing };
+  return { text: serialize(kind, value as Plain, repoText), missing };
+}
+
+/** `value` as `kind` text; JSON keeps the indent and trailing newline of `like`. */
+function serialize(kind: "json" | "toml", value: Plain, like: string): string {
+  if (kind === "toml") return stringifyToml(value);
+  const nl = like.endsWith("\n") ? "\n" : "";
+  return JSON.stringify(value, null, detectJsonIndent(like)) + nl;
+}
+
+/**
+ * Repair a local document broken by the old sanitizer. Starts from the LOCAL
+ * value: each local marker leaf (same leaf rule as the merge) takes the repo's
+ * value at the same key path when that is real; otherwise the key is omitted
+ * and its path reported. Everything else local stays, local-only keys included.
+ */
+export function repairRedacted(
+  local: unknown,
+  repo: unknown,
+): { value: unknown; missing: string[][] } {
+  if (!isPlain(local)) return { value: local, missing: [] };
+  return repairObject(local, isPlain(repo) ? repo : {}, []);
+}
+
+function repairObject(
+  local: Plain,
+  repo: Plain,
+  path: string[],
+): { value: Plain; missing: string[][] } {
+  const value: Plain = {};
+  const missing: string[][] = [];
+  for (const [key, lv] of Object.entries(local)) {
+    const rv = repo[key];
+    const here = [...path, key];
+    if (isPlain(lv)) {
+      const sub = repairObject(lv, isPlain(rv) ? rv : {}, here);
+      value[key] = sub.value;
+      missing.push(...sub.missing);
+    } else if (hasMarker(lv)) {
+      if (rv !== undefined && !hasMarker(rv)) value[key] = rv;
+      else missing.push(here);
+    } else {
+      value[key] = lv;
+    }
+  }
+  return { value, missing };
+}
+
+/** {@link repairRedacted} on text. Undefined when the local text does not parse to an object. */
+export function repairRedactedText(
+  kind: "json" | "toml",
+  localText: string,
+  repoText: string,
+): { text: string; missing: string[][] } | undefined {
+  const local = parseStructured(kind, localText);
+  if (!isPlain(local)) return undefined;
+  const { value, missing } = repairRedacted(local, parseStructured(kind, repoText));
+  return { text: serialize(kind, value as Plain, localText), missing };
 }
 
 /**
  * Does `text` equal `pattern` with every marker in the pattern replaced by >= 1
- * char? Linear leftmost-first scan (exact for single-star globs); no regex is
- * built from file content.
+ * char of a single line (a gap never holds "\n")? Linear leftmost-first scan:
+ * exact for single-star globs, and still exact with the line rule, since a later
+ * match only widens the gap. No regex is built from file content.
  */
 export function wildcardMatch(pattern: string, text: string): boolean {
   const segs = pattern.split(REDACTED);
@@ -109,14 +165,20 @@ export function wildcardMatch(pattern: string, text: string): boolean {
   const last = segs[segs.length - 1]!;
   const end = text.length - last.length;
   if (!text.startsWith(first) || !text.endsWith(last)) return false;
+  // Next "\n" at or after the gap start; only rescanned once the scan passes it.
+  let nl = text.indexOf("\n", first.length);
+  const oneLine = (from: number, to: number): boolean => {
+    if (nl !== -1 && nl < from) nl = text.indexOf("\n", from);
+    return nl === -1 || nl >= to;
+  };
   let pos = first.length;
   for (let i = 1; i < segs.length - 1; i++) {
     const seg = segs[i]!;
     const j = text.indexOf(seg, pos + 1);
-    if (j < pos + 1 || j + seg.length > end) return false;
+    if (j < pos + 1 || j + seg.length > end || !oneLine(pos, j)) return false;
     pos = j + seg.length;
   }
-  return end - pos >= 1;
+  return end - pos >= 1 && oneLine(pos, end);
 }
 
 /** Local text equals repo text with real values in place of markers. A local marker is never a real value. */
@@ -165,15 +227,25 @@ export function secretBlindText(
 const MCP_ROOTS = new Set(["mcpServers", "mcp_servers"]);
 const MCP_SECRET_MAPS = new Set(["env", "headers", "http_headers", "env_http_headers"]);
 
-/** One report line body, e.g. "codex mcp unifi-network → UNIFI_NETWORK_PASSWORD". */
-export function describeMissingSecret(e: { tool: string; file: string; keyPath: string[] }): string {
-  const p = e.keyPath;
+/** Text safe for one report line: no control characters (escape sequences, newlines). */
+export const plain = (s: string): string => s.replace(/\p{C}/gu, "");
+
+/** `p` with the home directory shown as "~". */
+export const tildify = (p: string, home: string): string =>
+  p === home ? "~" : p.startsWith(home + "/") || p.startsWith(home + "\\") ? "~" + p.slice(home.length) : p;
+
+/**
+ * One report line body, e.g. "codex mcp unifi-network → UNIFI_NETWORK_PASSWORD"
+ * or "claude ~/.claude/settings.json → env.API_TOKEN".
+ */
+export function describeMissingSecret(
+  e: { tool: string; file: string; keyPath: string[] },
+  home: string,
+): string {
+  const p = e.keyPath.map(plain);
   const i = p.findIndex((s) => MCP_ROOTS.has(s));
   if (i >= 0 && p.length === i + 4 && MCP_SECRET_MAPS.has(p[i + 2]!)) {
-    return `${e.tool} mcp ${p[i + 1]} → ${p[i + 3]}`;
+    return `${plain(e.tool)} mcp ${p[i + 1]} → ${p[i + 3]}`;
   }
-  const segs = e.file.split(/[\\/]/);
-  const home = segs.lastIndexOf(`.${e.tool}`);
-  const rel = home >= 0 && home < segs.length - 1 ? segs.slice(home + 1).join("/") : segs[segs.length - 1];
-  return `${e.tool} ${rel} → ${p.join(".")}`;
+  return `${plain(e.tool)} ${plain(tildify(e.file, home))} → ${p.join(".")}`;
 }

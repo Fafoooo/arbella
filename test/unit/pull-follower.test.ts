@@ -25,6 +25,18 @@ vi.mock("../../src/platform/install.js", async (importOriginal) => ({
   which: async () => false,
   ensureCli: async () => undefined,
 }));
+// Lets a test make the shared/home step (which runs after the adapters) throw.
+const homeStep = vi.hoisted(() => ({ fail: false }));
+vi.mock("../../src/core/homefiles/restore.js", async (importOriginal) => {
+  const real = await importOriginal<typeof import("../../src/core/homefiles/restore.js")>();
+  return {
+    ...real,
+    restoreHomeFiles: async (...a: Parameters<typeof real.restoreHomeFiles>) => {
+      if (homeStep.fail) throw new Error("interrupted");
+      return real.restoreHomeFiles(...a);
+    },
+  };
+});
 
 import { run } from "../../src/commands/restore.js";
 import { saveConfig, defaultConfig } from "../../src/core/config/index.js";
@@ -70,6 +82,7 @@ beforeEach(async () => {
     await fsp.cp(remote, dest, { recursive: true, force: true });
   });
 
+  homeStep.fail = false;
   stderr = [];
   vi.spyOn(process.stderr, "write").mockImplementation((chunk: string | Uint8Array) => {
     stderr.push(String(chunk));
@@ -95,7 +108,11 @@ async function put(abs: string, content: string): Promise<void> {
 }
 
 /** Write the fake remote: repo-relative files plus arbella.json. */
-async function writeRemote(files: Record<string, string>, createdAt = CREATED_AT): Promise<void> {
+async function writeRemote(
+  files: Record<string, string>,
+  createdAt = CREATED_AT,
+  sharedInstructions = false,
+): Promise<void> {
   for (const [rel, content] of Object.entries(files)) await put(path.join(remote, rel), content);
   await put(
     path.join(remote, "arbella.json"),
@@ -105,10 +122,12 @@ async function writeRemote(files: Record<string, string>, createdAt = CREATED_AT
       tools: ["claude", "codex"],
       options: { includeSecrets: false, includeMemories: true, sourceOfTruth: "local" },
       createdAt,
-      sharedInstructions: false,
+      sharedInstructions,
     }),
   );
 }
+
+const ledgerFile = (): string => path.join(xdgData, "arbella", "pull-ledger.json");
 
 const configFile = (): string => path.join(xdgConfig, "arbella", "config.json");
 const readConfig = async (): Promise<Record<string, any>> =>
@@ -243,14 +262,54 @@ describe("arbella pull as a follower", () => {
     expect(await fsp.readFile(configFile(), "utf8")).toBe(before);
   });
 
+  it("a pull limited by --tools does not count as synced", async () => {
+    await writeRemote({ "claude/files/CLAUDE.md": "# hi\n" });
+    await saveSourceConfig(URL, { lastSyncedPush: "older" });
+
+    await run(URL, { tools: "claude" });
+
+    expect(await fsp.readFile(claudeHome("CLAUDE.md"), "utf8")).toBe("# hi\n");
+    expect((await readConfig()).lastSyncedPush).toBe("older");
+  });
+
+  it("a pull that throws after placing files still saves the ledger, but not lastSyncedPush", async () => {
+    await writeRemote({ "claude/files/CLAUDE.md": "# hi\n", "shared/home/.local/bin/t.sh": "x\n" });
+    await saveSourceConfig(URL, { lastSyncedPush: "older" });
+    homeStep.fail = true;
+
+    await expect(run(URL, {})).rejects.toThrow("interrupted");
+
+    const ledger = JSON.parse(await fsp.readFile(ledgerFile(), "utf8"));
+    expect(ledger.files[claudeHome("CLAUDE.md")]).toEqual(expect.any(String));
+    expect((await readConfig()).lastSyncedPush).toBe("older");
+  });
+
   it("dry-run writes no config, no ledger, no files", async () => {
     await writeRemote({ "claude/files/CLAUDE.md": "# hi\n" });
 
     await run(URL, { dryRun: true });
 
     expect(await exists(configFile())).toBe(false);
-    expect(await exists(path.join(xdgData, "arbella", "pull-ledger.json"))).toBe(false);
+    expect(await exists(ledgerFile())).toBe(false);
     expect(await exists(claudeHome("CLAUDE.md"))).toBe(false);
+  });
+
+  it("dry-run shows the shared-instructions step exactly as the real pull runs it", async () => {
+    await put(path.join(home, ".codex", "AGENTS.md"), "mine\n");
+    await writeRemote({ "shared/instructions.md": "# shared\n" }, CREATED_AT, true);
+
+    await run(URL, { dryRun: true });
+
+    const claudeMd = claudeHome("CLAUDE.md");
+    const agentsMd = path.join(home, ".codex", "AGENTS.md");
+    expect(output()).toContain(`Would deploy shared instructions -> ${claudeMd}`);
+    expect(output()).not.toContain(`-> ${agentsMd}`);
+    expect(await exists(claudeMd)).toBe(false);
+
+    await run(URL, {});
+    expect(output()).toContain(`Deployed shared instructions -> ${claudeMd}`);
+    expect(output()).not.toContain(`Deployed shared instructions -> ${agentsMd}`);
+    expect(await fsp.readFile(agentsMd, "utf8")).toBe("mine\n");
   });
 });
 
@@ -312,6 +371,6 @@ describe("incident replay: a machine broken by the old sanitizer pulls as a foll
     expect(out).toContain(`kept ~${memory.slice(home.length)}`);
     expect(out).toContain("secret missing: codex mcp unifi → UNIFI_PASSWORD");
     expect(out).toContain("secret missing: claude mcp serena → SERENA_TOKEN");
-    expect(out).toContain("secret missing: claude settings.json → env.API_TOKEN");
+    expect(out).toContain("secret missing: claude ~/.claude/settings.json → env.API_TOKEN");
   });
 });

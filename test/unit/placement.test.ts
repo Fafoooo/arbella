@@ -15,7 +15,9 @@ import {
   type PullSession,
 } from "../../src/core/placement/index.js";
 import { loadLedger, saveLedger, sha256, stillMissing, type Ledger } from "../../src/core/placement/ledger.js";
+import { HOOK_TAG } from "../../src/core/autobackup/hook.js";
 import { REDACTED as R } from "../../src/core/sanitizer/patterns.js";
+import { parse as parseToml } from "smol-toml";
 import { fs } from "../../src/utils/fs.js";
 import type { Logger } from "../../src/types.js";
 
@@ -38,7 +40,14 @@ const ctxOf = (pull?: PullSession, extra: Partial<PlaceCtx> = {}): PlaceCtx =>
   ({ fs, log, sourceOfTruth: "local", pull, ...extra }) as PlaceCtx;
 const session = (role: "source" | "follower", force = false, ledger = emptyLedger()) =>
   newPullSession({ role, force, ledger });
-const base = { local: buf("old"), next: buf("new"), localBroken: false, keepsSecrets: false, ledgerMatch: false };
+const base = {
+  local: buf("old"),
+  next: buf("new"),
+  localBroken: false,
+  keepsSecrets: false,
+  ledgerMatch: false,
+  secretSafe: true,
+};
 
 describe("decide", () => {
   it("row 1: missing target is written", () => {
@@ -66,6 +75,12 @@ describe("decide", () => {
     expect(decide({ ...base, role: "follower", force: false, ledgerMatch: false })).toBe("kept");
     expect(decide({ ...base, role: "source", force: false, ledgerMatch: true })).toBe("kept");
   });
+  it("neither force nor a follower ledger match overrides a file that is not secret-safe", () => {
+    expect(decide({ ...base, role: "source", force: true, secretSafe: false })).toBe("kept");
+    expect(decide({ ...base, role: "follower", force: false, ledgerMatch: true, secretSafe: false })).toBe("kept");
+    expect(decide({ ...base, role: "source", force: true, secretSafe: false, localBroken: true })).toBe("written");
+    expect(decide({ ...base, role: "source", force: true, secretSafe: false, keepsSecrets: true })).toBe("identical");
+  });
 });
 
 describe("placeFile", () => {
@@ -79,14 +94,17 @@ describe("placeFile", () => {
     expect(s.report.redactedText).toEqual([]);
   });
 
-  it("keeps a real local secret on a forced pull and leaves the ledger alone", async () => {
+  it("keeps a real local secret on a forced pull by merging it into a parseable file", async () => {
     const dest = path.join(dir, "c.json");
     await fsp.writeFile(dest, '{"env":{"K":"real"},"a":2}');
     const ledger = { ...emptyLedger(), files: { [dest]: "h" } };
     const s = session("source", true, ledger);
-    await placeFile(ctxOf(s), { bucket: "claude", dest, content: `{"env":{"K":"${R}"},"a":1}` });
+    expect(await placeFile(ctxOf(s), { bucket: "claude", dest, content: `{"env":{"K":"${R}"},"a":1}` })).toBe(
+      "written",
+    );
     expect(JSON.parse(await fsp.readFile(dest, "utf8"))).toEqual({ env: { K: "real" }, a: 1 });
     expect(s.report.missingSecrets).toEqual([]);
+    expect(s.report.keptForSecrets).toEqual([]);
   });
 
   it("identical-via-secrets does not touch the ledger or the file", async () => {
@@ -186,7 +204,7 @@ describe("placeFile", () => {
     noteMissingSecrets(c, [{ tool: "t", file: dest, keyPath: ["a"] }]);
     expect(await fs.exists(dest)).toBe(false);
     expect(s.ledger.files).toEqual({});
-    expect(s.report).toEqual({ tools: {}, redactedText: [], missingSecrets: [] });
+    expect(s.report).toEqual({ tools: {}, redactedText: [], missingSecrets: [], keptForSecrets: [] });
   });
 
   it("no session: legacy policy, redacted merge still applied, nothing recorded", async () => {
@@ -277,13 +295,14 @@ describe("secret-blind ledger and narrow marker repair", () => {
     expect(s.report.redactedText).toEqual([]);
   });
 
-  it("a local settings.json with a marker is replaced, real local values merged", async () => {
+  it("a local settings.json with a marker is repaired from the local document", async () => {
     const dest = path.join(dir, "settings.json");
     await fsp.writeFile(dest, `{"env":{"K":"real","L":"${R}"},"x":1}`);
     const s = session("source", false);
     const content = `{"env":{"K":"${R}","L":"${R}"},"x":2}`;
     expect(await placeFile(ctxOf(s), { bucket: "claude", dest, content })).toBe("written");
-    expect(JSON.parse(await fsp.readFile(dest, "utf8"))).toEqual({ env: { K: "real" }, x: 2 });
+    expect(JSON.parse(await fsp.readFile(dest, "utf8"))).toEqual({ env: { K: "real" }, x: 1 });
+    expect(s.report.missingSecrets).toEqual([{ tool: "claude", file: dest, keyPath: ["env", "L"] }]);
   });
 
   it("binary content is never repaired", async () => {
@@ -291,6 +310,155 @@ describe("secret-blind ledger and narrow marker repair", () => {
     await fsp.writeFile(dest, Buffer.from(`x${R}`));
     const s = session("source", false);
     expect(await placeFile(ctxOf(s), { bucket: "t", dest, content: Buffer.from("y") })).toBe("kept");
+  });
+
+  it("a missing secret stays reported on later pulls, whether the file is identical or kept", async () => {
+    const dest = path.join(dir, "config.toml");
+    const missing = [{ tool: "codex", file: dest, keyPath: ["mcp_servers", "u", "env", "P"] }];
+    const s1 = session("follower");
+    expect(await placeFile(ctxOf(s1), { bucket: "codex", dest, content: repoToml("a") })).toBe("written");
+    expect(s1.report.missingSecrets).toEqual(missing);
+
+    const s2 = session("follower", false, s1.ledger);
+    expect(await placeFile(ctxOf(s2), { bucket: "codex", dest, content: repoToml("a") })).toBe("identical");
+    expect(s2.report.missingSecrets).toEqual(missing);
+
+    await fsp.writeFile(dest, toml("mine"));
+    const s3 = session("follower", false, s2.ledger);
+    expect(await placeFile(ctxOf(s3), { bucket: "codex", dest, content: repoToml("b") })).toBe("kept");
+    expect(s3.report.missingSecrets).toEqual(missing);
+  });
+
+  it("identical-via-secrets on a structured file records its secret-blind hash", async () => {
+    const dest = path.join(dir, "config.toml");
+    await fsp.writeFile(dest, toml("a", "real-value"));
+    const s1 = session("follower");
+    expect(await placeFile(ctxOf(s1), { bucket: "codex", dest, content: repoToml("a") })).toBe("identical");
+    expect(s1.report.missingSecrets).toEqual([]);
+    expect(s1.ledger.files[dest]).toEqual(expect.any(String));
+
+    const s2 = session("follower", false, s1.ledger);
+    expect(await placeFile(ctxOf(s2), { bucket: "codex", dest, content: repoToml("b") })).toBe("written");
+    const out = await fsp.readFile(dest, "utf8");
+    expect(out).toContain('P = "real-value"');
+    expect(out).toContain('name = "b"');
+  });
+});
+
+describe("a real local secret is never overwritten", () => {
+  const repoScript = `#!/bin/sh\nTOKEN=${R}\necho hi\n`;
+  const localScript = "#!/bin/sh\nTOKEN=xyz.FakeToken0123456789abcdefgh\necho edited\n";
+
+  it("force keeps a text file holding a real value where the repo has the marker", async () => {
+    const dest = path.join(dir, "run.sh");
+    await fsp.writeFile(dest, localScript);
+    const s = session("source", true);
+    expect(await placeFile(ctxOf(s), { bucket: "claude", dest, content: repoScript })).toBe("kept");
+    expect(await fsp.readFile(dest, "utf8")).toBe(localScript);
+    expect(s.report.tools.claude!.kept).toEqual([dest]);
+    expect(s.report.keptForSecrets).toEqual([dest]);
+  });
+
+  it("a follower ledger match keeps it too", async () => {
+    const dest = path.join(dir, "run.sh");
+    await fsp.writeFile(dest, localScript);
+    const s = session("follower", false, { ...emptyLedger(), files: { [dest]: sha256(localScript) } });
+    expect(await placeFile(ctxOf(s), { bucket: "claude", dest, content: repoScript })).toBe("kept");
+    expect(await fsp.readFile(dest, "utf8")).toBe(localScript);
+    expect(s.report.keptForSecrets).toEqual([dest]);
+  });
+
+  it("a local script that still holds the marker itself is written", async () => {
+    const dest = path.join(dir, "run.sh");
+    await fsp.writeFile(dest, `#!/bin/sh\nTOKEN=${R}\necho edited\n`);
+    const s = session("source", true);
+    expect(await placeFile(ctxOf(s), { bucket: "claude", dest, content: repoScript })).toBe("written");
+    expect(await fsp.readFile(dest, "utf8")).toBe(repoScript);
+    expect(s.report.keptForSecrets).toEqual([]);
+  });
+
+  it("a plain kept file without force is not listed as kept for secrets", async () => {
+    const dest = path.join(dir, "run.sh");
+    await fsp.writeFile(dest, localScript);
+    const s = session("source", false);
+    expect(await placeFile(ctxOf(s), { bucket: "claude", dest, content: repoScript })).toBe("kept");
+    expect(s.report.keptForSecrets).toEqual([]);
+  });
+
+  it("an unparseable local structured file is kept under force", async () => {
+    const dest = path.join(dir, "c.json");
+    await fsp.writeFile(dest, '{"env":{"K":"real"},');
+    const s = session("source", true);
+    expect(await placeFile(ctxOf(s), { bucket: "claude", dest, content: `{"env":{"K":"${R}"}}` })).toBe("kept");
+    expect(s.report.keptForSecrets).toEqual([dest]);
+  });
+});
+
+describe("repair keeps local-only keys", () => {
+  it("a broken config.toml keeps its local [projects] table", async () => {
+    const dest = path.join(dir, "config.toml");
+    await fsp.writeFile(dest, `model = "${R}"\n\n[projects."/home/u/p"]\ntrust_level = "trusted"\n`);
+    const s = session("follower");
+    expect(await placeFile(ctxOf(s), { bucket: "codex", dest, content: 'model = "o3"\n' })).toBe("written");
+    expect(parseToml(await fsp.readFile(dest, "utf8"))).toEqual({
+      model: "o3",
+      projects: { "/home/u/p": { trust_level: "trusted" } },
+    });
+    expect(s.report.missingSecrets).toEqual([]);
+  });
+
+  const brokenSettings =
+    `{\n  "env": {\n    "FEATURE_SWITCH": "${R}",\n    "API_TOKEN": "${R}"\n  },\n` +
+    `  "permissions": {\n    "allow": ["Bash(ls)"]\n  }\n}\n`;
+  const repoSettings = `{"env":{"FEATURE_SWITCH":"1","API_TOKEN":"${R}"},"model":"opus"}`;
+
+  it("a broken settings.json keeps its permissions block and takes the repo's real switch", async () => {
+    const dest = path.join(dir, "settings.json");
+    await fsp.writeFile(dest, brokenSettings);
+    const s = session("source", false);
+    expect(await placeFile(ctxOf(s), { bucket: "claude", dest, content: repoSettings })).toBe("written");
+    const out = await fsp.readFile(dest, "utf8");
+    expect(JSON.parse(out)).toEqual({ env: { FEATURE_SWITCH: "1" }, permissions: { allow: ["Bash(ls)"] } });
+    expect(out.startsWith('{\n  "env"')).toBe(true);
+    expect(out.endsWith("}\n")).toBe(true);
+    expect(s.report.missingSecrets).toEqual([{ tool: "claude", file: dest, keyPath: ["env", "API_TOKEN"] }]);
+  });
+
+  it("under force the repo-based merge still applies", async () => {
+    const dest = path.join(dir, "settings.json");
+    await fsp.writeFile(dest, brokenSettings);
+    const s = session("source", true);
+    expect(await placeFile(ctxOf(s), { bucket: "claude", dest, content: repoSettings })).toBe("written");
+    expect(JSON.parse(await fsp.readFile(dest, "utf8"))).toEqual({ env: { FEATURE_SWITCH: "1" }, model: "opus" });
+  });
+});
+
+describe("arbella's own autobackup hook is ignored when comparing", () => {
+  const ours = { hooks: [{ type: "command", command: `arbella push --auto >/dev/null 2>&1 & # ${HOOK_TAG}` }] };
+  const user = { hooks: [{ type: "command", command: "echo hello" }] };
+  const repo = JSON.stringify({ model: "opus", hooks: { SessionStart: [user] } }, null, 4) + "\n";
+  const local = JSON.stringify({ model: "opus", hooks: { SessionStart: [user, ours] } }, null, 2) + "\n";
+
+  it("settings.json equal to the repo plus arbella's hook is identical", async () => {
+    const dest = path.join(dir, "settings.json");
+    await fsp.writeFile(dest, local);
+    const s = session("source", true);
+    const req = { bucket: "claude", dest, content: repo, repoPath: "claude/files/settings.json" };
+    expect(await placeFile(ctxOf(s), req)).toBe("identical");
+    expect(await fsp.readFile(dest, "utf8")).toBe(local);
+    expect(s.ledger.files[dest]).toBe(sha256(local));
+  });
+
+  it("only for the two hook files, and only when the rest is equal", async () => {
+    const dest = path.join(dir, "settings.json");
+    await fsp.writeFile(dest, local);
+    const s = session("source", false);
+    expect(await placeFile(ctxOf(s), { bucket: "claude", dest, content: repo, repoPath: "claude/files/x.json" })).toBe(
+      "kept",
+    );
+    const other = repo.replace("opus", "sonnet");
+    const req = { bucket: "claude", dest, content: other, repoPath: "claude/files/settings.json" };
+    expect(await placeFile(ctxOf(s), req)).toBe("kept");
   });
 });
 
@@ -350,6 +518,7 @@ describe("formatPullSummary", () => {
         tools: { claude: { written: 3, identical: 2, kept }, codex: { written: 1, identical: 0, kept: [] } },
         redactedText: [`${home}/.codex/AGENTS.md`],
         missingSecrets: [{ tool: "codex", file: `${home}/.codex/config.toml`, keyPath: ["mcp_servers", "u", "env", "P"] }],
+        keptForSecrets: [],
       },
       "follower",
       home,
@@ -371,7 +540,7 @@ describe("formatPullSummary", () => {
   it("uses source wording, shows exactly 20 without a tail, and a bare home path", () => {
     const kept = [home, ...Array.from({ length: 19 }, (_, i) => `/other/${i}`)];
     const text = formatPullSummary(
-      { tools: { t: { written: 0, identical: 0, kept } }, redactedText: [], missingSecrets: [] },
+      { tools: { t: { written: 0, identical: 0, kept } }, redactedText: [], missingSecrets: [], keptForSecrets: [] },
       "source",
       home,
     ).join("\n");
@@ -382,10 +551,41 @@ describe("formatPullSummary", () => {
 
   it("prints nothing about kept files when there are none", () => {
     const lines = formatPullSummary(
-      { tools: { t: { written: 1, identical: 0, kept: [] } }, redactedText: [], missingSecrets: [] },
+      { tools: { t: { written: 1, identical: 0, kept: [] } }, redactedText: [], missingSecrets: [], keptForSecrets: [] },
       "source",
       home,
     );
     expect(lines.join("\n")).not.toContain("--force");
+  });
+
+  it("prints files kept for their secrets as their own block, without the --force hint", () => {
+    const script = `${home}/.claude/hooks/run.sh`;
+    const lines = formatPullSummary(
+      {
+        tools: { claude: { written: 0, identical: 0, kept: [script] } },
+        redactedText: [],
+        missingSecrets: [{ tool: "claude", file: `${home}/.claude/settings.json`, keyPath: ["env", "API_TOKEN"] }],
+        keptForSecrets: [script],
+      },
+      "source",
+      home,
+    );
+    expect(lines).toContain("claude: 0 written, 0 unchanged, 1 kept");
+    expect(lines).toContain(`  kept (has real values where the repo has ${R}): ~/.claude/hooks/run.sh`);
+    expect(lines).toContain("  remove the local file to take the repo version");
+    expect(lines).not.toContain("  kept ~/.claude/hooks/run.sh");
+    expect(lines.join("\n")).not.toContain("--force");
+    expect(lines).toContain("secret missing: claude ~/.claude/settings.json → env.API_TOKEN");
+  });
+
+  it("strips control characters from printed paths", () => {
+    const evil = `${home}/.claude/a\x1b[2J\nfake line`;
+    const lines = formatPullSummary(
+      { tools: { t: { written: 0, identical: 0, kept: [evil] } }, redactedText: [evil], missingSecrets: [], keptForSecrets: [] },
+      "source",
+      home,
+    );
+    expect(lines).toContain("  kept ~/.claude/a[2Jfake line");
+    for (const l of lines) expect(l).not.toMatch(/\p{C}/u);
   });
 });

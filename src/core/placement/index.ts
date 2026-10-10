@@ -3,22 +3,28 @@
  * what is on disk. Plan and write share planPlacement, so --dry-run cannot
  * disagree with the real pull. Reports key names and paths only, never values.
  */
+import { isDeepStrictEqual } from "node:util";
 import type { CoreServices } from "../../adapters/adapter.interface.js";
 import type { CapturedFile, SourceOfTruth } from "../../types.js";
+import { withoutAutobackupHook } from "../autobackup/hook.js";
+import type { Role } from "../config/schema.js";
 import { REDACTED } from "../sanitizer/patterns.js";
 import { sha256, type Ledger, type MissingSecret } from "./ledger.js";
 import {
   describeMissingSecret,
+  isPlain,
   isRedactedFormOf,
   markerPaths,
   matchesWithSecrets,
   mergeRedactedText,
   parseStructured,
+  plain,
+  repairRedactedText,
   secretBlindText,
   structuredKind,
+  tildify,
 } from "./redacted.js";
 
-export type Role = "source" | "follower";
 export type PlaceOutcome = "written" | "identical" | "kept";
 
 export interface PullReport {
@@ -26,6 +32,11 @@ export interface PullReport {
   /** Files that still contain the marker after the pull. */
   redactedText: string[];
   missingSecrets: MissingSecret[];
+  /**
+   * Kept although `--force` or the ledger would replace them: the local file
+   * has real values where the repo has the marker. Also listed under `kept`.
+   */
+  keptForSecrets: string[];
 }
 
 /** Per-pull accumulator: ledger and report are updated in place by applyPlacement. */
@@ -42,6 +53,8 @@ export interface PlaceRequest {
   dest: string;
   /** Hydrated text or decoded bytes. */
   content: string | Buffer;
+  /** The file's repo path; lets the compare ignore arbella's own autobackup hook. */
+  repoPath?: string;
   mode?: number;
   /** Non-atomic writer (claude/files only). */
   direct?: boolean;
@@ -56,6 +69,8 @@ export interface PlaceDecision {
   repoHasMarkers: boolean;
   /** The file will still contain the marker after this pass (placed bytes, or the kept local bytes). */
   stillRedacted: boolean;
+  /** Kept only because replacing it would lose a real local value. */
+  keptForSecrets: boolean;
 }
 
 export type PlaceCtx = Pick<CoreServices, "fs" | "log"> & {
@@ -71,12 +86,18 @@ export function decide(i: {
   next: Buffer;
   localBroken: boolean;
   keepsSecrets: boolean;
+  /** Local equals next once arbella's own autobackup hook is left out. */
+  sameButOurHook?: boolean;
   /** Follower only: the local file is what the ledger says arbella last placed. */
   ledgerMatch: boolean;
+  /** Replacing the local file cannot lose a real value the repo has as a marker. */
+  secretSafe: boolean;
 }): PlaceOutcome {
   if (!i.local) return "written";
-  if (i.keepsSecrets || i.local.equals(i.next)) return "identical";
-  if (i.localBroken || i.force) return "written";
+  if (i.keepsSecrets || i.local.equals(i.next) || i.sameButOurHook) return "identical";
+  if (i.localBroken) return "written";
+  if (!i.secretSafe) return "kept";
+  if (i.force) return "written";
   if (i.role === "follower" && i.ledgerMatch) return "written";
   return "kept";
 }
@@ -92,6 +113,38 @@ async function readLocal(ctx: PlaceCtx, dest: string): Promise<{ bytes?: Buffer;
   }
 }
 
+/**
+ * The bytes placement would write and the keys they leave out. A marker-broken
+ * structured local file is repaired from itself (local-only keys survive)
+ * unless forced; otherwise a repo file with markers is merged with the local
+ * one. `merged`: the structured repair or merge ran.
+ */
+function nextContent(a: {
+  kind?: "json" | "toml";
+  repoText?: string;
+  localText?: string;
+  content: string | Buffer;
+  repair: boolean;
+}): { next: string | Buffer; missing: string[][]; merged: boolean } {
+  const { kind, repoText, localText } = a;
+  const asIs = { next: a.content, missing: [], merged: false };
+  if (!kind || repoText === undefined) return asIs;
+  const repaired =
+    a.repair && localText !== undefined ? repairRedactedText(kind, localText, repoText) : undefined;
+  const out =
+    repaired ?? (repoText.includes(REDACTED) ? mergeRedactedText(kind, repoText, localText) : undefined);
+  return out ? { next: out.text, missing: out.missing, merged: true } : asIs;
+}
+
+/** The local hook file equals `nextText` once arbella's own autobackup hook is left out. */
+function sameButOurHook(repoPath: string, localText: string, nextText: string): boolean {
+  const file = { repoPath, content: localText };
+  const stripped = withoutAutobackupHook(file);
+  if (stripped === file) return false;
+  const a = parseStructured("json", stripped.content);
+  return a !== undefined && isDeepStrictEqual(a, parseStructured("json", nextText));
+}
+
 /** Read-only: what would happen to `req.dest`. */
 export async function planPlacement(ctx: PlaceCtx, req: PlaceRequest): Promise<PlaceDecision> {
   const role = ctx.pull?.role ?? "source";
@@ -100,20 +153,8 @@ export async function planPlacement(ctx: PlaceCtx, req: PlaceRequest): Promise<P
   const localText = local?.toString("utf8");
   const repoText = typeof req.content === "string" ? req.content : undefined;
   const repoHasMarkers = repoText?.includes(REDACTED) ?? false;
-
   const kind = structuredKind(req.dest);
-  let next: string | Buffer = req.content;
-  let missing: string[][] = [];
-  if (repoText !== undefined && repoHasMarkers) {
-    const merged = kind ? mergeRedactedText(kind, repoText, localText) : undefined;
-    if (merged) {
-      next = merged.text;
-      missing = merged.missing;
-    }
-  }
-  const nextBytes = toBuffer(next);
-  const keepsSecrets =
-    repoHasMarkers && localText !== undefined && matchesWithSecrets(repoText!, localText);
+
   // A structured config value is never legitimately the marker; free text may mention it.
   const localBroken =
     repoText === undefined || localText === undefined
@@ -121,6 +162,24 @@ export async function planPlacement(ctx: PlaceCtx, req: PlaceRequest): Promise<P
       : kind
         ? localText.includes(REDACTED)
         : isRedactedFormOf(localText, repoText);
+
+  const { next, missing, merged } = nextContent({
+    kind,
+    repoText,
+    localText,
+    content: req.content,
+    repair: localBroken && !force,
+  });
+  const nextBytes = toBuffer(next);
+  const keepsSecrets =
+    repoHasMarkers && localText !== undefined && matchesWithSecrets(repoText!, localText);
+  // Replacing the local file loses nothing real when the repo has no marker,
+  // there is no local text or it holds markers itself, or the structured merge
+  // carries its values over.
+  const secretSafe =
+    !repoHasMarkers ||
+    (localText?.includes(REDACTED) ?? true) ||
+    (merged && isPlain(parseStructured(kind!, localText!)));
 
   const hashOf = (b: Buffer): string => placementHash(req.dest, b, repoText);
 
@@ -130,23 +189,41 @@ export async function planPlacement(ctx: PlaceCtx, req: PlaceRequest): Promise<P
     local !== undefined &&
     (sha256(local) === ledgerHash || hashOf(local) === ledgerHash);
 
-  const outcome = unreadable
-    ? force ? "written" : "kept"
-    : decide({ role, force, local, next: nextBytes, localBroken, keepsSecrets, ledgerMatch });
+  const inputs = {
+    role,
+    force,
+    local,
+    next: nextBytes,
+    localBroken,
+    keepsSecrets,
+    sameButOurHook:
+      req.repoPath !== undefined &&
+      localText !== undefined &&
+      typeof next === "string" &&
+      sameButOurHook(req.repoPath, localText, next),
+    ledgerMatch,
+    secretSafe,
+  };
+  const outcome = unreadable ? (force ? "written" : "kept") : decide(inputs);
 
-  const plainIdentical = outcome === "identical" && !keepsSecrets;
-  const stillRedacted =
-    outcome === "kept" ? (local?.includes(REDACTED) ?? false)
-    : outcome === "identical" && keepsSecrets ? false
-    : nextBytes.includes(REDACTED);
+  // Identical via secrets: nothing is missing. A structured file records its
+  // secret-blind hash so a later repo change still reaches a follower; a text
+  // file stays unrecorded.
+  const viaSecrets = outcome === "identical" && keepsSecrets;
   return {
     outcome,
     overwrites: (local !== undefined || unreadable) && outcome === "written",
     bytes: next,
-    missing: outcome === "written" ? missing : [],
-    recordHash: outcome === "written" ? hashOf(nextBytes) : plainIdentical && local ? hashOf(local) : undefined,
+    missing: outcome === "written" || (!unreadable && !viaSecrets) ? missing : [],
+    recordHash:
+      outcome === "written" ? hashOf(nextBytes)
+      : outcome === "identical" && local && (!viaSecrets || kind) ? hashOf(local)
+      : undefined,
     repoHasMarkers,
-    stillRedacted,
+    stillRedacted:
+      outcome === "written" ? nextBytes.includes(REDACTED) : (local?.includes(REDACTED) ?? false),
+    keptForSecrets:
+      outcome === "kept" && !unreadable && decide({ ...inputs, secretSafe: true }) === "written",
   };
 }
 
@@ -169,6 +246,7 @@ export async function applyPlacement(
     pull.report.missingSecrets.push({ tool: req.bucket, file: req.dest, keyPath });
   }
   if (d.stillRedacted) pull.report.redactedText.push(req.dest);
+  if (d.keptForSecrets) pull.report.keptForSecrets.push(req.dest);
   return d.outcome;
 }
 
@@ -230,33 +308,39 @@ export function newPullSession(a: { role: Role; force: boolean; ledger: Ledger }
     role: a.role,
     force: a.force,
     ledger: { ...a.ledger, files: { ...a.ledger.files }, missingSecrets: [...a.ledger.missingSecrets] },
-    report: { tools: {}, redactedText: [], missingSecrets: [] },
+    report: { tools: {}, redactedText: [], missingSecrets: [], keptForSecrets: [] },
   };
 }
 
 const MAX_KEPT_SHOWN = 20;
 
-const tildify = (p: string, home: string): string =>
-  p === home ? "~" : p.startsWith(home + "/") || p.startsWith(home + "\\") ? "~" + p.slice(home.length) : p;
-
-/** Pure: the lines `arbella pull` prints after placing files. */
+/** Pure: the lines `arbella pull` prints after placing files. Paths and key names only, as plain text. */
 export function formatPullSummary(r: PullReport, role: Role, home: string): string[] {
+  const shown = (p: string): string => plain(tildify(p, home));
+  const forSecrets = new Set(r.keptForSecrets);
   const lines: string[] = [];
   const kept: string[] = [];
   for (const [tool, t] of Object.entries(r.tools)) {
     lines.push(`${tool}: ${t.written} written, ${t.identical} unchanged, ${t.kept.length} kept`);
-    kept.push(...t.kept);
+    kept.push(...t.kept.filter((p) => !forSecrets.has(p)));
   }
   if (kept.length > 0) {
-    for (const p of kept.slice(0, MAX_KEPT_SHOWN)) lines.push(`  kept ${tildify(p, home)}`);
+    for (const p of kept.slice(0, MAX_KEPT_SHOWN)) lines.push(`  kept ${shown(p)}`);
     if (kept.length > MAX_KEPT_SHOWN) lines.push(`  … and ${kept.length - MAX_KEPT_SHOWN} more`);
     const why = role === "follower" ? "changed locally" : "differs from repo";
     lines.push(`Kept files are ${why}; \`arbella pull --force\` replaces them.`);
   }
+  // --force deliberately does not replace these: it would lose the real value.
+  if (r.keptForSecrets.length > 0) {
+    for (const p of r.keptForSecrets) {
+      lines.push(`  kept (has real values where the repo has ${REDACTED}): ${shown(p)}`);
+    }
+    lines.push("  remove the local file to take the repo version");
+  }
   if (r.redactedText.length > 0) {
     lines.push(`Files still containing ${REDACTED}:`);
-    for (const p of r.redactedText) lines.push(`  ${tildify(p, home)}`);
+    for (const p of r.redactedText) lines.push(`  ${shown(p)}`);
   }
-  for (const e of r.missingSecrets) lines.push(`secret missing: ${describeMissingSecret(e)}`);
+  for (const e of r.missingSecrets) lines.push(`secret missing: ${describeMissingSecret(e, home)}`);
   return lines;
 }

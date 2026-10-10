@@ -1187,11 +1187,6 @@ export function printPlan(
   } else {
     l.step("All required CLIs already present.");
   }
-  if (meta.sharedInstructions) {
-    l.step(
-      "Shared instructions (R9) will be deployed to CLAUDE.md + AGENTS.md.",
-    );
-  }
   if (plan.skippedProjectDirs.length > 0) {
     l.warn(skippedProjectDirsWarning(plan.skippedProjectDirs));
   }
@@ -1478,8 +1473,8 @@ async function reapplyHook(config: ArbellaConfig): Promise<void> {
 
 /**
  * Remember what this pull placed: the ledger (file hashes, and the missing
- * secrets of the tools in scope, replacing their previous entries), and the
- * repo state this machine synced to when it pulled its own repo.
+ * secrets of the tools in scope, replacing their previous entries), and, after
+ * a full successful pull of its own repo, the repo state this machine synced to.
  */
 async function persistPull(args: {
   session: PullSession;
@@ -1555,6 +1550,7 @@ async function runFromRepo(
   // Direction (R12). `--force`, or a source whose config says the repo wins,
   // overwrites differing local files. A follower takes the repo's version too,
   // except for files changed here since the last pull (the ledger decides).
+  // Neither replaces a real local value where the repo has the marker.
   const role = config.role;
   const force = opts.force === true || (role === "source" && config.sourceOfTruth === "repo");
   const sourceOfTruth: "local" | "repo" = force || role === "follower" ? "repo" : "local";
@@ -1576,6 +1572,10 @@ async function runFromRepo(
   // ---- 5. Dry run: print the plan and STOP --------------------------------
   if (dryRun) {
     printPlan(plan, meta);
+    // Same placement call as step 9, so the preview cannot disagree with it.
+    if (meta.sharedInstructions) {
+      await deploySharedInstructions(repoRoot, tools, true, sourceOfTruth, log, session);
+    }
     log.info("Dry run: your setup and persistent backup clone were unchanged.");
     return;
   }
@@ -1603,74 +1603,90 @@ async function runFromRepo(
   }
 
   // ---- 8. Restore each tool -----------------------------------------------
+  // From here on files get placed: the ledger is saved even if a later step
+  // throws or the user hits Ctrl-C, so what was placed is not orphaned. Only a
+  // full pull (every tool, nothing failed) counts as synced.
   let failed = false;
-  for (const tool of prepared) {
-    log.info(`Restoring ${tool.id}…`);
-    const ctx = buildRestoreContext({
-      toolId: tool.id,
-      repoRoot,
-      sourceOfTruth,
-      dryRun: false,
-      os,
-      pull: session,
+  let completed = false;
+  const persist = (): Promise<void> =>
+    persistPull({
+      session,
+      scope: [...tools, "home"],
+      config,
+      repo,
+      meta,
+      synced: completed && !failed && flagTools === undefined,
     });
-    try {
-      await tool.adapter.restore(ctx, tool.data);
-    } catch (err) {
-      // One tool failing must not strand the others (the safety backup is the
-      // user's recovery path). Surface it and keep going.
-      failed = true;
-      log.error(`restore: ${tool.id} failed: ${errMsg(err)}`);
+  const onInterrupt = (): void => {
+    void persist().finally(() => process.exit(130));
+  };
+  process.once("SIGINT", onInterrupt);
+  let manualExternalTools: ExternalToolRef[] = [];
+  try {
+    for (const tool of prepared) {
+      log.info(`Restoring ${tool.id}…`);
+      const ctx = buildRestoreContext({
+        toolId: tool.id,
+        repoRoot,
+        sourceOfTruth,
+        dryRun: false,
+        os,
+        pull: session,
+      });
+      try {
+        await tool.adapter.restore(ctx, tool.data);
+      } catch (err) {
+        // One tool failing must not strand the others (the safety backup is the
+        // user's recovery path). Surface it and keep going.
+        failed = true;
+        log.error(`restore: ${tool.id} failed: ${errMsg(err)}`);
+      }
     }
+
+    // ---- 8b. Shared npm-globals pass (R8): install each package ONCE across all
+    //          restored tools (deduped). Runs after the adapters so any tool-CLI
+    //          install above is already on PATH. ------------------------------
+    await installSharedNpmGlobals(npmGlobals);
+
+    // ---- 8c. Shared external-tools pass (WP-C): the brew/uv/pipx binaries the
+    //          restored MCP servers and hooks invoke. Runs right after the npm
+    //          pass (same "install once across all tools" shape); anything that
+    //          cannot be installed here is reported in the reminder below. -----
+    manualExternalTools = await installSharedExternalTools(externalTools);
+
+    // ---- 8d. shared/home (WP-B): the $HOME files that live outside every tool
+    //          home — linked hook/statusline/MCP scripts, plugin companion
+    //          configs, extraPaths. Written AFTER the adapters so a script and the
+    //          config referencing it land in the same pass, each overwrite guarded
+    //          by its own safety copy (R14). --------------------------------
+    if (homeFiles.length > 0) {
+      log.info(`Restoring ${homeFiles.length} shared home file(s)…`);
+      await restoreHomeFiles(
+        buildHomeRestoreServices({ sourceOfTruth, dryRun: false, os, pull: session }),
+        homeFiles,
+        {
+          safetyDir: path.join(
+            dataDir(),
+            "safety-backups",
+            `home-${iso.replace(/[:.]/g, "-")}`,
+          ),
+        },
+      );
+    }
+
+    // ---- 9. Deploy shared instructions (R9) to both tools -------------------
+    if (meta.sharedInstructions) {
+      log.info("Deploying shared instructions to Claude + Codex (R9)…");
+      await deploySharedInstructions(repoRoot, tools, false, sourceOfTruth, log, session);
+    }
+
+    // ---- 9b. Autobackup hook, then (finally) the ledger and last synced push -
+    await reapplyHook(config);
+    completed = true;
+  } finally {
+    process.off("SIGINT", onInterrupt);
+    await persist();
   }
-
-  // ---- 8b. Shared npm-globals pass (R8): install each package ONCE across all
-  //          restored tools (deduped). Runs after the adapters so any tool-CLI
-  //          install above is already on PATH. ------------------------------
-  await installSharedNpmGlobals(npmGlobals);
-
-  // ---- 8c. Shared external-tools pass (WP-C): the brew/uv/pipx binaries the
-  //          restored MCP servers and hooks invoke. Runs right after the npm
-  //          pass (same "install once across all tools" shape); anything that
-  //          cannot be installed here is reported in the reminder below. -----
-  const manualExternalTools = await installSharedExternalTools(externalTools);
-
-  // ---- 8d. shared/home (WP-B): the $HOME files that live outside every tool
-  //          home — linked hook/statusline/MCP scripts, plugin companion
-  //          configs, extraPaths. Written AFTER the adapters so a script and the
-  //          config referencing it land in the same pass, each overwrite guarded
-  //          by its own safety copy (R14). --------------------------------
-  if (homeFiles.length > 0) {
-    log.info(`Restoring ${homeFiles.length} shared home file(s)…`);
-    await restoreHomeFiles(
-      buildHomeRestoreServices({ sourceOfTruth, dryRun: false, os, pull: session }),
-      homeFiles,
-      {
-        safetyDir: path.join(
-          dataDir(),
-          "safety-backups",
-          `home-${iso.replace(/[:.]/g, "-")}`,
-        ),
-      },
-    );
-  }
-
-  // ---- 9. Deploy shared instructions (R9) to both tools -------------------
-  if (meta.sharedInstructions) {
-    log.info("Deploying shared instructions to Claude + Codex (R9)…");
-    await deploySharedInstructions(repoRoot, tools, false, sourceOfTruth, log, session);
-  }
-
-  // ---- 9b. Autobackup hook, ledger, last synced push ----------------------
-  await reapplyHook(config);
-  await persistPull({
-    session,
-    scope: [...tools, "home"],
-    config,
-    repo,
-    meta,
-    synced: !failed,
-  });
 
   // ---- 10. Summary + re-auth reminder -------------------------------------
   log.info("Pull summary:");

@@ -94,7 +94,7 @@ function placeRequest(
     !file.binary && isConfigToml(rel)
       ? rehydrateConfigToml(file.content, ctx.templater, ctx.vars)
       : hydratedContent(ctx, file);
-  return { bucket: "codex", dest: targetPath, content, mode: file.mode };
+  return { bucket: "codex", dest: targetPath, content, repoPath: file.repoPath, mode: file.mode };
 }
 
 /**

@@ -75,6 +75,7 @@ describe("arbella status on a follower", () => {
       missingSecrets: [
         { tool: "codex", file: codexConfig, keyPath: ["mcp_servers", "unifi", "env", "UNIFI_PASSWORD"] },
         { tool: "claude", file: settings, keyPath: ["env", "API_TOKEN"] },
+        { tool: "claude", file: settings, keyPath: ["env", "OTHER_KEY"] },
       ],
     });
 
@@ -83,6 +84,7 @@ describe("arbella status on a follower", () => {
     const out = stderr.join("").replace(/\x1b\[[0-9;]*m/g, "");
     expect(out).toContain("Role: follower");
     expect(out).toContain("secret missing: codex mcp unifi → UNIFI_PASSWORD");
+    expect(out).toContain("secret missing: claude ~/.claude/settings.json → env.OTHER_KEY");
     expect(out).not.toContain("API_TOKEN");
     expect(out).not.toContain("filled-in-here");
     expect(out).not.toContain("arbella push");

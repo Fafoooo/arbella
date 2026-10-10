@@ -239,6 +239,7 @@ function placeRequest(ctx: RestoreContext, file: CapturedFile, dest: string): Pl
     bucket: "claude",
     dest,
     content: hydratedContent(ctx, file),
+    repoPath: file.repoPath,
     mode: file.mode,
     direct: !isMemory,
   };
