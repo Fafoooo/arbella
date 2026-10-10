@@ -40,13 +40,12 @@ const LITERAL_SECRET_MIN_LENGTH = 8;
  *
  * Kept: shell expansions (`$(...)`, `${...}`, `$VAR`, backticks — except inside
  * single quotes or after a backslash; a `$` before anything else, as in
- * `Pa$$w0rd`, is literal),
- * already-redacted text, plain URLs, paths, environment variable
- * names, numbers, unquoted words (a generated credential mixes letters and
- * digits; a bare word is an identifier or a type) and unquoted expressions such
- * as `process.env.X` or `os.environ[`. A run of 20+ letters/digits is a token
- * even when it looks like a URL, a path or a dotted name (a webhook path,
- * `/9xR4k…`, Vault `hvs.CAES…`).
+ * `Pa$$w0rd`, is literal), already-redacted text, plain URLs, paths,
+ * environment variable names, numbers, unquoted words (a generated credential
+ * mixes letters and digits; a bare word is an identifier or a type), quoted
+ * prose or commands, and unquoted expressions such as `process.env.X` or
+ * `os.environ[`. A run of 20+ letters/digits is a token even when it looks like
+ * a URL, a path or a dotted name (a webhook path, `/9xR4k…`, Vault `hvs.CAES…`).
  */
 function isLiteralSecret(written: string): boolean {
   const quote = /^["'`]/.test(written) ? written[0] : "";
