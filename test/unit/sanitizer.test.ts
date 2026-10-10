@@ -357,6 +357,14 @@ describe("sanitizer: secret-named assignments never break code", () => {
       'DB_PASSWORD="${FALLBACK_VALUE:-correct\\$horse123}"',
       `DB_PASSWORD="\${FALLBACK_VALUE:-"${REDACTED}"}"`,
     ],
+    [
+      `DB_PASSWORD="\${FALLBACK_VALUE:-"Sup3rS3cretPw"}"`,
+      `DB_PASSWORD="\${FALLBACK_VALUE:-"${REDACTED}"}"`,
+    ],
+    [
+      `DB_PASSWORD=\${FALLBACK_VALUE:-'Sup3rS3cretPw'}`,
+      `DB_PASSWORD=\${FALLBACK_VALUE:-"${REDACTED}"}`,
+    ],
     // Quoted, a single word is a literal even without digits.
     ['DB_PASSWORD="correcthorse"', `DB_PASSWORD="${REDACTED}"`],
     ["password: 'P@ssword!'", `password: '${REDACTED}'`],

@@ -91,7 +91,9 @@ function isPathLike(value: string): boolean {
  * NAME [:=] VALUE where NAME contains a secret stem in any letter case; the
  * replacer decides with isSecretName whether the stem ends a word. The name
  * parts are bounded so a megabyte-long identifier stays linear. The
- * operator never spans a line, and `:-`/`:=` cover shell defaults. A quoted
+ * operator never spans a line, and `:-`/`:=` cover shell defaults. A `${…}`
+ * without nested braces is one unit, on its own and inside "…", as in sh, so
+ * `"${X:-"default"}"` is read whole. A quoted
  * value honours backslash escapes, falling back to the plain form (in sh, `\'`
  * ends a single-quoted string); an unquoted one stops at control characters so
  * a NUL-separated binary view still trips the binary fail-safe, and treats `#`
@@ -99,7 +101,7 @@ function isPathLike(value: string): boolean {
  * 1 name, 2 operator with spacing, 3 value as written.
  */
 const ENV_ASSIGNMENT =
-  /\b([A-Za-z0-9_]{0,64}(?:API[_-]?KEY|SECRET|TOKEN|PASSWORD|PASSWD|PRIVATE[_-]?KEY|ACCESS[_-]?KEY|CLIENT[_-]?SECRET)[A-Za-z0-9_]{0,64})([ \t]*(?::[-=]?(?![=>~:+?])|=(?![=>~:?]))[ \t]*)("(?:\\.|[^"\\\n])*"|"[^"\n]*"|'(?:\\.|[^'\\\n])*'|'[^'\n]*'|`[^`\n]*`|[^\s\0-\x1f\uFFFD"'`;,)\]}#][^\s\0-\x1f\uFFFD"'`;,)\]}]*)/gi;
+  /\b([A-Za-z0-9_]{0,64}(?:API[_-]?KEY|SECRET|TOKEN|PASSWORD|PASSWD|PRIVATE[_-]?KEY|ACCESS[_-]?KEY|CLIENT[_-]?SECRET)[A-Za-z0-9_]{0,64})([ \t]*(?::[-=]?(?![=>~:+?])|=(?![=>~:?]))[ \t]*)(\$\{[^{}\n]*\}|"(?:\\.|\$\{[^{}\n]*\}|[^"\\\n])*"|"[^"\n]*"|'(?:\\.|[^'\\\n])*'|'[^'\n]*'|`[^`\n]*`|[^\s\0-\x1f\uFFFD"'`;,)\]}#][^\s\0-\x1f\uFFFD"'`;,)\]}]*)/gi;
 
 /**
  * "…" > ${X:-…} > literal is as deep as real code nests. Deeper is
@@ -109,11 +111,11 @@ const MAX_ASSIGNMENT_DEPTH = 4;
 
 /**
  * The default of a shell expansion, `${VAR:-default}` / `${VAR:=default}` (or
- * without the colon), when it is a plain word; backslash escapes such as `\$`
- * are part of the word. The closing brace may lie just past an unquoted value,
- * which stops at `}`.
+ * without the colon), when it is a plain or quoted word; backslash escapes such
+ * as `\$` are part of the word. The closing brace may lie just past an unquoted
+ * value, which stops at `}`.
  */
-const SHELL_DEFAULT = /(\$\{[A-Za-z_]\w*:?[-=])((?:\\.|[^\s{}$`"'\\])+)(?=\}|$)/g;
+const SHELL_DEFAULT = /(\$\{[A-Za-z_]\w*:?[-=])("(?:\\.|[^"\\\n])*"|'[^'\n]*'|(?:\\.|[^\s{}$`"'\\])+)(?=\}|$)/g;
 
 /** Secret stems inside a name, in any letter case. */
 const SECRET_NAME_STEM =
