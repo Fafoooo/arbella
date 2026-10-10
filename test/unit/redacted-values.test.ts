@@ -444,11 +444,56 @@ describe("mergeRedacted: scope must be unchanged", () => {
     expect(mergeRedacted(repo, local).unsafe).toEqual([]);
   });
 
+  it("a nested servers map inside an entry cannot reset the entry's scope", () => {
+    const local = { mcpServers: { x: { command: "good", config: { servers: { y: { token: "real" } } } } } };
+    const repo = { mcpServers: { x: { command: "evil", config: { servers: { y: { token: R } } } } } };
+    expect(unsafeOf(repo, local)).toEqual([["mcpServers", "x", "config", "servers", "y", "token"]]);
+  });
+
+  it("a server under an unrecognised map with a changed command is unsafe", () => {
+    const local = { context_servers: { x: { command: "good", env: { TOKEN: "real" } } } };
+    const repo = { context_servers: { x: { command: "evil", env: { TOKEN: R } } } };
+    expect(unsafeOf(repo, local)).toEqual([["context_servers", "x", "env", "TOKEN"]]);
+  });
+
+  it("a changed base_url outside any known entry next to a redacted api_key is unsafe", () => {
+    const local = { provider: { base_url: "https://good.example", api_key: "real" } };
+    const repo = { provider: { base_url: "https://evil.example", api_key: R } };
+    expect(unsafeOf(repo, local)).toEqual([["provider", "api_key"]]);
+  });
+
+  it("an unchanged server under an unrecognised map still reuses the value", () => {
+    const local = { context_servers: { x: { command: "c", env: { TOKEN: "real" } } } };
+    const repo = { context_servers: { x: { command: "c", env: { TOKEN: R } } } };
+    const r = mergeRedacted(repo, local);
+    expect(r.unsafe).toEqual([]);
+    expect(r.value).toEqual(local);
+  });
+
+  it("a settings-style top-level env with only the marker differing reuses the value while other keys change", () => {
+    const r = mergeRedacted(
+      { model: "b", theme: "t2", env: { A: "1", K: R } },
+      { model: "a", theme: "t1", env: { A: "1", K: "real" } },
+    );
+    expect(r.unsafe).toEqual([]);
+    expect(r.value).toEqual({ model: "b", theme: "t2", env: { A: "1", K: "real" } });
+  });
+
+  it("a missing local object at a required level means no reuse", () => {
+    const repo = { context_servers: { x: { command: "c", env: { TOKEN: R } } } };
+    expect(mergeRedacted(repo, { other: 1 }).missing).toEqual([["context_servers", "x", "env", "TOKEN"]]);
+  });
+
   it("rootIsEntry makes a bare server definition the scope", () => {
     const local = { command: "c", cwd: "/good", env: { T: "real" } };
     const repo = { command: "c", cwd: "/evil", env: { T: R } };
     expect(mergeRedacted(repo, local, { rootIsEntry: true }).unsafe).toEqual([["env", "T"]]);
-    expect(mergeRedacted(repo, local).unsafe).toEqual([]);
+    // Without rootIsEntry the root's command/cwd are still endpoint hints.
+    expect(mergeRedacted(repo, local).unsafe).toEqual([["env", "T"]]);
+    // A root without hints is not a scope unless marked as one.
+    const plain = { mode: "a", env: { T: R } };
+    expect(mergeRedacted(plain, { mode: "b", env: { T: "real" } }).unsafe).toEqual([]);
+    expect(mergeRedacted(plain, { mode: "b", env: { T: "real" } }, { rootIsEntry: true }).unsafe).toEqual([["env", "T"]]);
   });
 });
 

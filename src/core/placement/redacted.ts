@@ -25,10 +25,17 @@ export function hasMarker(v: unknown): boolean {
 /** Parent keys whose children are whole server/provider definitions (entries). */
 const ENTRY_PARENTS = new Set(["mcpServers", "mcp_servers", "servers", "mcp", "model_providers"]);
 
+/** Keys that say where an object sends a secret (command to run, endpoint to call). */
+const ENDPOINT_HINTS = [
+  "command", "args", "url", "cwd", "type", "transport",
+  "serverUrl", "httpUrl", "endpoint", "base_url", "baseUrl",
+];
+const hasHint = (o: unknown): boolean => isPlain(o) && ENDPOINT_HINTS.some((k) => k in o);
+
 /**
  * Is `repo` equal to `local` once every repo marker path is dropped from both?
  * Key order does not matter; any repo-side addition or local-only key counts as
- * a change. Only then may a real local value be reused inside that scope.
+ * a change. An undefined or non-object `local` is never equal.
  */
 const blindEqual = (repo: Plain, local: unknown): boolean =>
   isPlain(local) &&
@@ -42,12 +49,15 @@ const blindEqual = (repo: Plain, local: unknown): boolean =>
  * string, or an array containing a marker) takes the local value at the same key
  * path when that is real; otherwise only that key is omitted and its path
  * reported. A local marker counts as no value. A real local value is reused only
- * when everything else in the leaf's scope is unchanged (see {@link blindEqual}):
- * the scope is the nearest enclosing server/provider entry (an object under
- * mcpServers, mcp_servers, servers, mcp or model_providers), else the leaf's own
- * parent object. Otherwise the leaf is omitted and its path listed in `unsafe`,
- * so a changed command, url, env or any other key can never redirect a secret.
- * `rootIsEntry` marks `repo` itself as such an entry (a bare server definition).
+ * when ALL of these are unchanged (see {@link blindEqual}): the leaf's immediate
+ * parent object; every enclosing server/provider entry (an object under
+ * mcpServers, mcp_servers, servers, mcp or model_providers); and every enclosing
+ * object that carries an endpoint hint (command, args, url, cwd, type, ... in
+ * the repo or the local object), wherever it sits. The checks are ANDed down the
+ * tree, so a nested object can never reset an outer one. Otherwise the leaf is
+ * omitted and its path listed in `unsafe`, so a changed command, url, env or any
+ * other key can never redirect a secret. `rootIsEntry` marks `repo` itself as
+ * such an entry (a bare server definition).
  */
 export function mergeRedacted(
   repo: unknown,
@@ -55,21 +65,23 @@ export function mergeRedacted(
   opts: { rootIsEntry?: boolean } = {},
 ): { value: unknown; missing: string[][]; unsafe: string[][] } {
   if (!isPlain(repo)) return { value: repo, missing: [], unsafe: [] };
-  return mergeObject(repo, isPlain(local) ? local : undefined, [], undefined, opts.rootIsEntry === true);
+  return mergeObject(repo, isPlain(local) ? local : undefined, [], true, opts.rootIsEntry === true);
 }
 
+/** `inherited`: every enclosing level that needs a check passed it. */
 function mergeObject(
   repo: Plain,
   local: Plain | undefined,
   path: string[],
-  inherited: boolean | undefined,
+  inherited: boolean,
   rootIsEntry: boolean,
 ): { value: Plain; missing: string[][]; unsafe: string[][] } {
   const value: Plain = {};
   const missing: string[][] = [];
   const unsafe: string[][] = [];
   const isEntry = path.length === 0 ? rootIsEntry : ENTRY_PARENTS.has(path[path.length - 2]!);
-  const scopeOk = isEntry ? blindEqual(repo, local) : inherited;
+  const needsCheck = isEntry || hasHint(repo) || hasHint(local);
+  const scopeOk = inherited && (!needsCheck || blindEqual(repo, local));
   for (const [key, rv] of Object.entries(repo)) {
     const lv = local?.[key];
     const here = [...path, key];
@@ -80,7 +92,7 @@ function mergeObject(
       unsafe.push(...sub.unsafe);
     } else if (hasMarker(rv)) {
       if (lv === undefined || hasMarker(lv)) missing.push(here);
-      else if (scopeOk ?? blindEqual(repo, local)) value[key] = lv;
+      else if (scopeOk && blindEqual(repo, local)) value[key] = lv;
       else unsafe.push(here);
     } else {
       value[key] = rv;
