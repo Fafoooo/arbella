@@ -58,8 +58,9 @@ function isLiteralSecret(written: string): boolean {
   // A backslash escape (`\$`) is literal data; drop escapes before looking for expansions.
   const unescaped = value.replace(/\\[\s\S]/g, "");
   if (quote !== "'" && /(?<!\$)\$[({A-Za-z_]|`/.test(unescaped)) return false;
-  // Already redacted (idempotence). Other braces are data: "s3cr3t{{x}}" is a literal.
-  if (value.includes("{{REDACTED")) return false;
+  // Already redacted (idempotence): the value IS the marker — unquoted, it stops
+  // at `}`. A value that merely contains braces or the marker is data.
+  if (value === REDACTED || value === "{{REDACTED") return false;
   const tokenRun = /[A-Za-z0-9]{20,}/.test(value);
   // A webhook URL carries its secret in the path: hooks.slack.com/services/T…/B…/<token>.
   if (/^[A-Za-z][A-Za-z0-9+.-]*:\/\//.test(value)) return tokenRun || isCredentialBearingUrl(value);
@@ -73,7 +74,7 @@ function isLiteralSecret(written: string): boolean {
   if (quote) return /\d/.test(value) || !/[_.\/-]/.test(value);
   // Unquoted, a word without digits is an identifier or a type: `token: string`.
   if (!/\d/.test(value)) return false;
-  return !/[(\[{<>|\\]/.test(value) && (tokenRun || !/^[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+$/.test(value));
+  return !/[(\[{<>|\\]/.test(unescaped) && (tokenRun || !/^[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+$/.test(value));
 }
 
 /**
@@ -108,10 +109,11 @@ const MAX_ASSIGNMENT_DEPTH = 4;
 
 /**
  * The default of a shell expansion, `${VAR:-default}` / `${VAR:=default}` (or
- * without the colon), when it is a plain word. The closing brace may lie just
- * past an unquoted value, which stops at `}`.
+ * without the colon), when it is a plain word; backslash escapes such as `\$`
+ * are part of the word. The closing brace may lie just past an unquoted value,
+ * which stops at `}`.
  */
-const SHELL_DEFAULT = /(\$\{[A-Za-z_]\w*:?[-=])([^\s{}$`"'\\]+)(?=\}|$)/g;
+const SHELL_DEFAULT = /(\$\{[A-Za-z_]\w*:?[-=])((?:\\.|[^\s{}$`"'\\])+)(?=\}|$)/g;
 
 /** Secret stems inside a name, in any letter case. */
 const SECRET_NAME_STEM =

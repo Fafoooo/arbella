@@ -342,6 +342,8 @@ describe("sanitizer: secret-named assignments never break code", () => {
     ["secretkey=abc123def456ghi", `secretkey=${REDACTED}`],
     // Only arbella's own marker means "already redacted"; other braces are data.
     ['DB_PASSWORD="s3cr3t{{not_a_template}}"', `DB_PASSWORD="${REDACTED}"`],
+    // Only a value that IS the marker counts as redacted, not one that contains it.
+    [`DB_PASSWORD="${REDACTED}abc123real"`, `DB_PASSWORD="${REDACTED}"`],
     // In sh, `#` inside a word is literal; only a word-initial `#` starts a comment.
     ["DB_PASSWORD=abc123#456", `DB_PASSWORD=${REDACTED}`],
     // `\$` is a literal dollar in sh, not an expansion.
@@ -349,6 +351,10 @@ describe("sanitizer: secret-named assignments never break code", () => {
     // The default of any ${VAR:-…} inside a secret-named value is classified itself.
     [
       'DB_PASSWORD="${FALLBACK_VALUE:-Sup3rS3cretPw}"',
+      `DB_PASSWORD="\${FALLBACK_VALUE:-"${REDACTED}"}"`,
+    ],
+    [
+      'DB_PASSWORD="${FALLBACK_VALUE:-correct\\$horse123}"',
       `DB_PASSWORD="\${FALLBACK_VALUE:-"${REDACTED}"}"`,
     ],
     // Quoted, a single word is a literal even without digits.
