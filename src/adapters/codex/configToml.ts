@@ -75,21 +75,23 @@ function isTable(value: unknown): value is TomlTable {
  * an env-style map and is not a plain flag or number (isPlainSettingValue), or
  * when its string value matches a known secret pattern. Numbers and booleans
  * follow the same key/context rules as strings. Objects and arrays are walked
- * recursively. Every redaction appends a SecretRef (kind:"value") whose `source`
- * pinpoints the dotted path inside config.toml.
+ * recursively; array elements are judged under the key that holds the array.
+ * Every redaction appends a SecretRef (kind:"value") whose `source` pinpoints
+ * the dotted path inside config.toml.
  */
 function redactSubtree(
   node: unknown,
   dottedPath: string,
   secrets: SecretRef[],
   context: TomlContext,
+  arrayKey = "",
 ): void {
   if (Array.isArray(node)) {
     for (let i = 0; i < node.length; i++) {
       const child = node[i];
       if (isTable(child) || Array.isArray(child)) {
-        redactSubtree(child, `${dottedPath}[${i}]`, secrets, context);
-      } else if (shouldRedactLeaf("", child, context)) {
+        redactSubtree(child, `${dottedPath}[${i}]`, secrets, context, arrayKey);
+      } else if (shouldRedactLeaf(arrayKey, child, context)) {
         node[i] = REDACTED;
         secrets.push(makeValueSecret(`${dottedPath}[${i}]`));
       }
@@ -104,7 +106,7 @@ function redactSubtree(
     const childPath = dottedPath ? `${dottedPath}.${key}` : key;
     const inner = childContext(context, key);
     if (isTable(child) || Array.isArray(child)) {
-      redactSubtree(child, childPath, secrets, inner);
+      redactSubtree(child, childPath, secrets, inner, key);
     } else if (shouldRedactLeaf(key, child, inner)) {
       node[key] = REDACTED;
       secrets.push(makeValueSecret(childPath));
@@ -305,18 +307,18 @@ export function processConfigToml(
     if (isTable(shellEnv)) {
       redactSubtree(shellEnv, "shell_environment_policy", secrets, "none");
     }
-    // Catch-all: any other secret-keyed scalar at the top level or in keep-sections.
+    // Catch-all: any other secret-keyed value at the top level or in keep-sections,
+    // judged by the same rules as the subtrees (numbers included).
     for (const key of Object.keys(parsed)) {
       if (key === "mcp_servers" || key === "shell_environment_policy") continue;
       if (key === "plugins" || key === "marketplaces" || key === "hooks") continue;
       const value = parsed[key];
-      if (typeof value === "string") {
-        if (isSecretKey(key) || valueLooksSecret(value)) {
-          parsed[key] = REDACTED;
-          secrets.push(makeValueSecret(key));
-        }
-      } else if (isTable(value) || Array.isArray(value)) {
-        redactSubtree(value, key, secrets, "none");
+      const context = childContext("none", key);
+      if (isTable(value) || Array.isArray(value)) {
+        redactSubtree(value, key, secrets, context, key);
+      } else if (shouldRedactLeaf(key, value, context)) {
+        parsed[key] = REDACTED;
+        secrets.push(makeValueSecret(key));
       }
     }
   }

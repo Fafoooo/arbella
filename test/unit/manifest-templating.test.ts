@@ -63,6 +63,24 @@ X_DEBUG = "true"
   } });
 });
 
+it("keeps the key when an env value is an array, and redacts secret-named top-level numbers", () => {
+  const result = processConfigToml(`
+api_key = 12345678
+
+[mcp_servers.db.env]
+PGPASSWORD = ["123456"]
+DB_PASS = [4711]
+RETRIES = [3]
+`, createTemplater(), makeVariables("/home/test", "test", "linux", "/home/test/.codex"));
+  const parsed = parseToml(result.sanitizedToml);
+  expect(parsed.api_key).toBe("{{REDACTED}}");
+  expect(parsed.mcp_servers).toEqual({ db: { env: {
+    PGPASSWORD: ["{{REDACTED}}"],
+    DB_PASS: ["{{REDACTED}}"],
+    RETRIES: [3],
+  } } });
+});
+
 it("keeps boolean and numeric MCP env flags in config.toml, redacts the rest", () => {
   const result = processConfigToml(`
 [mcp_servers.unifi.env]
