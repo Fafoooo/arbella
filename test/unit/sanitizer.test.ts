@@ -336,7 +336,7 @@ describe("sanitizer: secret-named assignments never break code", () => {
       "export API_TOKEN=${API_TOKEN:-abc123def456ghi}",
       `export API_TOKEN=\${API_TOKEN:-"${REDACTED}"}`,
     ],
-    ["VAULT_TOKEN=hvs.CAESIFakeFakeFakeFakeFake1234567890abcd", `VAULT_TOKEN=${REDACTED}`],
+    ["VAULT_TOKEN=xyz.FakeTokenFakeToken0123456789", `VAULT_TOKEN=${REDACTED}`],
     ["AWS_SECRET_ACCESS_KEY=/9xR4kFakeFakeFakeFakeFakeFakeuP8o", `AWS_SECRET_ACCESS_KEY=${REDACTED}`],
     ["AWS_SECRET_ACCESS_KEY=+9xR4kFakeFakeFakeFakeFakeFakeuP8o", `AWS_SECRET_ACCESS_KEY=${REDACTED}`],
     ['secretKey: "abc123def456ghi"', `secretKey: "${REDACTED}"`],
