@@ -606,7 +606,7 @@ describe("formatPullSummary", () => {
     );
     expect(lines).toContain("claude: 0 written, 0 unchanged, 1 kept");
     expect(lines).toContain(`  kept (has real values where the repo has ${R}): ~/.claude/hooks/run.sh`);
-    expect(lines).toContain("  remove the local file to take the repo version");
+    expect(lines).toContain("  remove the local file (or MCP server entry) to take the repo version");
     expect(lines).not.toContain("  kept ~/.claude/hooks/run.sh");
     expect(lines.join("\n")).not.toContain("--force");
     expect(lines).toContain("secret missing: claude ~/.claude/settings.json → env.API_TOKEN");

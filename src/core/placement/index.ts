@@ -349,7 +349,7 @@ export function formatPullSummary(r: PullReport, role: Role, home: string): stri
     for (const p of r.keptForSecrets) {
       lines.push(`  kept (has real values where the repo has ${REDACTED}): ${shown(p)}`);
     }
-    lines.push("  remove the local file to take the repo version");
+    lines.push("  remove the local file (or MCP server entry) to take the repo version");
   }
   if (r.redactedText.length > 0) {
     lines.push(`Files still containing ${REDACTED}:`);
