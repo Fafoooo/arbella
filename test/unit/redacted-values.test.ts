@@ -10,6 +10,7 @@ import {
   mergeRedacted,
   mergeRedactedText,
   parseStructured,
+  scopeOf,
   repairRedacted,
   repairRedactedText,
   structuredKind,
@@ -444,11 +445,124 @@ describe("mergeRedacted: scope must be unchanged", () => {
     expect(mergeRedacted(repo, local).unsafe).toEqual([]);
   });
 
+  it("a server under an unrecognised map with a changed command is unsafe", () => {
+    const local = { context_servers: { x: { command: "good", env: { TOKEN: "real" } } } };
+    const repo = { context_servers: { x: { command: "evil", env: { TOKEN: R } } } };
+    expect(unsafeOf(repo, local)).toEqual([["context_servers", "x", "env", "TOKEN"]]);
+  });
+
+  it("a changed base_url outside any known entry next to a redacted api_key is unsafe", () => {
+    const local = { provider: { base_url: "https://good.example", api_key: "real" } };
+    const repo = { provider: { base_url: "https://evil.example", api_key: R } };
+    expect(unsafeOf(repo, local)).toEqual([["provider", "api_key"]]);
+  });
+
+  it("an unchanged server under an unrecognised map still reuses the value", () => {
+    const local = { context_servers: { x: { command: "c", env: { TOKEN: "real" } } } };
+    const repo = { context_servers: { x: { command: "c", env: { TOKEN: R } } } };
+    const r = mergeRedacted(repo, local);
+    expect(r.unsafe).toEqual([]);
+    expect(r.value).toEqual(local);
+  });
+
+  it("a settings-style top-level env with only the marker differing reuses the value while other keys change", () => {
+    const r = mergeRedacted(
+      { model: "b", theme: "t2", env: { A: "1", K: R } },
+      { model: "a", theme: "t1", env: { A: "1", K: "real" } },
+    );
+    expect(r.unsafe).toEqual([]);
+    expect(r.value).toEqual({ model: "b", theme: "t2", env: { A: "1", K: "real" } });
+  });
+
+  it("a missing local object at a required level means no reuse", () => {
+    const repo = { context_servers: { x: { command: "c", env: { TOKEN: R } } } };
+    expect(mergeRedacted(repo, { other: 1 }).missing).toEqual([["context_servers", "x", "env", "TOKEN"]]);
+  });
+
   it("rootIsEntry makes a bare server definition the scope", () => {
     const local = { command: "c", cwd: "/good", env: { T: "real" } };
     const repo = { command: "c", cwd: "/evil", env: { T: R } };
     expect(mergeRedacted(repo, local, { rootIsEntry: true }).unsafe).toEqual([["env", "T"]]);
+    // Without rootIsEntry the root is a document: only the [env] scope applies.
     expect(mergeRedacted(repo, local).unsafe).toEqual([]);
+    const plain = { mode: "a", env: { T: R } };
+    expect(mergeRedacted(plain, { mode: "b", env: { T: "real" } }).unsafe).toEqual([]);
+    expect(mergeRedacted(plain, { mode: "b", env: { T: "real" } }, { rootIsEntry: true }).unsafe).toEqual([["env", "T"]]);
+  });
+
+  it("a nested config.servers.y.token inside mcpServers.x is scoped to x, not y", () => {
+    const local = { mcpServers: { x: { command: "good", config: { servers: { y: { token: "real" } } } } } };
+    const repo = { mcpServers: { x: { command: "evil", config: { servers: { y: { token: R } } } } } };
+    expect(unsafeOf(repo, local)).toEqual([["mcpServers", "x", "config", "servers", "y", "token"]]);
+  });
+
+  it("an unknown endpoint key (host) changed in an unrecognised map is unsafe", () => {
+    const local = { context_servers: { x: { host: "good.example", env: { TOKEN: "real" } } } };
+    const repo = { context_servers: { x: { host: "evil.example", env: { TOKEN: R } } } };
+    expect(unsafeOf(repo, local)).toEqual([["context_servers", "x", "env", "TOKEN"]]);
+  });
+
+  it("an unchanged context_servers.x with a changed sibling z is unsafe (coarse top-level fallback)", () => {
+    const local = { context_servers: { x: { command: "c", env: { TOKEN: "real" } }, z: { command: "old" } } };
+    const repo = { context_servers: { x: { command: "c", env: { TOKEN: R } }, z: { command: "new" } } };
+    expect(unsafeOf(repo, local)).toEqual([["context_servers", "x", "env", "TOKEN"]]);
+  });
+
+  it("mcp.servers.x (VS Code shape) reuses when only the marker differs, and is unsafe when x.uri changes", () => {
+    const local = { mcp: { servers: { x: { uri: "https://good.example", headers: { A: "real" } }, z: { uri: "old" } } } };
+    const same = { mcp: { servers: { x: { uri: "https://good.example", headers: { A: R } }, z: { uri: "new" } } } };
+    const r = mergeRedacted(same, local);
+    expect(r.unsafe).toEqual([]);
+    expect(r.value).toEqual({ mcp: { servers: { x: { uri: "https://good.example", headers: { A: "real" } }, z: { uri: "new" } } } });
+    const moved = { mcp: { servers: { x: { uri: "https://evil.example", headers: { A: R } } } } };
+    expect(unsafeOf(moved, local)).toEqual([["mcp", "servers", "x", "headers", "A"]]);
+  });
+
+  it("profiles.p.api_key with a changed profiles.p.base_url is unsafe", () => {
+    const local = { profiles: { p: { base_url: "https://good.example", api_key: "real" } } };
+    const repo = { profiles: { p: { base_url: "https://evil.example", api_key: R } } };
+    expect(unsafeOf(repo, local)).toEqual([["profiles", "p", "api_key"]]);
+  });
+
+  it("a top-level apiKey is scoped to the whole document", () => {
+    const local = { apiKey: "real", theme: "a" };
+    expect(unsafeOf({ apiKey: R, theme: "b" }, local)).toEqual([["apiKey"]]);
+    const r = mergeRedacted({ apiKey: R, theme: "a" }, local);
+    expect(r.unsafe).toEqual([]);
+    expect(r.value).toEqual(local);
+  });
+});
+
+describe("scopeOf", () => {
+  it("rootIsEntry makes the whole object the scope", () => {
+    expect(scopeOf(["env", "T"], true)).toEqual([]);
+    expect(scopeOf(["mcpServers", "x", "env", "T"], true)).toEqual([]);
+  });
+
+  it("a leaf under an anchored entry map is scoped to its entry", () => {
+    expect(scopeOf(["mcpServers", "x", "env", "T"])).toEqual(["mcpServers", "x"]);
+    expect(scopeOf(["model_providers", "p", "api_key"])).toEqual(["model_providers", "p"]);
+    expect(scopeOf(["profiles", "p", "api_key"])).toEqual(["profiles", "p"]);
+  });
+
+  it("the longest matching map wins", () => {
+    expect(scopeOf(["mcp", "servers", "x", "uri", "k"])).toEqual(["mcp", "servers", "x"]);
+    expect(scopeOf(["mcp", "other", "k"])).toEqual(["mcp", "other"]);
+  });
+
+  it("an entry map not anchored at the root is ignored", () => {
+    expect(scopeOf(["mcpServers", "x", "config", "servers", "y", "t"])).toEqual(["mcpServers", "x"]);
+    expect(scopeOf(["a", "servers", "x", "t"])).toEqual(["a"]);
+  });
+
+  it("an unknown map, or a leaf directly in a map, falls back to the top-level subtree", () => {
+    expect(scopeOf(["context_servers", "x", "env", "T"])).toEqual(["context_servers"]);
+    expect(scopeOf(["env", "K"])).toEqual(["env"]);
+    expect(scopeOf(["mcpServers", "x"])).toEqual(["mcpServers"]);
+  });
+
+  it("a top-level leaf is scoped to the whole document", () => {
+    expect(scopeOf(["apiKey"])).toEqual([]);
   });
 });
 

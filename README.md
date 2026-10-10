@@ -235,6 +235,7 @@ This is the part I most wanted to get right.
 - A test fails the build if a credential can reach the repo. This isn't on the honor system.
 
 - Arbella's own auto-push hook is never stored in the repo, so a pulled machine does not inherit it.
+- A real local secret is only reused when nothing else in its server, provider or settings block changed; otherwise the local version is kept and reported. That guard stops a secret from quietly following a changed endpoint. It is not a sandbox: the repo stays trusted, because it can ship hooks and MCP commands that run code.
 
 Putting secrets in the repo is opt-in, and the default is off. It's your private repo and your call — but I'd leave it there.
 
