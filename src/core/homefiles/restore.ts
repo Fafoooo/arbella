@@ -14,8 +14,9 @@
  *     from $HOME down to the leaf is lstat'd, and a symlinked one (a
  *     dotfile-manager `~/.local/bin`, say) refuses the write rather than
  *     following the link out of the home directory.
- *   - `sourceOfTruth: "local"` (the default) never clobbers a file that already
- *     exists here; only `"repo"` / `--force` overwrites.
+ *   - Whether an existing file is replaced is the placement engine's call
+ *     (core/placement): `sourceOfTruth` / the pull session, marker repair, and
+ *     real local secret values.
  *   - Every overwrite is preceded by a per-file safety copy under
  *     `dataDir()/safety-backups/home-<stamp>/<rel>` (R14), so an unwanted
  *     overwrite is always recoverable.
@@ -32,6 +33,13 @@ import type { CoreServices } from "../../adapters/adapter.interface.js";
 import type { CapturedFile, RestoreAction, SourceOfTruth } from "../../types.js";
 
 import { findSymlinkComponent } from "../../utils/safe-path.js";
+import {
+  applyPlacement,
+  hydratedContent,
+  planPlacement,
+  type PlaceRequest,
+  type PullSession,
+} from "../placement/index.js";
 
 import { SHARED_HOME_REPO_PREFIX, isSharedHomePath } from "./capture.js";
 
@@ -49,6 +57,8 @@ export interface HomeRestoreServices extends CoreServices {
   sourceOfTruth: SourceOfTruth;
   /** Plan + report only; perform no filesystem action. */
   dryRun: boolean;
+  /** Pull session (role, force, ledger, report). Absent => legacy placement policy. */
+  pull?: PullSession;
 }
 
 /** Where a safety copy of an about-to-be-overwritten home file goes (R14). */
@@ -89,14 +99,19 @@ export function homeDestFor(repoPath: string, home: string): string | null {
   return path.join(home, ...segments);
 }
 
+/** Plan and write share one request, so --dry-run judges the bytes a pull places. */
+function placeRequest(ctx: HomeRestoreServices, file: CapturedFile, dest: string): PlaceRequest {
+  return { bucket: "home", dest, content: hydratedContent(ctx, file), mode: file.mode };
+}
+
 /* -------------------------------------------------------------------------- */
 /* Planning                                                                    */
 /* -------------------------------------------------------------------------- */
 
 /**
  * The write actions a shared/home restore WOULD perform, without performing any
- * of them — so `--dry-run` lists them next to the per-tool actions. Files kept
- * because the local copy wins are omitted, exactly as the real pass skips them.
+ * of them — so `--dry-run` lists them next to the per-tool actions. Files the
+ * placement engine would not write are omitted, exactly as the real pass skips them.
  */
 export async function planHomeFileActions(
   ctx: HomeRestoreServices,
@@ -114,14 +129,14 @@ export async function planHomeFileActions(
     // Same refusal as the real pass, so --dry-run never lists a write that the
     // restore then declines to make.
     if ((await findSymlinkComponent(ctx.fs, ctx.vars.HOME, dest)) !== null) continue;
-    const overwrites = await ctx.fs.exists(dest);
-    if (ctx.sourceOfTruth === "local" && overwrites) continue;
+    const decision = await planPlacement(ctx, placeRequest(ctx, file, dest));
+    if (decision.outcome !== "written") continue;
     actions.push({
       type: "write-file",
       tool: "system",
       targetPath: dest,
       description: `Write ~/${segments.join("/")} (shared home file)`,
-      overwrites,
+      overwrites: decision.overwrites,
     });
   }
 
@@ -168,17 +183,14 @@ export async function restoreHomeFiles(
       continue;
     }
 
-    const exists = await ctx.fs.exists(dest);
-    if (ctx.sourceOfTruth === "local" && exists) {
-      ctx.log.debug(`home: keep local (sourceOfTruth=local) ${dest}`);
-      continue;
-    }
+    const req = placeRequest(ctx, file, dest);
+    const decision = await planPlacement(ctx, req);
     if (ctx.dryRun) {
-      ctx.log.step(`Would write ~/${rel}`);
+      if (decision.outcome === "written") ctx.log.step(`Would write ~/${rel}`);
       continue;
     }
 
-    if (exists) {
+    if (decision.overwrites) {
       // R14: snapshot before the overwrite, mirroring the per-tool safety copy.
       const safetyDest = path.join(opts.safetyDir, ...segments);
       try {
@@ -193,19 +205,18 @@ export async function restoreHomeFiles(
     }
 
     try {
-      // Rename-based (see FsService.writeAtomic): the symlink check above and
-      // the write below cannot be made one operation, and a plain writeFile
-      // FOLLOWS a link that appears in that gap. `rename` replaces the leaf
-      // entry instead, so the worst case is a clobbered link, never a write
-      // through one to somewhere outside $HOME.
-      if (file.binary === true) {
-        await ctx.fs.writeBytesAtomic(dest, Buffer.from(file.content, "base64"), file.mode);
-      } else {
-        const hydrated = ctx.templater.fromTemplate(file.content, ctx.vars);
-        await ctx.fs.writeAtomic(dest, hydrated, file.mode);
+      // Rename-based (placement's default writer, see FsService.writeAtomic):
+      // the symlink check above and the write below cannot be made one
+      // operation, and a plain writeFile FOLLOWS a link that appears in that
+      // gap. `rename` replaces the leaf entry instead, so the worst case is a
+      // clobbered link, never a write through one to somewhere outside $HOME.
+      const outcome = await applyPlacement(ctx, req, decision);
+      if (outcome === "written") {
+        written++;
+        ctx.log.debug(`home: wrote ~/${rel}`);
+      } else if (outcome === "kept") {
+        ctx.log.debug(`home: keep local ${dest}`);
       }
-      written++;
-      ctx.log.debug(`home: wrote ~/${rel}`);
     } catch (err) {
       ctx.log.warn(`restore: could not write ~/${rel}: ${(err as Error).message}`);
     }

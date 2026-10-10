@@ -39,6 +39,7 @@ import type {
 
 import { denylistFor, matchesDeny } from "../../core/sanitizer/denylist.js";
 import { emptyManifest } from "../../core/manifest/index.js";
+import { hydratedContent, placeFile, planPlacement } from "../../core/placement/index.js";
 import { cliBinaryName, detectOS, installCommandFor } from "../../platform/os.js";
 import { runInstall, which } from "../../platform/install.js";
 import { normalizeCapturedSymlinkTarget } from "../../utils/symlink.js";
@@ -356,20 +357,16 @@ async function writeRestoredFile(
   }
   const dest = resolved.path;
 
-  if (ctx.sourceOfTruth === "local" && (await ctx.fs.exists(dest))) {
-    ctx.log.debug(`antigravity: keep local ${file.repoPath} (sourceOfTruth=local)`);
-    return;
-  }
-
-  // Rename-based writers: the containment check and the write cannot be one
-  // operation, and a plain write follows a link that appears at the leaf in the
-  // gap. `rename` replaces that entry instead.
-  if (file.binary) {
-    await ctx.fs.writeBytesAtomic(dest, Buffer.from(file.content, "base64"), file.mode);
-    return;
-  }
-  const expanded = ctx.templater.fromTemplate(file.content, ctx.vars);
-  await ctx.fs.writeAtomic(dest, expanded, file.mode);
+  // Rename-based writers (placement's default): the containment check and the
+  // write cannot be one operation, and a plain write follows a link that
+  // appears at the leaf in the gap. `rename` replaces that entry instead.
+  const outcome = await placeFile(ctx, {
+    bucket: "antigravity",
+    dest,
+    content: hydratedContent(ctx, file),
+    mode: file.mode,
+  });
+  if (outcome === "kept") ctx.log.debug(`antigravity: keep local ${file.repoPath}`);
 }
 
 /** Recreate one captured symlink under the right target root. */
@@ -398,8 +395,9 @@ async function writeRestoredSymlink(
 }
 
 /**
- * Build the restore actions WITHOUT executing them (for --dry-run). Honors
- * sourceOfTruth: when local wins, an existing destination is kept (action omitted).
+ * Build the restore actions WITHOUT executing them (for --dry-run). A file the
+ * placement engine would not write, or a symlink kept under sourceOfTruth
+ * "local", is omitted.
  */
 export async function planActions(ctx: RestoreContext, data: RestoreData): Promise<RestoreAction[]> {
   const actions: RestoreAction[] = [];
@@ -411,14 +409,19 @@ export async function planActions(ctx: RestoreContext, data: RestoreData): Promi
     const resolved = await targetAbsFor(ctx.fs, dirs, target);
     if (!resolved.ok) continue;
     const targetPath = resolved.path;
-    const overwrites = await ctx.fs.exists(targetPath);
-    if (ctx.sourceOfTruth === "local" && overwrites) continue;
+    const decision = await planPlacement(ctx, {
+      bucket: "antigravity",
+      dest: targetPath,
+      content: hydratedContent(ctx, file),
+      mode: file.mode,
+    });
+    if (decision.outcome !== "written") continue;
     actions.push({
       type: "write-file",
       tool: "antigravity",
       targetPath,
       description: `Write ${target.root}/${target.rel}`,
-      overwrites,
+      overwrites: decision.overwrites,
     });
   }
 

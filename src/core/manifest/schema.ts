@@ -236,6 +236,8 @@ export const arbellaMetaSchema = z.object({
    * shared/instructions.md (R9). Restore deploys the shared file to both tools.
    */
   sharedInstructions: z.boolean().default(false),
+  /** machineId of the machine that made the last push (guards cross-machine pushes). */
+  lastPushMachine: z.string().optional(),
 });
 
 /* -------------------------------------------------------------------------- */

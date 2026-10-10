@@ -132,6 +132,10 @@ arbella push --dry-run   # show exactly what goes in (and what's skipped), write
 
 Worth a `--dry-run` before your first real push, so there are no surprises.
 
+Before it builds on the repo, `push` pulls in whatever is already there, and if that does not merge cleanly it stops with nothing pushed. It then asks before two things: another machine pushed since you last pushed or pulled, or the push would delete a lot from the repo (25 or more files, or 3 or more memories). In a terminal you get a prompt (default No); without one, or from the auto-push hook, it does not push. `--yes` pushes through both.
+
+A machine set up by `arbella pull` is a **follower**: it only pulls. `push` refuses there (`--yes` does not change that), the auto-push hook does nothing, and `--dry-run` still works. To make it a **source** that pushes, run `arbella init`; it asks first, since that machine's setup can then overwrite the repo. Memories are only mirrored when `includeMemories` is on; otherwise a push leaves the ones in the repo alone.
+
 ### `arbella pull`
 
 The reason the whole thing exists.
@@ -212,7 +216,8 @@ For the device flow, point Arbella at your own registered OAuth app with `ARBELL
 Arbella restores everything it safely can. A few things are yours to finish:
 
 - **Credentials.** Credential stores never travel, so sign back in when Arbella tells you to, or carry them yourself with [`arbella secrets`](#arbella-secrets). By default, inline API keys and OAuth tokens are redacted too; `includeSecrets` is the explicit private-repo opt-in that carries those inline values.
-- **Redacted MCP env values.** If an MCP server's config held a secret-shaped value, push replaced it with `{{REDACTED}}`. Pull prints one line per key it couldn't restore, e.g. `claude: MCP server serena needs env SERENA_TOKEN re-supplied (redacted on backup)`.
+- **Redacted values.** If a config held a secret-shaped value, push replaced it with `{{REDACTED}}`. Pull never writes that marker into a live config: a real value already on this machine is kept, otherwise only that one key is left out. Each key still to fill in is listed at the end of the pull and in `arbella status`, e.g. `secret missing: codex mcp unifi-network → UNIFI_NETWORK_PASSWORD`.
+- **Kept files.** Pull ends with a summary per tool. A file that differs from the repo and was changed on this machine is kept and listed; `arbella pull --force` replaces those (a safety copy is taken first). A file holding a real secret where the repo only has `{{REDACTED}}` is never replaced, not even with `--force`; delete it locally to take the repo version.
 - **Per-project MCP servers for a project you haven't cloned yet.** A project's MCP servers are only registered when its directory exists on this machine; if it doesn't, pull skips them and warns you which directory was skipped. Clone the project, then run `arbella pull` again.
 - **External tools Arbella couldn't classify or install.** brew/`uv tool`/pipx tools are reinstalled best-effort; anything unknown, or that failed, is listed by name and by what uses it, so you can install it yourself.
 - **`~/.claude.json` is only merged, key by key.** Pull touches `mcpServers` (and per-project `mcpServers`) and nothing else in that file — your `oauthAccount`, telemetry, and everything else stay exactly as they were.
@@ -228,6 +233,8 @@ This is the part I most wanted to get right.
 - Shared home files go through the same sanitizer, plus a home-specific denylist — `.env`, `*.pem`, `*.key`, `id_rsa*`, `.netrc`, `.npmrc`, `.git-credentials`, and friends are never captured even when something points at them.
 - Any token Arbella holds for itself lives in one local file with `0600` permissions — not in the repo, not in a logged command, not baked into a Git remote.
 - A test fails the build if a credential can reach the repo. This isn't on the honor system.
+
+- Arbella's own auto-push hook is never stored in the repo, so a pulled machine does not inherit it.
 
 Putting secrets in the repo is opt-in, and the default is off. It's your private repo and your call — but I'd leave it there.
 

@@ -32,8 +32,10 @@
  *   7. Deploy the shared instructions (R9) to Claude + Codex when meta.sharedInstructions
  *      is set: write shared/instructions.md to each sharedInstructionsTargets()
  *      destination.
- *   8. Print a re-auth reminder: secret files (.credentials.json / auth.json) were
- *      NEVER carried, so the user must re-login. Never prints any secret value.
+ *   8. Print the pull summary (written / unchanged / kept per tool, and every
+ *      secret the repo could not supply), then a re-auth reminder: secret
+ *      files (.credentials.json / auth.json) were NEVER carried, so the user
+ *      must re-login. Never prints any secret value, only key names and paths.
  *
  * SECURITY: this command never reads, prints, copies, or restores secret files —
  * those are excluded by the denylist at capture time and are simply absent from
@@ -48,6 +50,7 @@
  * delegates the real work to the adapters + core modules.
  */
 
+import { randomUUID } from "node:crypto";
 import { promises as fsp } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -82,6 +85,7 @@ import {
   cliBinaryName,
   dataDir,
   detectOS,
+  homeDir,
   toolHomeDir,
 } from "../platform/os.js";
 import {
@@ -98,9 +102,28 @@ import { commandBaseName } from "../core/externaltools/collect.js";
 import { createSanitizer } from "../core/sanitizer/index.js";
 import { createTemplater } from "../core/templater/index.js";
 import { buildVariables } from "../core/templater/variables.js";
-import { loadConfigOrDefault } from "../core/config/index.js";
-import type { RepoConfig } from "../core/config/schema.js";
-import { ensureLocalClone, pullWithAuth } from "../core/repo/index.js";
+import {
+  configExists,
+  followerConfig,
+  loadConfig,
+  loadConfigOrDefault,
+  saveConfig,
+  updateConfig,
+} from "../core/config/index.js";
+import type { ArbellaConfig, RepoConfig } from "../core/config/schema.js";
+import { ensureLocalClone, pullWithAuth, sameRepoUrl } from "../core/repo/index.js";
+import { setAutoBackup } from "../core/autobackup/index.js";
+import { uninstallHook, withoutAutobackupHook } from "../core/autobackup/hook.js";
+import {
+  formatPullSummary,
+  hydratedContent,
+  newPullSession,
+  placeFile,
+  planPlacement,
+  type PlaceCtx,
+  type PullSession,
+} from "../core/placement/index.js";
+import { loadLedger, saveLedger, type Ledger } from "../core/placement/ledger.js";
 import type { RepoAuthHooks } from "../core/repo/index.js";
 import { buildRepoAuthHooks } from "./_context.js";
 import { ensureDeps } from "./setup.js";
@@ -222,6 +245,7 @@ function buildRestoreContext(args: {
   sourceOfTruth: "local" | "repo";
   dryRun: boolean;
   os: OS;
+  pull: PullSession;
 }): RestoreContext {
   const toolHome = toolHomeDir(args.toolId);
   const repoToolDir = path.join(args.repoRoot, args.toolId);
@@ -232,6 +256,7 @@ function buildRestoreContext(args: {
     repoRoot: args.repoRoot,
     sourceOfTruth: args.sourceOfTruth,
     dryRun: args.dryRun,
+    pull: args.pull,
   };
 }
 
@@ -244,11 +269,13 @@ function buildHomeRestoreServices(args: {
   sourceOfTruth: "local" | "repo";
   dryRun: boolean;
   os: OS;
+  pull: PullSession;
 }): HomeRestoreServices {
   return {
     ...buildCoreServices("", args.os),
     sourceOfTruth: args.sourceOfTruth,
     dryRun: args.dryRun,
+    pull: args.pull,
   };
 }
 
@@ -448,7 +475,11 @@ async function readToolManifest(
   });
 }
 
-/** Assemble the full RestoreData (manifest + frozen files/symlinks) for a tool. */
+/**
+ * Assemble the full RestoreData (manifest + frozen files/symlinks) for a tool.
+ * arbella's own autobackup hook is stripped here: repos pushed by older
+ * versions still carry it, and it would make this machine auto-push.
+ */
 export async function loadRestoreData(
   repoRoot: string,
   tool: ToolId,
@@ -456,7 +487,7 @@ export async function loadRestoreData(
   const repoToolDir = path.join(repoRoot, tool);
   const manifest = await readToolManifest(repoToolDir, tool);
   const { files, symlinks } = await readToolFrozen(repoToolDir, tool);
-  return { manifest, files, symlinks };
+  return { manifest, files: files.map((f) => withoutAutobackupHook(f)), symlinks };
 }
 
 /* -------------------------------------------------------------------------- */
@@ -649,9 +680,10 @@ export function safetySourcesForTool(
  *     component below the tool home refuses the write instead of following it
  *     out of the tree), and lands via the rename-based writer so a link at the
  *     leaf is replaced rather than followed;
- *   - `sourceOfTruth: "local"` keeps an instructions file that is already here,
- *     exactly as every other restore write does. Without it the R9 step was the
- *     one place a "local wins" pull still overwrote the user's own CLAUDE.md.
+ *   - whether an existing file is replaced is the placement engine's call
+ *     (core/placement), exactly as for every other restore write. Without it
+ *     the R9 step was the one place a "local wins" pull still overwrote the
+ *     user's own CLAUDE.md.
  *   - a repo that also carries the tool's OWN `<tool>/files/<relPath>` (e.g.
  *     `claude/files/CLAUDE.md`) skips the shared copy for that target: R9 only
  *     stores the shared file when BOTH producers share it, so a per-tool copy
@@ -666,6 +698,7 @@ export async function deploySharedInstructions(
   dryRun: boolean,
   sourceOfTruth: "local" | "repo",
   l: Logger = log,
+  pull?: PullSession,
 ): Promise<void> {
   const sharedAbs = path.join(
     repoRoot,
@@ -682,6 +715,7 @@ export async function deploySharedInstructions(
 
   const inScope = new Set(toolsInScope);
   const content = await fs.read(sharedAbs);
+  const ctx: PlaceCtx = { fs, log: l, sourceOfTruth, dryRun, ...(pull ? { pull } : {}) };
 
   for (const target of sharedInstructionsTargets()) {
     if (!inScope.has(target.tool)) continue;
@@ -694,10 +728,6 @@ export async function deploySharedInstructions(
       continue;
     }
     const dest = resolved.path;
-    if (sourceOfTruth === "local" && (await fs.exists(dest))) {
-      l.debug(`restore: keep local ${dest} (sourceOfTruth=local)`);
-      continue;
-    }
     // A tool that captured its OWN instructions file this push (R9 was not
     // sharing on that machine) is by construction NEWER than a kept shared file:
     // a sharing push removes the per-tool copies, so one being present at all
@@ -711,13 +741,19 @@ export async function deploySharedInstructions(
       );
       continue;
     }
+    const req = { bucket: target.tool, dest, content };
     if (dryRun) {
-      l.step(`Would deploy shared instructions -> ${dest}`);
+      if ((await planPlacement(ctx, req)).outcome === "written") {
+        l.step(`Would deploy shared instructions -> ${dest}`);
+      }
       continue;
     }
     try {
-      await fs.writeAtomic(dest, content);
-      l.step(`Deployed shared instructions -> ${dest}`);
+      if ((await placeFile(ctx, req)) === "written") {
+        l.step(`Deployed shared instructions -> ${dest}`);
+      } else {
+        l.debug(`restore: keep local ${dest}`);
+      }
     } catch (err) {
       l.warn(
         `restore: failed to deploy shared instructions to ${dest}: ${errMsg(err)}`,
@@ -925,24 +961,10 @@ export async function installSharedExternalTools(
 }
 
 /**
- * The `<server>, <KEY>` pairs the user must re-supply after this restore.
- *
- * Taken from the MCP merge plan built during `buildPlan` — i.e. from the servers
- * that will actually be REGISTERED. A server whose local definition wins keeps
- * its real values, so naming its keys here would send the user chasing a
- * `needs env` warning the adapter never printed.
- */
-function mcpNeedsEnv(
-  prepared: readonly PreparedTool[],
-): Array<{ name: string; key: string }> {
-  return prepared.flatMap((tool) => tool.needsEnv);
-}
-
-/**
  * Claude project-scope MCP directories skipped because they do not exist on
- * this machine (Claude only; empty for every other tool). Taken from the same
- * MCP merge plan `mcpNeedsEnv` reads, so the warning below can only ever name
- * directories the merge really skipped.
+ * this machine (Claude only; empty for every other tool). Taken from the MCP
+ * merge plan, so the warning below can only ever name directories the merge
+ * really skipped.
  */
 function mcpSkippedProjectDirs(prepared: readonly PreparedTool[]): string[] {
   return prepared.flatMap((tool) => tool.skippedProjectDirs);
@@ -972,12 +994,6 @@ interface PreparedTool {
   data: RestoreData;
   actions: RestoreAction[];
   /**
-   * MCP env/header keys this tool's restore will leave redacted (Claude only;
-   * empty for every other tool). Computed with the plan so the post-restore
-   * reminder names exactly the servers the merge decided to write.
-   */
-  needsEnv: Array<{ name: string; key: string }>;
-  /**
    * Claude project-scope MCP server groups skipped because their directory
    * does not exist here (Claude only; empty for every other tool). See
    * McpMergePlan.skippedProjectDirs in src/adapters/claude/mcp.ts.
@@ -994,10 +1010,10 @@ function stripFilesPrefix(tool: ToolId, repoPath: string): string {
 
 /**
  * Synthesize a plan fragment for a tool that has no dedicated planActions export.
- * Mirrors the planner shape used by adapter restore modules:
- * one write-file/write-symlink action per frozen artifact, honoring sourceOfTruth
- * (when local is authoritative, an existing destination is kept, not overwritten,
- * so we omit the action just as the real restore would skip it).
+ * Mirrors the planner shape used by adapter restore modules: one
+ * write-file/write-symlink action per frozen artifact. A file the placement
+ * engine would not write is omitted, and a symlink kept under sourceOfTruth
+ * "local" likewise, just as the real restore skips them.
  */
 async function fallbackActions(
   ctx: RestoreContext,
@@ -1009,14 +1025,19 @@ async function fallbackActions(
   for (const file of data.files) {
     const rel = stripFilesPrefix(tool, file.repoPath);
     const dest = path.join(ctx.toolHome, ...rel.split("/"));
-    const overwrites = await ctx.fs.exists(dest);
-    if (ctx.sourceOfTruth === "local" && overwrites) continue;
+    const decision = await planPlacement(ctx, {
+      bucket: tool,
+      dest,
+      content: hydratedContent(ctx, file),
+      mode: file.mode,
+    });
+    if (decision.outcome !== "written") continue;
     out.push({
       type: "write-file",
       tool,
       targetPath: dest,
       description: `Write ${rel}`,
-      overwrites,
+      overwrites: decision.overwrites,
     });
   }
 
@@ -1051,6 +1072,7 @@ async function buildPlan(args: {
   tools: ToolId[];
   sourceOfTruth: "local" | "repo";
   os: OS;
+  pull: PullSession;
 }): Promise<{
   plan: RestorePlan;
   prepared: PreparedTool[];
@@ -1073,6 +1095,7 @@ async function buildPlan(args: {
       sourceOfTruth: args.sourceOfTruth,
       dryRun: true,
       os: args.os,
+      pull: args.pull,
     });
 
     // Prefer the tool's own planner. For tools without one, synthesize file/symlink
@@ -1083,23 +1106,16 @@ async function buildPlan(args: {
     actions.push(...toolActions);
 
     // Claude is the only tool that registers MCP servers today. The same
-    // decision function the merge applies also reports which env values it will
-    // leave redacted, and which project-scope groups it skipped because their
-    // directory does not exist here — read both here so the reminder can only
-    // ever name servers/directories the merge really decided on.
-    let needsEnv: Array<{ name: string; key: string }> = [];
-    let skippedProjectDirs: string[] = [];
-    if (id === "claude") {
-      const mcpPlan = await planMcpMerge(planCtx, data.manifest);
-      needsEnv = mcpPlan.needsEnv;
-      skippedProjectDirs = mcpPlan.skippedProjectDirs;
-    }
+    // decision function the merge applies also reports which project-scope
+    // groups it skipped because their directory does not exist here — read it
+    // here so the reminder can only ever name directories the merge skipped.
+    const skippedProjectDirs =
+      id === "claude" ? (await planMcpMerge(planCtx, data.manifest)).skippedProjectDirs : [];
     prepared.push({
       id,
       adapter: wiring.adapter,
       data,
       actions: toolActions,
-      needsEnv,
       skippedProjectDirs,
     });
 
@@ -1124,6 +1140,7 @@ async function buildPlan(args: {
         sourceOfTruth: args.sourceOfTruth,
         dryRun: true,
         os: args.os,
+        pull: args.pull,
       }),
       homeFiles,
     )),
@@ -1170,11 +1187,6 @@ export function printPlan(
   } else {
     l.step("All required CLIs already present.");
   }
-  if (meta.sharedInstructions) {
-    l.step(
-      "Shared instructions (R9) will be deployed to CLAUDE.md + AGENTS.md.",
-    );
-  }
   if (plan.skippedProjectDirs.length > 0) {
     l.warn(skippedProjectDirsWarning(plan.skippedProjectDirs));
   }
@@ -1218,8 +1230,6 @@ function countByType(actions: RestoreAction[]): Array<[string, number]> {
 function printReauthReminder(
   tools: ToolId[],
   extras: {
-    /** `<server>, <KEY>` pairs of MCP env values the restore left redacted. */
-    mcpNeedsEnv?: ReadonlyArray<{ name: string; key: string }>;
     /** External tools arbella could not install on this machine. */
     manualExternalTools?: readonly ExternalToolRef[];
     /** Claude project-scope MCP dirs skipped (see McpMergePlan.skippedProjectDirs). */
@@ -1275,13 +1285,6 @@ function printReauthReminder(
         );
         break;
     }
-  }
-  const needsEnv = extras.mcpNeedsEnv ?? [];
-  if (needsEnv.length > 0) {
-    const pairs = [...new Set(needsEnv.map((e) => `${e.name}.${e.key}`))].sort();
-    log.step(
-      `MCP env values were redacted on backup — re-supply them for: ${pairs.join(", ")}.`,
-    );
   }
   const skippedProjectDirs = extras.skippedProjectDirs ?? [];
   if (skippedProjectDirs.length > 0) {
@@ -1427,11 +1430,88 @@ export async function prepareDryRunRepo(repo: RepoConfig): Promise<DryRunRepo> {
 /* -------------------------------------------------------------------------- */
 
 /**
+ * A machine with no config that pulls a repo follows it from now on: it pulls,
+ * never pushes. Saved before planning, so even an interrupted pull leaves a
+ * machine that cannot push; a dry run only uses it in memory.
+ */
+async function adoptFollower(
+  repo: RepoConfig,
+  meta: ArbellaMeta,
+  dryRun: boolean,
+): Promise<ArbellaConfig> {
+  const config = followerConfig(
+    repo,
+    { tools: meta.tools, includeMemories: meta.options.includeMemories },
+    randomUUID(),
+  );
+  if (dryRun) {
+    log.info(`Dry run: this machine would follow ${repo.url} (pull only, never push).`);
+    return config;
+  }
+  await saveConfig(config);
+  log.info(
+    `This machine now follows ${repo.url}: it pulls, never pushes. ` +
+      "Run `arbella init` to make it a source.",
+  );
+  return config;
+}
+
+/**
+ * Re-apply the autobackup hook after the files are placed: a follower never
+ * auto-pushes (this also removes a stale hook older versions restored), and a
+ * source with autobackup on gets the hook back, since the repo no longer
+ * carries it and a written settings.json lost it.
+ */
+async function reapplyHook(config: ArbellaConfig): Promise<void> {
+  try {
+    if (config.role === "follower") await uninstallHook();
+    else if (config.autoBackup !== "off") await setAutoBackup(config.autoBackup);
+  } catch (err) {
+    log.warn(`restore: could not update the autobackup hook: ${errMsg(err)}`);
+  }
+}
+
+/**
+ * Remember what this pull placed: the ledger (file hashes, and the missing
+ * secrets of the tools in scope, replacing their previous entries), and, after
+ * a full successful pull of its own repo, the repo state this machine synced to.
+ */
+async function persistPull(args: {
+  session: PullSession;
+  scope: readonly string[];
+  config: ArbellaConfig;
+  repo: RepoConfig;
+  meta: ArbellaMeta;
+  synced: boolean;
+}): Promise<void> {
+  const { session, config, repo, meta } = args;
+  const scope = new Set(args.scope);
+  const ledger: Ledger = {
+    ...session.ledger,
+    missingSecrets: [
+      ...session.ledger.missingSecrets.filter((e) => !scope.has(e.tool)),
+      ...session.report.missingSecrets,
+    ],
+  };
+  try {
+    await saveLedger(fs, ledger);
+    if (args.synced && sameRepoUrl(config.repo.url, repo.url)) {
+      await updateConfig({ lastSyncedPush: meta.createdAt });
+    }
+  } catch (err) {
+    log.warn(`restore: could not record this pull: ${errMsg(err)}`);
+  }
+}
+
+/**
  * Apply a parsed backup repo. The outer entrypoint owns repository preparation
  * and dry-run temporary-clone cleanup; this helper owns planning and application.
+ * `repo` is the resolved repo (URL + persistent clone path), which a machine
+ * without a config adopts as a follower.
  */
 async function runFromRepo(
   repoRoot: string,
+  repo: RepoConfig,
   opts: RestoreOptions,
   os: OS,
   dryRun: boolean,
@@ -1453,8 +1533,10 @@ async function runFromRepo(
     );
   }
 
-  // ---- 3. Decide which tools to restore -----------------------------------
-  const config = await loadConfigOrDefault();
+  // ---- 3. Config (adopting a follower), then which tools to restore -------
+  const config = (await configExists())
+    ? await loadConfig()
+    : await adoptFollower(repo, meta, dryRun);
   const flagTools = parseToolsFlag(opts.tools);
   const tools = selectToolsForRestore(meta, flagTools, config.tools);
   if (tools.length === 0) {
@@ -1465,14 +1547,23 @@ async function runFromRepo(
     return;
   }
 
-  // Source-of-truth direction (R12). `--force` forces repo-wins so existing
-  // local files are overwritten even when the config says local is authoritative.
-  const sourceOfTruth: "local" | "repo" = opts.force
-    ? "repo"
-    : config.sourceOfTruth;
+  // Direction (R12). `--force`, or a source whose config says the repo wins,
+  // overwrites differing local files. A follower takes the repo's version too,
+  // except for files changed here since the last pull (the ledger decides).
+  // Neither replaces a real local value where the repo has the marker.
+  // Non-ledger state (MCP servers, symlinks) is repo-wins for a follower only
+  // once it has pulled before: the adoption pull of an arbitrary URL keeps what
+  // is already here.
+  const role = config.role;
+  const force = opts.force === true || (role === "source" && config.sourceOfTruth === "repo");
+  const ledger = await loadLedger(fs, undefined, log);
+  const ledgerHasFiles = Object.keys(ledger.files).length > 0;
+  const sourceOfTruth: "local" | "repo" =
+    force || (role === "follower" && ledgerHasFiles) ? "repo" : "local";
+  const session = newPullSession({ role, force, ledger });
   log.debug(
-    `restore: tools=[${tools.join(", ")}] sourceOfTruth=${sourceOfTruth} ` +
-      `dryRun=${dryRun}`,
+    `restore: tools=[${tools.join(", ")}] role=${role} force=${force} ` +
+      `sourceOfTruth=${sourceOfTruth} dryRun=${dryRun}`,
   );
 
   // ---- 4. Build the plan (no mutation) ------------------------------------
@@ -1481,11 +1572,16 @@ async function runFromRepo(
     tools,
     sourceOfTruth,
     os,
+    pull: session,
   });
 
   // ---- 5. Dry run: print the plan and STOP --------------------------------
   if (dryRun) {
     printPlan(plan, meta);
+    // Same placement call as step 9, so the preview cannot disagree with it.
+    if (meta.sharedInstructions) {
+      await deploySharedInstructions(repoRoot, tools, true, sourceOfTruth, log, session);
+    }
     log.info("Dry run: your setup and persistent backup clone were unchanged.");
     return;
   }
@@ -1513,72 +1609,95 @@ async function runFromRepo(
   }
 
   // ---- 8. Restore each tool -----------------------------------------------
-  for (const tool of prepared) {
-    log.info(`Restoring ${tool.id}…`);
-    const ctx = buildRestoreContext({
-      toolId: tool.id,
-      repoRoot,
-      sourceOfTruth,
-      dryRun: false,
-      os,
+  // From here on files get placed: the ledger is saved even if a later step
+  // throws or the user hits Ctrl-C, so what was placed is not orphaned. Only a
+  // full pull (every tool, nothing failed) counts as synced.
+  let failed = false;
+  let completed = false;
+  const persist = (): Promise<void> =>
+    persistPull({
+      session,
+      scope: [...tools, "home"],
+      config,
+      repo,
+      meta,
+      synced: completed && !failed && flagTools === undefined,
     });
-    try {
-      await tool.adapter.restore(ctx, tool.data);
-      log.success(`${tool.id}: restored`);
-    } catch (err) {
-      // One tool failing must not strand the others (the safety backup is the
-      // user's recovery path). Surface it and keep going.
-      log.error(`restore: ${tool.id} failed: ${errMsg(err)}`);
+  const onInterrupt = (): void => {
+    void persist().finally(() => process.exit(130));
+  };
+  process.once("SIGINT", onInterrupt);
+  let manualExternalTools: ExternalToolRef[] = [];
+  try {
+    for (const tool of prepared) {
+      log.info(`Restoring ${tool.id}…`);
+      const ctx = buildRestoreContext({
+        toolId: tool.id,
+        repoRoot,
+        sourceOfTruth,
+        dryRun: false,
+        os,
+        pull: session,
+      });
+      try {
+        await tool.adapter.restore(ctx, tool.data);
+      } catch (err) {
+        // One tool failing must not strand the others (the safety backup is the
+        // user's recovery path). Surface it and keep going.
+        failed = true;
+        log.error(`restore: ${tool.id} failed: ${errMsg(err)}`);
+      }
     }
+
+    // ---- 8b. Shared npm-globals pass (R8): install each package ONCE across all
+    //          restored tools (deduped). Runs after the adapters so any tool-CLI
+    //          install above is already on PATH. ------------------------------
+    await installSharedNpmGlobals(npmGlobals);
+
+    // ---- 8c. Shared external-tools pass (WP-C): the brew/uv/pipx binaries the
+    //          restored MCP servers and hooks invoke. Runs right after the npm
+    //          pass (same "install once across all tools" shape); anything that
+    //          cannot be installed here is reported in the reminder below. -----
+    manualExternalTools = await installSharedExternalTools(externalTools);
+
+    // ---- 8d. shared/home (WP-B): the $HOME files that live outside every tool
+    //          home — linked hook/statusline/MCP scripts, plugin companion
+    //          configs, extraPaths. Written AFTER the adapters so a script and the
+    //          config referencing it land in the same pass, each overwrite guarded
+    //          by its own safety copy (R14). --------------------------------
+    if (homeFiles.length > 0) {
+      log.info(`Restoring ${homeFiles.length} shared home file(s)…`);
+      await restoreHomeFiles(
+        buildHomeRestoreServices({ sourceOfTruth, dryRun: false, os, pull: session }),
+        homeFiles,
+        {
+          safetyDir: path.join(
+            dataDir(),
+            "safety-backups",
+            `home-${iso.replace(/[:.]/g, "-")}`,
+          ),
+        },
+      );
+    }
+
+    // ---- 9. Deploy shared instructions (R9) to both tools -------------------
+    if (meta.sharedInstructions) {
+      log.info("Deploying shared instructions to Claude + Codex (R9)…");
+      await deploySharedInstructions(repoRoot, tools, false, sourceOfTruth, log, session);
+    }
+
+    // ---- 9b. Autobackup hook, then (finally) the ledger and last synced push -
+    await reapplyHook(config);
+    completed = true;
+  } finally {
+    process.off("SIGINT", onInterrupt);
+    await persist();
   }
 
-  // ---- 8b. Shared npm-globals pass (R8): install each package ONCE across all
-  //          restored tools (deduped). Runs after the adapters so any tool-CLI
-  //          install above is already on PATH. ------------------------------
-  await installSharedNpmGlobals(npmGlobals);
-
-  // ---- 8c. Shared external-tools pass (WP-C): the brew/uv/pipx binaries the
-  //          restored MCP servers and hooks invoke. Runs right after the npm
-  //          pass (same "install once across all tools" shape); anything that
-  //          cannot be installed here is reported in the reminder below. -----
-  const manualExternalTools = await installSharedExternalTools(externalTools);
-
-  // ---- 8d. shared/home (WP-B): the $HOME files that live outside every tool
-  //          home — linked hook/statusline/MCP scripts, plugin companion
-  //          configs, extraPaths. Written AFTER the adapters so a script and the
-  //          config referencing it land in the same pass, each overwrite guarded
-  //          by its own safety copy (R14). --------------------------------
-  let homeWritten = 0;
-  if (homeFiles.length > 0) {
-    log.info(`Restoring ${homeFiles.length} shared home file(s)…`);
-    homeWritten = await restoreHomeFiles(
-      buildHomeRestoreServices({ sourceOfTruth, dryRun: false, os }),
-      homeFiles,
-      {
-        safetyDir: path.join(
-          dataDir(),
-          "safety-backups",
-          `home-${iso.replace(/[:.]/g, "-")}`,
-        ),
-      },
-    );
-  }
-
-  // ---- 9. Deploy shared instructions (R9) to both tools -------------------
-  if (meta.sharedInstructions) {
-    log.info("Deploying shared instructions to Claude + Codex (R9)…");
-    await deploySharedInstructions(repoRoot, tools, false, sourceOfTruth);
-  }
-
-  // ---- 10. Re-auth reminder ----------------------------------------------
-  if (homeFiles.length > 0) {
-    log.step(
-      `Shared home files: ${homeWritten} of ${homeFiles.length} written into your ` +
-        "home directory (the rest already existed and local is the source of truth).",
-    );
-  }
+  // ---- 10. Summary + re-auth reminder -------------------------------------
+  log.info("Pull summary:");
+  for (const line of formatPullSummary(session.report, role, homeDir())) log.step(line);
   printReauthReminder(tools, {
-    mcpNeedsEnv: mcpNeedsEnv(prepared),
     manualExternalTools,
     skippedProjectDirs: mcpSkippedProjectDirs(prepared),
   });
@@ -1628,7 +1747,7 @@ export async function run(
   }
 
   try {
-    await runFromRepo(repoRoot, opts, os, dryRun);
+    await runFromRepo(repoRoot, repo, opts, os, dryRun);
   } finally {
     if (previewRepo !== undefined) await previewRepo.cleanup();
   }
@@ -1672,7 +1791,8 @@ export function register(program: Command): void {
       )
       .option(
         "--force",
-        "Overwrite existing local files even when local is the source of truth.",
+        "Replace local files that differ from the repo, including ones changed " +
+          "here since the last pull (real local secret values are kept).",
       )
       .action(async (repoArg: string | undefined, opts: RestoreOptions) => {
         await run(repoArg, opts);

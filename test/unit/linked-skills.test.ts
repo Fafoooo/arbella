@@ -80,7 +80,7 @@ describe.each(adapters)("$id linked skills", ({ id, capture, restore }) => {
     const restored = path.join(target.toolHome, "skills", "example");
     expect((await fsp.lstat(restored)).isSymbolicLink()).toBe(true);
     expect(await fsp.readFile(path.join(restored, "SKILL.md"), "utf8")).toContain(`${target.vars.HOME}/.agents/skills/example`);
-    expect(JSON.parse(await fsp.readFile(path.join(restored, "settings.json"), "utf8")).apiKey).toBe("{{REDACTED}}");
+    expect(JSON.parse(await fsp.readFile(path.join(restored, "settings.json"), "utf8")).apiKey).toBeUndefined();
     if (process.platform !== "win32") expect((await fsp.stat(path.join(restored, "run.sh"))).mode & 0o100).toBe(0o100);
     expect(execaMock.mock.calls.some(([command]) => command === "npx")).toBe(false);
   });

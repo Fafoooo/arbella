@@ -26,6 +26,7 @@ import type {
   SourceOfTruth,
   EnvVars,
 } from "../types.js";
+import type { PullSession } from "../core/placement/index.js";
 
 /* Re-export ToolManifest so consumers can import it from the interface module
  * as the task specifies, without reaching into the schema file. */
@@ -91,6 +92,8 @@ export interface RestoreContext extends CoreServices {
   sourceOfTruth: SourceOfTruth;
   /** When true, plan + report only; perform no filesystem or install actions. */
   dryRun: boolean;
+  /** Pull session (role, force, ledger, report). Absent => legacy placement policy. */
+  pull?: PullSession;
 }
 
 /**

@@ -98,6 +98,17 @@ export function buildRestoreContext(input: RestoreContextInput): RestoreContext 
   };
 }
 
+/** True when a person can answer a prompt (stdin is a TTY). */
+export function isInteractive(): boolean {
+  return process.stdin.isTTY === true;
+}
+
+/** Ask before a risky action. Default No; cancelling counts as No. */
+export async function confirmRisky(message: string): Promise<boolean> {
+  const answer = await confirm({ message, initialValue: false });
+  return !isCancel(answer) && answer === true;
+}
+
 /* -------------------------------------------------------------------------- */
 /* Repo-auth hooks (gh/glab-first, device-flow/token fallback)                 */
 /* -------------------------------------------------------------------------- */

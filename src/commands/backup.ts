@@ -72,11 +72,17 @@ import { detectOS, toolHomeDir } from "../platform/os.js";
 import { fs } from "../utils/fs.js";
 import { log } from "../utils/log.js";
 
-import { loadConfig } from "../core/config/index.js";
-import { ensureLocalClone, commitAndPush } from "../core/repo/index.js";
+import { ensureMachineId, loadConfig, updateConfig } from "../core/config/index.js";
+import {
+  committedFiles,
+  ensureLocalClone,
+  commitAndPush,
+  syncBeforePush,
+} from "../core/repo/index.js";
 import { status as gitStatus } from "../core/repo/git.js";
 import { maybeRunBackup } from "../core/autobackup/index.js";
-import { buildRepoAuthHooks } from "./_context.js";
+import { withoutAutobackupHookInResult } from "../core/autobackup/hook.js";
+import { buildRepoAuthHooks, confirmRisky, isInteractive } from "./_context.js";
 import { ensureDeps } from "./setup.js";
 import {
   serialize,
@@ -86,6 +92,7 @@ import {
   shouldShareInstructions,
   buildSharedInstructionsFile,
   SHARED_INSTRUCTIONS_REPO_PATH,
+  type SharedInstructionsUpdate,
 } from "../core/manifest/index.js";
 import { sanitizer } from "../core/sanitizer/index.js";
 import { templater } from "../core/templater/index.js";
@@ -100,7 +107,7 @@ import {
   homeExcludeRoots,
   isSharedHomePath,
 } from "../core/homefiles/capture.js";
-import type { HomeIndexEntry } from "../core/homefiles/home-index.js";
+import type { HomeIndexEntry, HomeIndexMerge } from "../core/homefiles/home-index.js";
 import {
   EXTRA_PATHS_ORIGIN,
   HOME_INDEX_REPO_PATH,
@@ -145,6 +152,8 @@ export interface BackupOptions {
   auto?: boolean;
   /** Custom commit message (defaults to "arbella push <iso>"). */
   message?: string;
+  /** Push through the guard prompts (other machine pushed last, mass deletion). */
+  yes?: boolean;
 }
 
 /**
@@ -168,6 +177,7 @@ export function register(program: Command): void {
         "internal: run from the auto hook (throttled, quiet when skipped)",
       )
       .option("-m, --message <message>", "commit message for this push")
+      .option("-y, --yes", "push even if the guards ask first (non-interactive)")
       .action(async (opts: BackupOptions) => {
         await run(opts);
       });
@@ -378,7 +388,20 @@ export async function run(opts: BackupOptions = {}): Promise<void> {
   // Single clock read at the boundary; threaded inward.
   const nowIso = new Date().toISOString();
 
-  const config = await loadConfig();
+  let config = await loadConfig();
+
+  // --- A follower only pulls: never push, not even from the autobackup hook. --
+  // Before the throttle so a skipped hook run does not even stamp "now".
+  if (config.role === "follower" && !dryRun) {
+    if (auto) {
+      log.debug("This machine is a follower; autobackup does not push.");
+      return;
+    }
+    throw new Error(
+      "This machine is a follower: it only pulls. " +
+        "Run `arbella init` to make it a source that pushes.",
+    );
+  }
 
   // --- R4: autobackup throttle gate ---------------------------------------
   // When fired by the SessionStart hook we must stay quiet unless it is time.
@@ -439,7 +462,8 @@ export async function run(opts: BackupOptions = {}): Promise<void> {
     // cursor but passing it uniformly keeps the call site simple.
     const skipInstructions = sharing.share && (tool === "claude" || tool === "codex");
     try {
-      const result = await capture(ctx, { skipInstructions });
+      // The repo never carries arbella's own autobackup hook.
+      const result = withoutAutobackupHookInResult(await capture(ctx, { skipInstructions }));
       results.push(result);
       log.step(
         `${adapter.displayName}: ${result.files.length} file(s), ` +
@@ -484,24 +508,25 @@ export async function run(opts: BackupOptions = {}): Promise<void> {
   await ensureLocalClone(config.repo, authHooks);
   const repoRoot = config.repo.localPath;
 
+  const identity = await ensureMachineId(config);
+  config = identity.config;
+  const machineId = identity.machineId;
+
+  // Build on what the remote already has, or stop before anything is written.
+  try {
+    await syncBeforePush(config.repo, authHooks);
+  } catch (err) {
+    if (!auto) throw err;
+    log.warn(errMessage(err));
+    return;
+  }
+
   // What the repo already says about itself, read BEFORE this run overwrites it:
   // the previous tool list (a push from a machine missing a tool must not drop
   // that tool from meta.tools), the previous sharedInstructions flag, and the raw
   // bytes of the two files every push rewrites (so a no-op push can put them
   // back byte-for-byte instead of committing a pure timestamp churn).
   const previous = await readPreviousGenerated(repoRoot);
-
-  // Mirror semantics: for each tool we captured, replace its `<tool>/files`
-  // subtree wholesale so local deletions propagate to the repo. We deliberately
-  // do NOT touch subtrees for tools we did not capture this run.
-  //
-  // shared/home is a CROSS-TOOL root, so it is mirrored exactly ONCE here (not
-  // per tool) — and NOT by wiping it: a machine that lacks Codex would otherwise
-  // delete every file only the Codex capture knows about. See home-index.ts.
-  for (const result of toolResults) {
-    await replaceToolFiles(repoRoot, result);
-  }
-  await writeSharedHome(repoRoot, home.entries, home.claims, capturedTools);
 
   // Shared instructions (R9): write once when sharing, remove a stale file when
   // this run saw BOTH producers and they are no longer identical — and otherwise
@@ -513,6 +538,52 @@ export async function run(opts: BackupOptions = {}): Promise<void> {
     capturedTools,
     configuredTools: config.tools,
   });
+
+  // --- Push guards, decided BEFORE the working tree is touched so a refusal
+  //     never has to undo anything. Deletions count the tool mirrors and the
+  //     shared files this run removes. -------------------------------------------
+  const risks = pushRisks({
+    machineId,
+    lastPushMachine: previous.meta?.lastPushMachine,
+    metaCreatedAt: previous.meta?.createdAt,
+    lastSyncedPush: config.lastSyncedPush,
+    deleted: [
+      ...plannedDeletions(await committedFiles(repoRoot), toolResults, config.includeMemories),
+      ...(await plannedSharedDeletions(repoRoot, home.claims, capturedTools, sharedUpdate)),
+    ],
+  });
+  const gate = decidePushGate({
+    risks,
+    auto,
+    yes: opts.yes === true,
+    interactive: isInteractive(),
+  });
+  if (gate === "skip") {
+    log.warn(`Autobackup skipped, nothing was pushed: ${risks.join(" ")}`);
+    return;
+  }
+  if (gate === "refuse") {
+    throw new Error(
+      `Nothing was pushed. ${risks.join(" ")} Re-run with --yes to push anyway.`,
+    );
+  }
+  if (gate === "ask" && !(await confirmRisky(`${risks.join("\n")}\nPush anyway?`))) {
+    log.info("Push cancelled. Nothing was pushed.");
+    return;
+  }
+
+  // Mirror semantics: for each tool we captured, replace its `<tool>/files`
+  // subtree wholesale so local deletions propagate to the repo. We deliberately
+  // do NOT touch subtrees for tools we did not capture this run.
+  //
+  // shared/home is a CROSS-TOOL root, so it is mirrored exactly ONCE here (not
+  // per tool) — and NOT by wiping it: a machine that lacks Codex would otherwise
+  // delete every file only the Codex capture knows about. See home-index.ts.
+  for (const result of toolResults) {
+    await replaceToolFiles(repoRoot, result, config.includeMemories);
+  }
+  await writeSharedHome(repoRoot, home.entries, home.claims, capturedTools);
+
   if (sharedUpdate === "write" && sharedContent !== undefined) {
     const shared = buildSharedInstructionsFile(sharedContent);
     await writeCapturedFile(repoRoot, shared);
@@ -544,6 +615,7 @@ export async function run(opts: BackupOptions = {}): Promise<void> {
     config,
     createdAt: nowIso,
     sharedInstructions,
+    lastPushMachine: machineId,
   });
   await fs.write(repoJoin(repoRoot, "arbella.json"), serialize(meta));
 
@@ -561,6 +633,7 @@ export async function run(opts: BackupOptions = {}): Promise<void> {
     (await skipUnchangedPush({ repoRoot, changedPaths, meta, previous }))
   ) {
     log.info("Nothing changed since the last push.");
+    await recordSyncedPush(previous.meta?.createdAt);
     printSummary({
       changed: false,
       repoRoot,
@@ -581,6 +654,7 @@ export async function run(opts: BackupOptions = {}): Promise<void> {
     url: config.repo.url,
     auth: authHooks,
   });
+  if (changed) await recordSyncedPush(meta.createdAt);
 
   // --- Summary -------------------------------------------------------------
   printSummary({
@@ -734,9 +808,129 @@ export async function skipUnchangedPush(args: {
   return true;
 }
 
-/** Compare two metas ignoring the one field every push necessarily changes. */
+/**
+ * Compare two metas ignoring the fields every push necessarily changes: the
+ * timestamp and which machine pushed.
+ */
 function sameMetaIgnoringCreatedAt(a: ArbellaMeta, b: ArbellaMeta): boolean {
-  return serialize({ ...a, createdAt: "" }) === serialize({ ...b, createdAt: "" });
+  const neutral = (m: ArbellaMeta): string =>
+    serialize({ ...m, createdAt: "", lastPushMachine: undefined });
+  return neutral(a) === neutral(b);
+}
+
+/* -------------------------------------------------------------------------- */
+/* Push guards                                                                 */
+/* -------------------------------------------------------------------------- */
+
+/** A push that would delete this many files from the repo (tool roots, shared files) needs a yes. */
+export const MASS_DELETE_MIN = 25;
+/** ...and so does one that would delete this many memory files. */
+export const MEMORY_DELETE_MIN = 3;
+/** Id characters shown when naming another machine; never the whole id. */
+const MACHINE_ID_SHOWN = 8;
+/** The id comes from the repo's arbella.json; only a UUID-like one is echoed to the terminal. */
+const MACHINE_ID_SHAPE = /^[0-9a-f-]{8,64}$/i;
+
+/** Repo roots that hold memories. Only managed when `includeMemories` is on. */
+const MEMORY_ROOTS: readonly string[] = ["claude/memories", "codex/files/memories"];
+
+const isUnder = (repoPath: string, root: string): boolean =>
+  repoPath === root || repoPath.startsWith(`${root}/`);
+
+/** The data roots this run mirrors for a tool (memory roots only when managed). */
+function managedRoots(tool: ToolId, includeMemories: boolean): string[] {
+  return toolRepoDataRoots(tool).filter(
+    (root) => includeMemories || !MEMORY_ROOTS.includes(root),
+  );
+}
+
+/**
+ * Repo files that are committed under a captured tool's data roots but that this
+ * run will not write again, i.e. what the mirror would delete. Symlinks this run
+ * writes do not count; memory roots only count when memories are managed.
+ */
+export function plannedDeletions(
+  committed: readonly string[],
+  results: readonly CaptureResult[],
+  includeMemories: boolean,
+): string[] {
+  const deleted = new Set<string>();
+  for (const result of results) {
+    const roots = managedRoots(result.tool, includeMemories);
+    const written = new Set([
+      ...result.files.map((f) => f.repoPath),
+      ...result.symlinks.map((l) => l.repoPath),
+    ]);
+    for (const repoPath of committed) {
+      if (written.has(repoPath)) continue;
+      if (!roots.some((root) => isUnder(repoPath, root))) continue;
+      if (!includeMemories && MEMORY_ROOTS.some((root) => isUnder(repoPath, root))) continue;
+      deleted.add(repoPath);
+    }
+  }
+  return [...deleted];
+}
+
+/**
+ * Human-readable reasons this push should not go out unasked. Names the risk
+ * (a machine id prefix, counts), never file contents.
+ *
+ * "Another machine pushed last" needs a recorded pusher that is not this machine
+ * AND a push this machine has not seen yet (`lastSyncedPush`); a pre-1.1 repo has
+ * no pusher recorded and is never a risk.
+ */
+export function pushRisks(args: {
+  machineId: string;
+  lastPushMachine?: string;
+  metaCreatedAt?: string;
+  lastSyncedPush?: string;
+  deleted: readonly string[];
+}): string[] {
+  const { machineId, lastPushMachine, metaCreatedAt, lastSyncedPush, deleted } = args;
+  const risks: string[] = [];
+  if (
+    lastPushMachine !== undefined &&
+    lastPushMachine !== machineId &&
+    metaCreatedAt !== lastSyncedPush
+  ) {
+    const who = MACHINE_ID_SHAPE.test(lastPushMachine)
+      ? `Another machine (${lastPushMachine.slice(0, MACHINE_ID_SHOWN)})`
+      : "An unknown machine";
+    risks.push(`${who} pushed last and this machine has not pulled since.`);
+  }
+  if (deleted.length >= MASS_DELETE_MIN) {
+    risks.push(`This push would delete ${deleted.length} files from the backup repo.`);
+  }
+  const memories = deleted.filter((p) => MEMORY_ROOTS.some((root) => isUnder(p, root)));
+  if (memories.length >= MEMORY_DELETE_MIN) {
+    risks.push(`This push would delete ${memories.length} memory files from the backup repo.`);
+  }
+  return risks;
+}
+
+/**
+ * What to do with the risks: "go" (none, or `--yes`), "skip" (autobackup: stay
+ * quiet, push later), "ask" (a person is there), "refuse" (no TTY, no `--yes`).
+ */
+export function decidePushGate(args: {
+  risks: readonly string[];
+  auto: boolean;
+  yes: boolean;
+  interactive: boolean;
+}): "go" | "ask" | "skip" | "refuse" {
+  if (args.risks.length === 0 || args.yes) return "go";
+  if (args.auto) return "skip";
+  return args.interactive ? "ask" : "refuse";
+}
+
+/** Remember which arbella.json this machine has now pushed (local config only). */
+async function recordSyncedPush(createdAt: string | undefined): Promise<void> {
+  if (createdAt === undefined) return;
+  try {
+    await updateConfig({ lastSyncedPush: createdAt });
+  } catch (err) {
+    log.warn(`Could not record the push in the local config: ${errMessage(err)}`);
+  }
 }
 
 /* -------------------------------------------------------------------------- */
@@ -792,9 +986,16 @@ function toolFilesPrefix(tool: ToolId): string {
  * existing subtree) and claude under its own `claude/memories/...` root, which is
  * listed in toolRepoDataRoots below so it is mirrored like any other root.
  */
-async function replaceToolFiles(repoRoot: string, result: CaptureResult): Promise<void> {
-  for (const root of toolRepoDataRoots(result.tool)) {
-    await fs.rmrf(repoJoin(repoRoot, root));
+export async function replaceToolFiles(
+  repoRoot: string,
+  result: CaptureResult,
+  includeMemories: boolean,
+): Promise<void> {
+  // Never delete what this run does not manage: with memories off, the memory
+  // roots (also the one nested inside codex/files) stay as committed.
+  const keep = includeMemories ? [] : MEMORY_ROOTS.map((root) => repoJoin(repoRoot, root));
+  for (const root of managedRoots(result.tool, includeMemories)) {
+    await rmrfExcept(repoJoin(repoRoot, root), keep);
   }
 
   for (const file of result.files) {
@@ -811,6 +1012,19 @@ async function replaceToolFiles(repoRoot: string, result: CaptureResult): Promis
   // Per-tool reinstall manifest at `<tool>/manifest.json`.
   const manifestPath = repoJoin(repoRoot, `${result.tool}/manifest.json`);
   await fs.write(manifestPath, serialize(result.manifest));
+}
+
+/** `rmrf` a tree except the `keep` paths below it (and the dirs leading to them). */
+async function rmrfExcept(abs: string, keep: readonly string[]): Promise<void> {
+  const inside = keep.filter((k) => k === abs || k.startsWith(abs + path.sep));
+  if (inside.length === 0 || (await fs.statKind(abs)) !== "dir") {
+    await fs.rmrf(abs);
+    return;
+  }
+  if (inside.includes(abs)) return;
+  for (const name of await fs.list(abs)) {
+    await rmrfExcept(path.join(abs, name), inside);
+  }
 }
 
 /**
@@ -846,19 +1060,8 @@ export async function writeSharedHome(
   capturedTools: readonly ToolId[],
 ): Promise<void> {
   const indexPath = repoJoin(repoRoot, HOME_INDEX_REPO_PATH);
-  const merge = mergeHomeIndex(
-    parseHomeIndex(await readJsonIfExists(indexPath)),
-    claims,
-    new Set<string>([...capturedTools, EXTRA_PATHS_ORIGIN]),
-  );
-
-  const expected = new Set(merge.expected);
-  const committed = await listRepoFiles(
-    repoJoin(repoRoot, SHARED_HOME_REPO_PREFIX),
-    SHARED_HOME_REPO_PREFIX,
-  );
-  for (const repoPath of committed) {
-    if (expected.has(repoPath)) continue;
+  const { merge, stale } = await sharedHomeMirror(repoRoot, claims, capturedTools);
+  for (const repoPath of stale) {
     await fs.rmrf(repoJoin(repoRoot, repoPath));
   }
 
@@ -883,6 +1086,46 @@ export async function writeSharedHome(
       `Kept ${merge.kept.length} shared home file(s) captured by tool(s) not present here.`,
     );
   }
+}
+
+/**
+ * The shared/home mirror as writeSharedHome applies it: the merged provenance
+ * index, and the committed shared/home files no origin claims any more (the
+ * ones it deletes).
+ */
+async function sharedHomeMirror(
+  repoRoot: string,
+  claims: readonly HomeIndexEntry[],
+  capturedTools: readonly ToolId[],
+): Promise<{ merge: HomeIndexMerge; stale: string[] }> {
+  const merge = mergeHomeIndex(
+    parseHomeIndex(await readJsonIfExists(repoJoin(repoRoot, HOME_INDEX_REPO_PATH))),
+    claims,
+    new Set<string>([...capturedTools, EXTRA_PATHS_ORIGIN]),
+  );
+  const expected = new Set(merge.expected);
+  const committed = await listRepoFiles(
+    repoJoin(repoRoot, SHARED_HOME_REPO_PREFIX),
+    SHARED_HOME_REPO_PREFIX,
+  );
+  return { merge, stale: committed.filter((repoPath) => !expected.has(repoPath)) };
+}
+
+/**
+ * The shared files this push would delete from the repo: the shared/home files
+ * the mirror drops, plus shared/instructions.md when this run removes it.
+ */
+export async function plannedSharedDeletions(
+  repoRoot: string,
+  claims: readonly HomeIndexEntry[],
+  capturedTools: readonly ToolId[],
+  sharedUpdate: SharedInstructionsUpdate,
+): Promise<string[]> {
+  const { stale } = await sharedHomeMirror(repoRoot, claims, capturedTools);
+  const instructions =
+    sharedUpdate === "remove" &&
+    (await fs.exists(repoJoin(repoRoot, SHARED_INSTRUCTIONS_REPO_PATH)));
+  return instructions ? [...stale, SHARED_INSTRUCTIONS_REPO_PATH] : stale;
 }
 
 /** Every repo-relative POSIX file path under `absRoot`. [] when it is absent. */

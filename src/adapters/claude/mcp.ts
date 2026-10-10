@@ -28,9 +28,11 @@
  *
  * The restore side has exactly ONE decision function, `planMcpMerge`: it reads
  * the target's current ~/.claude.json and reports which servers WOULD be written
- * (plus the env keys those servers still need). `--dry-run` prints its actions,
- * the post-restore reminder reads its `needsEnv`, and `restoreMcpServers` applies
- * its decisions verbatim — so the three can never disagree about what a pull does.
+ * (plus the redacted keys those servers still miss). `--dry-run` prints its
+ * actions and `restoreMcpServers` applies its decisions verbatim, recording the
+ * missing keys in the pull report — so the two can never disagree. A redacted
+ * value is never written: a real local value survives, otherwise the key is left
+ * out (core/placement/redacted.ts).
  *
  * No direct node:fs, no clock. templateDeep/hydrateDef and the merge appliers are
  * pure.
@@ -41,7 +43,8 @@ import path from "node:path";
 import type { CaptureContext, RestoreContext } from "../adapter.interface.js";
 import type { RestoreAction, SecretRef, ToolManifest } from "../../types.js";
 
-import { REDACTED } from "../../core/sanitizer/patterns.js";
+import { hasMarker, mergeRedacted } from "../../core/placement/redacted.js";
+import { noteKeptForSecrets, noteMissingSecrets } from "../../core/placement/index.js";
 import { isPlainObject, isUnsafeObjectKey } from "../../utils/object.js";
 import type { CommandRef } from "../../core/homefiles/scan.js";
 import { collectCommandRefs } from "../../core/homefiles/scan.js";
@@ -155,30 +158,6 @@ function sortedByKey<V>(obj: Record<string, V>): Record<string, V> {
   const out: Record<string, V> = {};
   for (const key of Object.keys(obj).sort()) out[key] = obj[key]!;
   return out;
-}
-
-/**
- * Collect every env/header KEY whose value is the redaction marker, i.e. the
- * values the user has to re-supply after a restore. Recurses so a nested
- * `env` under a transport block is found too. Pure — module-private: the plan is
- * the only thing outside this file that needs to know about redacted env keys,
- * and it reports them for the servers it will actually write.
- */
-function redactedEnvKeys(def: unknown): string[] {
-  const out: string[] = [];
-  const walk = (node: unknown): void => {
-    if (Array.isArray(node)) {
-      for (const el of node) walk(el);
-      return;
-    }
-    if (!isPlainObject(node)) return;
-    for (const [key, value] of Object.entries(node)) {
-      if (value === REDACTED) out.push(key);
-      else walk(value);
-    }
-  };
-  walk(def);
-  return [...new Set(out)].sort();
 }
 
 /* -------------------------------------------------------------------------- */
@@ -323,7 +302,38 @@ function hydrateProjectPath(ctx: RestoreContext, projectPath: string): string {
 /** One server the merge would write, already hydrated for this machine. */
 interface PlannedServer {
   name: string;
+  /** The repo definition with redacted values merged with (or omitted against) the local one. */
   def: Record<string, unknown>;
+  /** ~/.claude.json key paths of the redacted values the merge had to omit. */
+  missing: string[][];
+  /**
+   * Anything else in the server definition changed in the repo while a real local
+   * value sits where it has the marker: the server is not written and the local definition stays.
+   */
+  unsafe: boolean;
+}
+
+/**
+ * Plan one server: hydrate the repo definition, then keep a real local value
+ * wherever the repo carries a redaction marker (the key is omitted otherwise).
+ * `at` is the server's key path in ~/.claude.json.
+ */
+function plannedServer(
+  ctx: RestoreContext,
+  name: string,
+  repoDef: Record<string, unknown>,
+  localDef: unknown,
+  at: string[],
+): PlannedServer {
+  const { value, missing, unsafe } = mergeRedacted(hydrateDef(ctx, repoDef), localDef, {
+    rootIsEntry: true,
+  });
+  return {
+    name,
+    def: value as Record<string, unknown>,
+    missing: missing.map((p) => [...at, ...p]),
+    unsafe: unsafe.length > 0,
+  };
 }
 
 /** The servers a merge would write into one project scope. */
@@ -369,21 +379,23 @@ export function findProjectKey(
 /**
  * The single decision the restore and its dry run share.
  *
- * `actions` and `needsEnv` describe ONLY what would actually be written; the
+ * `actions` and `missing` describe ONLY what would actually be written; the
  * remaining fields carry the decision itself so {@link restoreMcpServers} can
  * apply it without re-deciding anything.
  */
 export interface McpMergePlan {
   /** One `register-mcp-server` action per server that WOULD be registered. */
   actions: RestoreAction[];
-  /** `<server>.<KEY>` pairs the user must re-supply, for the servers above only. */
-  needsEnv: Array<{ name: string; key: string }>;
+  /** ~/.claude.json key paths of redacted values left out, for the servers above only. */
+  missing: string[][];
   /** The parsed ~/.claude.json (empty object when absent or unparseable). */
   existing: Record<string, unknown>;
   /** True when the file is already on disk (decides whether a mode is passed). */
   existed: boolean;
   /** True when the file exists but is not valid JSON: the merge must refuse. */
   invalid: boolean;
+  /** Pull-summary entries for servers kept local because their endpoint changed next to a secret. */
+  keptForSecrets: string[];
   /** User-scope servers to write, name-sorted. */
   userServers: PlannedServer[];
   /** Project-scope servers to write, grouped by hydrated project dir. */
@@ -405,10 +417,11 @@ function emptyMergePlan(
 ): McpMergePlan {
   return {
     actions: [],
-    needsEnv: [],
+    missing: [],
     existing: {},
     existed: false,
     invalid: false,
+    keptForSecrets: [],
     userServers: [],
     projectServers: [],
     skippedProjectDirs: [],
@@ -438,9 +451,17 @@ async function readGlobalState(
   }
 }
 
-/** True when sourceOfTruth leaves an already-registered server alone. */
+/**
+ * True when sourceOfTruth leaves an already-registered server alone. A local
+ * definition holding the marker was broken by an older pull and is replaced.
+ */
 function keepsLocal(ctx: RestoreContext, target: unknown, name: string): boolean {
-  return ctx.sourceOfTruth === "local" && isPlainObject(target) && name in target;
+  return (
+    ctx.sourceOfTruth === "local" &&
+    isPlainObject(target) &&
+    name in target &&
+    !hasMarker(target[name])
+  );
 }
 
 /** The user-scope servers the merge would write, name-sorted. */
@@ -459,7 +480,10 @@ function planUserScope(
       ctx.log.debug(`claude: keep local MCP server ${name} (user scope, sourceOfTruth=local)`);
       continue;
     }
-    planned.push({ name, def: hydrateDef(ctx, manifest.mcpServers[name]!) });
+    const local = isPlainObject(existing.mcpServers) ? existing.mcpServers[name] : undefined;
+    planned.push(
+      plannedServer(ctx, name, manifest.mcpServers[name]!, local, ["mcpServers", name]),
+    );
   }
   return planned;
 }
@@ -512,7 +536,10 @@ async function planProjectScope(
         ctx.log.debug(`claude: keep local MCP server ${name} (${key}, sourceOfTruth=local)`);
         continue;
       }
-      servers.push({ name, def: hydrateDef(ctx, entry.servers[name]!) });
+      const local = isPlainObject(localServers) ? localServers[name] : undefined;
+      servers.push(
+        plannedServer(ctx, name, entry.servers[name]!, local, ["projects", key, "mcpServers", name]),
+      );
     }
     if (servers.length > 0) planned.push({ dir: key, servers });
   }
@@ -522,14 +549,13 @@ async function planProjectScope(
 
 /**
  * Decide the whole MCP merge WITHOUT touching anything: which servers would be
- * registered, and which of their env values the user has to re-supply.
+ * registered, and which of their redacted values had to be left out.
  *
- * This is the ONE place those rules live. `--dry-run` prints `plan.actions` and
- * the post-restore reminder reads `plan.needsEnv`, while the real merge applies
- * `plan.userServers` / `plan.projectServers` — so the plan cannot promise a
- * registration the merge then skips (it used to: the plan listed every server in
- * the manifest while the merge kept the local one whenever sourceOfTruth said so,
- * and the reminder pointed at "needs env" warnings that were never printed).
+ * This is the ONE place those rules live. `--dry-run` prints `plan.actions`,
+ * while the real merge applies `plan.userServers` / `plan.projectServers` and
+ * reports `plan.missing` — so the plan cannot promise a registration the merge
+ * then skips (it used to: the plan listed every server in the manifest while the
+ * merge kept the local one whenever sourceOfTruth said so).
  */
 export async function planMcpMerge(
   ctx: RestoreContext,
@@ -556,12 +582,23 @@ export async function planMcpMerge(
     return emptyMergePlan({ existing: obj, existed, invalid });
   }
 
-  const userServers = planUserScope(ctx, manifest, obj);
-  const { planned: projectServers, skippedDirs: skippedProjectDirs } = await planProjectScope(
+  const allUser = planUserScope(ctx, manifest, obj);
+  const { planned: allProject, skippedDirs: skippedProjectDirs } = await planProjectScope(
     ctx,
     manifest,
     obj,
   );
+  // An unsafe server is never written: the local definition stays.
+  const userServers = allUser.filter((s) => !s.unsafe);
+  const projectServers = allProject
+    .map((p) => ({ ...p, servers: p.servers.filter((s) => !s.unsafe) }))
+    .filter((p) => p.servers.length > 0);
+  const keptForSecrets = [
+    ...allUser.filter((s) => s.unsafe).map((s) => `~/.claude.json (mcp ${s.name})`),
+    ...allProject.flatMap((p) =>
+      p.servers.filter((s) => s.unsafe).map((s) => `~/.claude.json (mcp ${s.name}, project ${p.dir})`),
+    ),
+  ];
 
   const actions: RestoreAction[] = [
     ...userServers.map((s) => ({
@@ -584,21 +621,19 @@ export async function planMcpMerge(
   ];
 
   // Only servers that WOULD be written are reported: a server kept because the
-  // local copy won already holds its real values, and telling the user to
-  // re-supply them would be a lie.
-  const needsEnv: Array<{ name: string; key: string }> = [];
-  const note = ({ name, def }: PlannedServer): void => {
-    for (const key of redactedEnvKeys(def)) needsEnv.push({ name, key });
-  };
-  for (const server of userServers) note(server);
-  for (const project of projectServers) for (const server of project.servers) note(server);
+  // local copy won already holds its real values.
+  const missing = [
+    ...userServers.flatMap((s) => s.missing),
+    ...projectServers.flatMap((p) => p.servers.flatMap((s) => s.missing)),
+  ];
 
   return {
     actions,
-    needsEnv,
+    missing,
     existing: obj,
     existed,
     invalid,
+    keptForSecrets,
     userServers,
     projectServers,
     skippedProjectDirs,
@@ -648,8 +683,12 @@ function mergeProjectScope(
  *   - sourceOfTruth "local" keeps an already-registered server; "repo" (or
  *     --force) overwrites it;
  *   - project-scope entries apply only when the project dir exists here;
- *   - every value that was redacted on backup produces one warn line so the user
- *     knows exactly which env keys to re-supply.
+ *   - a server whose definition changed in the repo (anything besides the marker
+ *     values) while the local one holds a real value where the repo has the marker is NOT written (the
+ *     secret must not reach a new endpoint); it is listed under keptForSecrets;
+ *   - a redacted value never lands in the file: a real local value survives,
+ *     otherwise the key is left out and recorded as a missing secret for the
+ *     pull summary.
  */
 export async function restoreMcpServers(
   ctx: RestoreContext,
@@ -672,6 +711,8 @@ export async function restoreMcpServers(
     );
     return;
   }
+
+  noteKeptForSecrets(ctx, plan.keptForSecrets);
 
   const written =
     plan.userServers.length +
@@ -704,9 +745,8 @@ export async function restoreMcpServers(
       (plan.existed ? "" : " (created, mode 0600)"),
   );
 
-  for (const { name, key } of plan.needsEnv) {
-    ctx.log.warn(
-      `claude: MCP server ${name} needs env ${key} re-supplied (redacted on backup)`,
-    );
-  }
+  noteMissingSecrets(
+    ctx,
+    plan.missing.map((keyPath) => ({ tool: "claude", file: globalState, keyPath })),
+  );
 }

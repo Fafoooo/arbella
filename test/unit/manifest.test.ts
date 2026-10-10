@@ -217,3 +217,38 @@ describe("manifest: R9 shared instructions decision", () => {
     expect(targets).toContainEqual({ tool: "codex", relPath: "AGENTS.md" });
   });
 });
+
+describe("manifest: lastPushMachine", () => {
+  const base = {
+    arbellaVersion: "1.1.0",
+    tools: ["claude" as const],
+    createdAt: "2026-05-30T00:00:00.000Z",
+    sharedInstructions: false,
+  };
+  const cfg = {
+    repo: { provider: "generic", url: "u", localPath: "/p" },
+    role: "source",
+    sourceOfTruth: "local",
+    autoBackup: "off",
+    includeSecrets: false,
+    includeMemories: false,
+    tools: ["claude"],
+    extraPaths: [],
+  } as ArbellaConfig;
+
+  it("meta without lastPushMachine parses", () => {
+    const meta = buildArbellaMeta({ ...base, config: cfg });
+    expect("lastPushMachine" in meta).toBe(false);
+    expect(parseMeta(JSON.parse(serialize(meta)))).toEqual(meta);
+  });
+
+  it("buildArbellaMeta stamps lastPushMachine", () => {
+    const meta = buildArbellaMeta({ ...base, config: cfg, lastPushMachine: "m-1" });
+    expect(meta.lastPushMachine).toBe("m-1");
+    expect(parseMeta(JSON.parse(serialize(meta))).lastPushMachine).toBe("m-1");
+  });
+
+  it("schemaVersion still 1", () => {
+    expect(MANIFEST_SCHEMA_VERSION).toBe(1);
+  });
+});

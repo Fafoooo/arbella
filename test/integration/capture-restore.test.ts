@@ -1012,8 +1012,8 @@ describe("restore: files reappear correctly in a fresh $HOME", () => {
     expect(content).not.toContain("{{TOOL_HOME}}");
     expect(content).toContain(`${dstHome}/.claude/statusline/run.sh`); // was {{TOOL_HOME}}
     expect(content).toContain(`${dstHome}/.agents/skills`); // was {{HOME}}
-    // ...and the redacted marker survived (the secret was never restored as-is).
-    expect(content).toContain("{{REDACTED}}");
+    // ...and the redacted key is omitted, never written as a live marker.
+    expect(content).not.toContain("{{REDACTED}}");
     expect(content).not.toContain(SETTINGS_API_KEY);
   });
 
@@ -1026,14 +1026,14 @@ describe("restore: files reappear correctly in a fresh $HOME", () => {
     expect(content).not.toContain("{{TOOL_HOME}}");
   });
 
-  itPosixHost("re-creates config.toml with placeholders expanded and the secret still redacted", async () => {
+  itPosixHost("re-creates config.toml with placeholders expanded and the redacted key omitted", async () => {
     const abs = under(path.join(dstHome, ".codex"), "config.toml");
     const content = await fsp.readFile(abs, "utf8");
     expect(content).not.toContain("{{HOME}}");
     expect(content).not.toContain("{{TOOL_HOME}}");
     expect(content).toContain(`${dstHome}/.codex/mcp/search.js`); // was {{TOOL_HOME}}
     expect(content).toContain(`${dstHome}/.agents/notify.sh`); // was {{HOME}}
-    expect(content).toContain("{{REDACTED}}");
+    expect(content).not.toContain("{{REDACTED}}");
     expect(content).not.toContain(CONFIG_MCP_SECRET);
   });
 
@@ -1053,7 +1053,7 @@ describe("restore: files reappear correctly in a fresh $HOME", () => {
 	  itPosixHost("restores Cursor tool-home and app User files to the correct locations", async () => {
 	    const mcp = await fsp.readFile(under(path.join(dstHome, ".cursor"), "mcp.json"), "utf8");
 	    expect(mcp).toContain(`${dstHome}/.cursor/mcp/figma.js`);
-	    expect(mcp).toContain("{{REDACTED}}");
+	    expect(mcp).not.toContain("{{REDACTED}}");
 	    expect(mcp).not.toContain(CURSOR_MCP_SECRET);
 
 	    const settings = await fsp.readFile(
@@ -1128,7 +1128,8 @@ describe("restore: files reappear correctly in a fresh $HOME", () => {
     // ONLY the keys arbella owns exist — nothing was invented from the source file.
     expect(Object.keys(obj).sort()).toEqual(["mcpServers", "projects"]);
     expect(obj.mcpServers.serena.command).toBe(`${dstHome}/.local/bin/serena-mcp-start`);
-    expect(obj.mcpServers.serena.env.SERENA_TOKEN).toBe("{{REDACTED}}");
+    // A redacted value never lands in ~/.claude.json: with no local value the key is left out.
+    expect(obj.mcpServers.serena.env.SERENA_TOKEN).toBeUndefined();
     // The project dir exists in the fresh home only because the fixture created it
     // there too; the entry is keyed by THIS machine's absolute path.
     const projectDir = path.join(dstHome, "programming", "arbella");
@@ -1137,6 +1138,7 @@ describe("restore: files reappear correctly in a fresh $HOME", () => {
     const blob = await fsp.readFile(globalState, "utf8");
     expect(blob).not.toContain(GLOBAL_STATE_OAUTH_TOKEN);
     expect(blob).not.toContain(GLOBAL_MCP_ENV_SECRET);
+    expect(blob).not.toContain("{{REDACTED}}");
   });
 
   itPosixHost("writes the shared/home files back into the fresh $HOME (WP-B)", async () => {
@@ -1159,7 +1161,7 @@ describe("restore: files reappear correctly in a fresh $HOME", () => {
       path.join(dstHome, ".claude-mem", "settings.json"),
       "utf8",
     );
-    expect(JSON.parse(companion).ANTHROPIC_API_KEY).toBe("{{REDACTED}}");
+    expect(JSON.parse(companion).ANTHROPIC_API_KEY).toBeUndefined();
     expect(companion).not.toContain(CLAUDE_MEM_API_KEY);
 
     const notes = await fsp.readFile(
