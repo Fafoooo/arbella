@@ -205,7 +205,10 @@ describe("placeFile", () => {
     await fsp.mkdir(dest);
     const repo = { bucket: "t", dest, content: "x" };
     expect((await planPlacement(ctxOf(session("source")), repo)).outcome).toBe("kept");
-    expect((await planPlacement(ctxOf(session("source", true)), repo)).outcome).toBe("written");
+    const forced = await planPlacement(ctxOf(session("source", true)), repo);
+    expect(forced.outcome).toBe("written");
+    // Still an overwrite: callers gate their safety copy on this.
+    expect(forced.overwrites).toBe(true);
   });
 
   it("recordExternalWrite and noteMissingSecrets update the session", () => {

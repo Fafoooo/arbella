@@ -31,6 +31,7 @@ import type {
 
 import { denylistFor, matchesDeny } from "../../core/sanitizer/denylist.js";
 import { emptyManifest } from "../../core/manifest/index.js";
+import { hydratedContent, placeFile, planPlacement } from "../../core/placement/index.js";
 import { normalizeCapturedSymlinkTarget } from "../../utils/symlink.js";
 import { binaryScanViews, decodeForCapture } from "../../utils/capture-bytes.js";
 import { resolveContainedTarget } from "../../utils/safe-path.js";
@@ -262,8 +263,8 @@ async function destFor(
 
 /**
  * Build the restore actions WITHOUT executing them (for --dry-run reporting).
- * Honors sourceOfTruth: when local is authoritative an existing destination is
- * kept (the action is omitted) just as the real restore would skip it.
+ * A file the placement engine would not write is omitted, and a symlink kept
+ * under sourceOfTruth "local" likewise, just as the real restore skips them.
  */
 export async function planConfigDirActions(
   ctx: RestoreContext,
@@ -276,14 +277,19 @@ export async function planConfigDirActions(
     const resolved = await destFor(ctx, spec.tool, file.repoPath);
     if (resolved === undefined || !resolved.target.ok) continue;
     const dest = resolved.target.path;
-    const overwrites = await ctx.fs.exists(dest);
-    if (ctx.sourceOfTruth === "local" && overwrites) continue;
+    const decision = await planPlacement(ctx, {
+      bucket: spec.tool,
+      dest,
+      content: hydratedContent(ctx, file),
+      mode: file.mode,
+    });
+    if (decision.outcome !== "written") continue;
     actions.push({
       type: "write-file",
       tool: spec.tool,
       targetPath: dest,
       description: `Write ${resolved.rel}`,
-      overwrites,
+      overwrites: decision.overwrites,
     });
   }
 
@@ -321,19 +327,16 @@ async function writeRestoredFile(
     return;
   }
   const dest = resolved.target.path;
-  if (ctx.sourceOfTruth === "local" && (await ctx.fs.exists(dest))) {
-    ctx.log.debug(`${tool}: keep local ${file.repoPath} (sourceOfTruth=local)`);
-    return;
-  }
-  // Rename-based writers: the containment check and the write cannot be one
-  // operation, and a plain write follows a link that appears at the leaf in the
-  // gap. `rename` replaces that entry instead.
-  if (file.binary) {
-    await ctx.fs.writeBytesAtomic(dest, Buffer.from(file.content, "base64"), file.mode);
-    return;
-  }
-  const expanded = ctx.templater.fromTemplate(file.content, ctx.vars);
-  await ctx.fs.writeAtomic(dest, expanded, file.mode);
+  // Rename-based writers (placement's default): the containment check and the
+  // write cannot be one operation, and a plain write follows a link that
+  // appears at the leaf in the gap. `rename` replaces that entry instead.
+  const outcome = await placeFile(ctx, {
+    bucket: tool,
+    dest,
+    content: hydratedContent(ctx, file),
+    mode: file.mode,
+  });
+  if (outcome === "kept") ctx.log.debug(`${tool}: keep local ${file.repoPath}`);
 }
 
 /** Recreate one captured symlink under the target config home. */

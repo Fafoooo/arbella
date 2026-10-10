@@ -156,9 +156,10 @@ describe("claude restore: enabledPlugins honors sourceOfTruth", () => {
     await fsp.writeFile(settings, JSON.stringify({ enabledPlugins: { "a@m": false } }, null, 2));
 
     const ctx = claudeCtx(toolHome, home, "repo");
+    // The overlay rides on the settings.json the file pass writes.
     const data: RestoreData = {
       manifest: manifestWithEnabled({ "a@m": true }),
-      files: [],
+      files: [{ repoPath: `${REPO_PREFIX}/settings.json`, content: "{}\n" }],
       symlinks: [],
     };
 
@@ -193,7 +194,8 @@ describe("claude restore: enabledPlugins honors sourceOfTruth", () => {
     expect(await fsp.readlink(settings)).toBe(target);
     if (dangling) expect(await realFs.exists(target)).toBe(false);
     else expect(await fsp.readFile(target, "utf8")).toBe(original);
-    expect(lines.some((line) => line.includes("refusing to merge enabledPlugins"))).toBe(true);
+    // The file pass refuses the link, so the overlay (gated on that write) never runs.
+    expect(lines.some((line) => line.includes("refusing to write settings.json"))).toBe(true);
     expect(actions.filter((a) => a.type === "enable-plugin")).toEqual([]);
   });
 

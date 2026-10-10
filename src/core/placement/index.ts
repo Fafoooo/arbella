@@ -4,7 +4,7 @@
  * disagree with the real pull. Reports key names and paths only, never values.
  */
 import type { CoreServices } from "../../adapters/adapter.interface.js";
-import type { SourceOfTruth } from "../../types.js";
+import type { CapturedFile, SourceOfTruth } from "../../types.js";
 import { REDACTED } from "../sanitizer/patterns.js";
 import { sha256, type Ledger, type MissingSecret } from "./ledger.js";
 import {
@@ -149,7 +149,7 @@ export async function planPlacement(ctx: PlaceCtx, req: PlaceRequest): Promise<P
     : nextBytes.includes(REDACTED);
   return {
     outcome,
-    overwrites: local !== undefined && outcome === "written",
+    overwrites: (local !== undefined || unreadable) && outcome === "written",
     bytes: next,
     missing: outcome === "written" ? missing : [],
     recordHash: outcome === "written" ? hashOf(nextBytes) : plainIdentical && local ? hashOf(local) : undefined,
@@ -191,6 +191,14 @@ async function writeBytes(ctx: PlaceCtx, req: PlaceRequest, bytes: string | Buff
 
 export async function placeFile(ctx: PlaceCtx, req: PlaceRequest): Promise<PlaceOutcome> {
   return applyPlacement(ctx, req, await planPlacement(ctx, req));
+}
+
+/** A captured file as placement compares and writes it: {{TOKENS}} expanded, binary decoded. */
+export function hydratedContent(
+  ctx: Pick<CoreServices, "templater" | "vars">,
+  file: CapturedFile,
+): string | Buffer {
+  return file.binary ? Buffer.from(file.content, "base64") : ctx.templater.fromTemplate(file.content, ctx.vars);
 }
 
 /** For writes made outside placeFile (enabledPlugins overlay): keep the ledger hash current. */

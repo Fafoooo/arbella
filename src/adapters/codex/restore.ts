@@ -21,13 +21,20 @@
  * (fromTemplate) so {{TOKENS}} become this machine's paths; config.toml is
  * additionally rehydrated (same fromTemplate, applied through configToml.ts for
  * clarity/symmetry). Binary files are decoded from base64. Modes are restored.
- * sourceOfTruth governs whether existing files are overwritten.
+ * Whether an existing file is replaced is the placement engine's call
+ * (core/placement); symlinks still follow sourceOfTruth.
  */
 
 import { execa } from "execa";
 
 import type { RestoreContext, RestoreData } from "../adapter.interface.js";
 import type { CapturedFile, MarketplaceEntry, PluginEntry, RestoreAction } from "../../types.js";
+import {
+  hydratedContent,
+  placeFile,
+  planPlacement,
+  type PlaceRequest,
+} from "../../core/placement/index.js";
 import { which } from "../../platform/install.js";
 import { resolveContainedTarget } from "../../utils/safe-path.js";
 import type { ContainedTarget, ContainedTargetOptions } from "../../utils/safe-path.js";
@@ -70,6 +77,27 @@ function isConfigToml(rel: string): boolean {
 }
 
 /**
+ * The placement request for a checked target; plan and write share it. Text is
+ * de-templated ({{TOKENS}} -> this machine's paths); config.toml goes through
+ * the dedicated rehydrate helper for symmetry with capture (same transform).
+ * Writes are rename-based: the containment check and the write cannot be one
+ * operation, and a plain write FOLLOWS a link that appears at the leaf in the
+ * gap. `rename` replaces the entry instead.
+ */
+function placeRequest(
+  ctx: RestoreContext,
+  rel: string,
+  targetPath: string,
+  file: CapturedFile,
+): PlaceRequest {
+  const content =
+    !file.binary && isConfigToml(rel)
+      ? rehydrateConfigToml(file.content, ctx.templater, ctx.vars)
+      : hydratedContent(ctx, file);
+  return { bucket: "codex", dest: targetPath, content, mode: file.mode };
+}
+
+/**
  * Build the plan fragment (actions) without executing. Used by the restore
  * command for --dry-run and to size the safety backup.
  */
@@ -81,20 +109,20 @@ export async function planActions(
   const overwriteAllowed = ctx.sourceOfTruth === "repo";
 
   // Frozen files. A target the writer would refuse (traversal, symlinked
-  // component) or keep (local wins) is omitted, so --dry-run lists exactly the
-  // writes restore() will make.
+  // component) or the placement engine would not write is omitted, so
+  // --dry-run lists exactly the writes restore() will make.
   for (const file of data.files) {
     const resolved = await targetFor(ctx, file.repoPath);
     if (resolved === null || !resolved.target.ok) continue;
     const targetPath = resolved.target.path;
-    const exists = await ctx.fs.exists(targetPath);
-    if (!overwriteAllowed && exists) continue;
+    const decision = await planPlacement(ctx, placeRequest(ctx, resolved.rel, targetPath, file));
+    if (decision.outcome !== "written") continue;
     actions.push({
       type: "write-file",
       tool: "codex",
       targetPath,
       description: `Write ${resolved.rel}${file.binary ? " (binary)" : ""}`,
-      overwrites: exists && overwriteAllowed,
+      overwrites: decision.overwrites,
     });
   }
 
@@ -189,7 +217,7 @@ export async function restore(ctx: RestoreContext, data: RestoreData): Promise<v
 
   // 1) Write frozen files (config.toml rehydrated; modes restored).
   for (const file of data.files) {
-    await writeCapturedFile(ctx, file, overwriteAllowed);
+    await writeCapturedFile(ctx, file);
   }
 
   // 2) Recreate symlinks.
@@ -230,11 +258,10 @@ export async function restore(ctx: RestoreContext, data: RestoreData): Promise<v
   // claude adapter). This is the fix for the codex-only-restore gap.
 }
 
-/** Write a single CapturedFile onto the target, honoring overwrite policy + mode. */
+/** Place a single CapturedFile onto the target through the placement engine. */
 async function writeCapturedFile(
   ctx: RestoreContext,
   file: CapturedFile,
-  overwriteAllowed: boolean,
 ): Promise<void> {
   const resolved = await targetFor(ctx, file.repoPath);
   if (resolved === null) return;
@@ -243,29 +270,8 @@ async function writeCapturedFile(
     return;
   }
   const { rel, target } = resolved;
-  const targetPath = target.path;
-
-  if (!overwriteAllowed && (await ctx.fs.exists(targetPath))) {
-    ctx.log.debug(`codex: skip existing ${rel} (sourceOfTruth=local)`);
-    return;
-  }
-
-  // Rename-based writers: the containment check above and the write cannot be
-  // one operation, and a plain write FOLLOWS a link that appears at the leaf in
-  // the gap. `rename` replaces the entry instead.
-  if (file.binary) {
-    const bytes = Buffer.from(file.content, "base64");
-    await ctx.fs.writeBytesAtomic(targetPath, bytes, file.mode);
-    return;
-  }
-
-  // Text: expand {{TOKENS}} back to this machine's paths. config.toml goes through
-  // the dedicated rehydrate helper for symmetry with capture (same transform).
-  const content = isConfigToml(rel)
-    ? rehydrateConfigToml(file.content, ctx.templater, ctx.vars)
-    : ctx.templater.fromTemplate(file.content, ctx.vars);
-
-  await ctx.fs.writeAtomic(targetPath, content, file.mode);
+  const outcome = await placeFile(ctx, placeRequest(ctx, rel, target.path, file));
+  if (outcome === "kept") ctx.log.debug(`codex: keep existing ${rel}`);
 }
 
 /**

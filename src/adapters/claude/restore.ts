@@ -25,12 +25,12 @@
  *   - manifest.mcpServers / projectMcpServers are merged key-wise into
  *     ~/.claude.json (mcp.ts) after the files are written and before plugins.
  *
- * sourceOfTruth (R12): "repo" => overwrite existing local files; "local" =>
- * never clobber a file that already exists locally (skip + debug). That covers
- * the enabledPlugins overlay too: when local wins and settings.json was ALREADY
- * here before the pull, the overlay is skipped — re-enabling the repo's plugins
- * in a settings.json the file pass deliberately kept would be the same clobber
- * by another route. All install steps are guarded by `which("claude")` / the npm
+ * Whether a file replaces what is on disk is the placement engine's call
+ * (core/placement): sourceOfTruth / the pull session, marker repair, and real
+ * local secret values. The enabledPlugins overlay follows it: it runs only when
+ * settings.json was WRITTEN in this pass — re-enabling the repo's plugins in a
+ * settings.json the file pass deliberately kept would be the same clobber by
+ * another route. All install steps are guarded by `which("claude")` / the npm
  * helper and degrade to a warning when the CLI is missing, rather than throwing.
  *
  * Symlink safety (claude/files/…): a "repo" pull writes THROUGH any existing
@@ -57,6 +57,14 @@ import { execa } from "execa";
 
 import type { RestoreContext, RestoreData } from "../adapter.interface.js";
 import type { RestoreAction, CapturedFile } from "../../types.js";
+import {
+  hydratedContent,
+  placeFile,
+  planPlacement,
+  recordExternalWrite,
+  type PlaceOutcome,
+  type PlaceRequest,
+} from "../../core/placement/index.js";
 
 import { cliBinaryName } from "../../platform/os.js";
 import { which } from "../../platform/install.js";
@@ -77,6 +85,7 @@ import { MEMORIES_REPO_PREFIX, memoryTargetPath, slugifyPath } from "./memories.
 
 /** The settings.json Claude reads, relative to the tool home (POSIX). */
 const SETTINGS_REL = "settings.json";
+const SETTINGS_REPO_PATH = `${REPO_PREFIX}/${SETTINGS_REL}`;
 
 /** Strip the "claude/files/" repo prefix; returns the tool-home-relative POSIX path. */
 function stripPrefix(repoPath: string): string {
@@ -211,20 +220,43 @@ async function runRestoreCommand(command: string, args: string[]): Promise<void>
 }
 
 /**
- * Write one CapturedFile to disk, honoring sourceOfTruth + mode + binary flag.
- * Returns true if written, false if skipped.
+ * The placement request for a vetted destination. Plan and write both build it
+ * here, so --dry-run judges exactly the bytes the pull would place.
+ *
+ * Memories go through the RENAME-based writers: the symlink check and the write
+ * cannot be one operation, and a plain write follows a link that appears in the
+ * gap. `rename` replaces the leaf entry instead.
+ *
+ * The `claude/files/` tree writes straight through (`direct`): the caller has
+ * already vetted the path with claudeFilesSymlinkBlock, and the one link it
+ * permits — a skill symlinked into ~/.agents/skills — is deliberately followed,
+ * since updating the canonical skill in place is the behavior the adapter
+ * exists to restore.
+ */
+function placeRequest(ctx: RestoreContext, file: CapturedFile, dest: string): PlaceRequest {
+  const isMemory = file.repoPath.startsWith(`${MEMORIES_REPO_PREFIX}/`);
+  return {
+    bucket: "claude",
+    dest,
+    content: hydratedContent(ctx, file),
+    mode: file.mode,
+    direct: !isMemory,
+  };
+}
+
+/**
+ * Place one CapturedFile through the placement engine. Returns the outcome, or
+ * null when the path is not a Claude root or is refused.
  */
 async function writeOne(
   ctx: RestoreContext,
   file: CapturedFile,
-): Promise<boolean> {
+): Promise<PlaceOutcome | null> {
   const dest = targetFor(ctx, file.repoPath);
   if (dest === null) {
     ctx.log.debug(`claude: ignoring ${file.repoPath} (not a Claude repo root)`);
-    return false;
+    return null;
   }
-
-  const isMemory = file.repoPath.startsWith(`${MEMORIES_REPO_PREFIX}/`);
 
   const memLink = await memorySymlinkBlock(ctx, file.repoPath, dest);
   if (memLink !== null) {
@@ -232,7 +264,7 @@ async function writeOne(
       `claude: skipping ${file.repoPath} — ${memLink} is a symlink; ` +
         "arbella does not write memories through links.",
     );
-    return false;
+    return null;
   }
 
   const filesLink = await claudeFilesSymlinkBlock(ctx, file.repoPath, dest);
@@ -241,58 +273,42 @@ async function writeOne(
       `claude: refusing to write ${describePath(file.repoPath)} through symlink ` +
         `${filesLink} (not a shared-skills link)`,
     );
-    return false;
+    return null;
   }
 
-  if (ctx.sourceOfTruth === "local" && (await ctx.fs.exists(dest))) {
-    ctx.log.debug(`claude: keep local (sourceOfTruth=local) ${dest}`);
-    return false;
-  }
+  const outcome = await placeFile(ctx, placeRequest(ctx, file, dest));
+  if (outcome === "kept") ctx.log.debug(`claude: keep local ${dest}`);
+  return outcome;
+}
 
-  // Memories go through the RENAME-based writers: the symlink check above and
-  // the write cannot be one operation, and a plain write follows a link that
-  // appears in the gap. `rename` replaces the leaf entry instead.
-  //
-  // The `claude/files/` tree writes straight through (write/writeBytes, not the
-  // atomic rename pair): claudeFilesSymlinkBlock above has already vetted the
-  // path, and the one link it permits — a skill symlinked into ~/.agents/skills
-  // — is deliberately followed, since updating the canonical skill in place is
-  // the behavior the adapter exists to restore.
-  if (file.binary) {
-    const bytes = Buffer.from(file.content, "base64");
-    if (isMemory) await ctx.fs.writeBytesAtomic(dest, bytes, file.mode);
-    else await ctx.fs.writeBytes(dest, bytes, file.mode);
-  } else {
-    const hydrated = ctx.templater.fromTemplate(file.content, ctx.vars);
-    if (isMemory) await ctx.fs.writeAtomic(dest, hydrated, file.mode);
-    else await ctx.fs.write(dest, hydrated, file.mode);
-  }
-  return true;
+/**
+ * settings.json text with `enabled` overlaid on its enabledPlugins, or undefined
+ * when the overlay changes nothing (the file is then left byte-for-byte alone).
+ * Throws on invalid JSON.
+ */
+function withEnabledPlugins(text: string, enabled: Record<string, boolean>): string | undefined {
+  const obj = JSON.parse(text) as Record<string, unknown>;
+  const existing =
+    typeof obj.enabledPlugins === "object" && obj.enabledPlugins !== null
+      ? (obj.enabledPlugins as Record<string, boolean>)
+      : {};
+  if (Object.entries(enabled).every(([id, on]) => existing[id] === on)) return undefined;
+  return JSON.stringify({ ...obj, enabledPlugins: { ...existing, ...enabled } }, null, 2) + "\n";
 }
 
 /**
  * Merge manifest.enabledPlugins into the restored settings.json on disk. The
- * frozen settings.json was just written; we re-read it, overlay the enabled map
- * (authoritative re-enable source), and write it back. No-op if settings.json
- * is absent or unparseable.
- *
- * `settingsExistedBefore` is what makes this obey sourceOfTruth. Under "local"
- * an already-present settings.json is KEPT by the frozen-files pass, so
- * overlaying the repo's enabledPlugins onto it would re-enable, through the back
- * door, exactly the plugins the user disabled here — the one edit the file
- * restore just promised not to make. The flag is read BEFORE any write, since
- * afterwards "does settings.json exist" is true either way.
+ * caller runs this only when the frozen settings.json was WRITTEN in this pass:
+ * a kept settings.json is the user's, and overlaying the repo's enabledPlugins
+ * onto it would re-enable, through the back door, exactly the plugins the user
+ * disabled here. No-op if settings.json is absent, unparseable, or already
+ * carries the map.
  */
 async function mergeEnabledPlugins(
   ctx: RestoreContext,
   enabled: Record<string, boolean>,
-  settingsExistedBefore: boolean,
 ): Promise<void> {
   if (Object.keys(enabled).length === 0) return;
-  if (ctx.sourceOfTruth === "local" && settingsExistedBefore) {
-    ctx.log.debug("claude: keep local settings.json enabledPlugins (sourceOfTruth=local)");
-    return;
-  }
   const settings = await resolveContainedTarget(ctx.fs, ctx.toolHome, SETTINGS_REL);
   if (!settings.ok) {
     ctx.log.warn(`claude: refusing to merge enabledPlugins — ${settings.reason}`);
@@ -301,22 +317,18 @@ async function mergeEnabledPlugins(
   const settingsPath = settings.path;
   if (!(await ctx.fs.exists(settingsPath))) return;
 
-  let obj: Record<string, unknown>;
+  let next: string | undefined;
   try {
-    obj = JSON.parse(await ctx.fs.read(settingsPath)) as Record<string, unknown>;
+    next = withEnabledPlugins(await ctx.fs.read(settingsPath), enabled);
   } catch (err) {
     ctx.log.warn(`claude: could not merge enabledPlugins: ${(err as Error).message}`);
     return;
   }
-
-  const existing =
-    typeof obj.enabledPlugins === "object" && obj.enabledPlugins !== null
-      ? (obj.enabledPlugins as Record<string, boolean>)
-      : {};
-  obj.enabledPlugins = { ...existing, ...enabled };
+  if (next === undefined) return;
 
   // Rename-based: settings.json is a file Claude Code itself reads continuously.
-  await ctx.fs.writeAtomic(settingsPath, JSON.stringify(obj, null, 2) + "\n");
+  await ctx.fs.writeAtomic(settingsPath, next);
+  recordExternalWrite(ctx, settingsPath, next);
   ctx.log.debug(`claude: merged ${Object.keys(enabled).length} enabledPlugins entries`);
 }
 
@@ -328,6 +340,8 @@ export async function planActions(
   data: RestoreData,
 ): Promise<RestoreAction[]> {
   const actions: RestoreAction[] = [];
+  // The bytes settings.json will hold after the file pass, when it is written.
+  let placedSettings: string | Buffer | undefined;
 
   for (const file of data.files) {
     const dest = targetFor(ctx, file.repoPath);
@@ -336,14 +350,15 @@ export async function planActions(
     // restore will then skip.
     if ((await memorySymlinkBlock(ctx, file.repoPath, dest)) !== null) continue;
     if ((await claudeFilesSymlinkBlock(ctx, file.repoPath, dest)) !== null) continue;
-    const overwrites = await ctx.fs.exists(dest);
-    if (ctx.sourceOfTruth === "local" && overwrites) continue;
+    const decision = await planPlacement(ctx, placeRequest(ctx, file, dest));
+    if (decision.outcome !== "written") continue;
+    if (file.repoPath === SETTINGS_REPO_PATH) placedSettings = decision.bytes;
     actions.push({
       type: "write-file",
       tool: "claude",
       targetPath: dest,
       description: `Write ${describePath(file.repoPath)}`,
-      overwrites,
+      overwrites: decision.overwrites,
     });
   }
 
@@ -384,14 +399,16 @@ export async function planActions(
     });
   }
 
-  // Match both the containment gate and local-policy skip in mergeEnabledPlugins.
-  // Nothing has been written yet, so `exists` still answers "existed before
-  // the restore". A settings symlink (including a dangling one) is refused.
+  // Match mergeEnabledPlugins: it runs only on a settings.json this pass
+  // writes, behind the same containment gate (a settings symlink, including a
+  // dangling one, is refused), and only when the overlay changes something.
   const enabledIds = Object.keys(data.manifest.enabledPlugins);
   const settings = await resolveContainedTarget(ctx.fs, ctx.toolHome, SETTINGS_REL);
-  const keepsLocalSettings =
-    settings.ok && ctx.sourceOfTruth === "local" && (await ctx.fs.exists(settings.path));
-  if (enabledIds.length > 0 && settings.ok && !keepsLocalSettings) {
+  if (
+    enabledIds.length > 0 &&
+    settings.ok &&
+    overlayChanges(placedSettings, data.manifest.enabledPlugins)
+  ) {
     actions.push({
       type: "enable-plugin",
       tool: "claude",
@@ -412,6 +429,19 @@ export async function planActions(
   return actions;
 }
 
+/** Would the enabledPlugins overlay rewrite these planned settings.json bytes? */
+function overlayChanges(
+  placed: string | Buffer | undefined,
+  enabled: Record<string, boolean>,
+): boolean {
+  if (placed === undefined) return false;
+  try {
+    return withEnabledPlugins(placed.toString(), enabled) !== undefined;
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Execute the restore. Honors ctx.dryRun (delegates to planActions + logs,
  * performs no mutations).
@@ -423,15 +453,13 @@ export async function restore(ctx: RestoreContext, data: RestoreData): Promise<v
     return;
   }
 
-  // Read BEFORE the frozen-files pass: once step 1 has run, settings.json is on
-  // disk either way, and step 5 could no longer tell "the user's own file that
-  // local policy kept" from "the one this restore just placed".
-  const settingsExistedBefore = await ctx.fs.exists(path.join(ctx.toolHome, SETTINGS_REL));
-
   // ----- 1. Frozen files -----
   let written = 0;
+  let settingsWritten = false;
   for (const file of data.files) {
-    if (await writeOne(ctx, file)) written++;
+    if ((await writeOne(ctx, file)) !== "written") continue;
+    written++;
+    if (file.repoPath === SETTINGS_REPO_PATH) settingsWritten = true;
   }
   ctx.log.debug(`claude: wrote ${written}/${data.files.length} files`);
 
@@ -494,7 +522,7 @@ export async function restore(ctx: RestoreContext, data: RestoreData): Promise<v
   }
 
   // ----- 5. Re-enable plugins (authoritative: settings.enabledPlugins) -----
-  await mergeEnabledPlugins(ctx, data.manifest.enabledPlugins, settingsExistedBefore);
+  if (settingsWritten) await mergeEnabledPlugins(ctx, data.manifest.enabledPlugins);
 
   // ----- 6. skills.sh skills (repopulate ~/.agents/skills) -----
   for (const skill of data.manifest.skills) {
