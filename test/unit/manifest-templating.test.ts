@@ -58,7 +58,7 @@ X_OTP = "123456"
 X_DEBUG = "true"
 `, createTemplater(), makeVariables("/home/test", "test", "linux", "/home/test/.codex"));
   expect(parseToml(result.sanitizedToml).mcp_servers).toEqual({ db: {
-    env: { PGPASSWORD: "{{REDACTED}}", YUBIKEY_PIN: "{{REDACTED}}", MCP_TIMEOUT: 30000, DEBUG: true },
+    env: { PGPASSWORD: "{{REDACTED}}", YUBIKEY_PIN: "{{REDACTED}}", MCP_TIMEOUT: "{{REDACTED}}", DEBUG: true },
     headers: { X_OTP: "{{REDACTED}}", X_DEBUG: "{{REDACTED}}" },
   } });
 });
@@ -81,7 +81,7 @@ RETRIES = [3]
   } } });
 });
 
-it("keeps boolean and numeric MCP env flags in config.toml, redacts the rest", () => {
+it("keeps switch-valued MCP env flags in config.toml, redacts the rest", () => {
   const result = processConfigToml(`
 [mcp_servers.unifi.env]
 UNIFI_NETWORK_VERIFY_SSL = "false"
@@ -92,7 +92,7 @@ PGPASSWORD = "123456"
 `, createTemplater(), makeVariables("/home/test", "test", "linux", "/home/test/.codex"));
   expect(parseToml(result.sanitizedToml).mcp_servers).toEqual({ unifi: { env: {
     UNIFI_NETWORK_VERIFY_SSL: "false",
-    NODE_REPL_NATIVE_PIPE_CONNECT_TIMEOUT_MS: "30000",
+    NODE_REPL_NATIVE_PIPE_CONNECT_TIMEOUT_MS: "{{REDACTED}}",
     UNIFI_NETWORK_PASSWORD: "{{REDACTED}}",
     UNIFI_NETWORK_HOST: "{{REDACTED}}",
     PGPASSWORD: "{{REDACTED}}",

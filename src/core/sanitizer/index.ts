@@ -36,7 +36,7 @@ import {
   SECRET_PATTERNS,
   applySecretPattern,
   isCredentialBearingUrl,
-  isPlainSettingValue,
+  isSwitchValue,
   isSecretContainerKey,
   isSecretKey,
   isSettingsContainerKey,
@@ -321,7 +321,7 @@ function detectJsonIndent(content: string): number | string {
  * `container` is set once the walk descends under an env/environment/headers
  * map and stays set for the whole subtree: env vars are named arbitrarily (KEY,
  * OPENAI_KEY, ...), so every leaf below such a container is treated as secret —
- * except, below an env map only, a plain flag or number (isPlainSettingValue).
+ * except, below an env map only, a switch (isSwitchValue).
  * Mirrors codex's TOML structural pass.
  */
 function cloneRedact(
@@ -366,12 +366,12 @@ function cloneRedact(
   }
 
   // Scalars (string/number/boolean/null/undefined): redact if warranted. Under
-  // an env map a plain flag/number survives; a secret NAME still redacts it.
+  // an env map a switch survives; a secret NAME still redacts it.
   const keyIsSecret =
     parentKey.length > 0 &&
     (isSecretKey(parentKey) ||
       container === "credentials" ||
-      (container === "settings" && !isPlainSettingValue(parentKey, node)));
+      (container === "settings" && !isSwitchValue(node)));
   const { value: redacted, matched } = redactValue(node, keyIsSecret);
   if (matched !== null && redacted !== node) {
     found.push({

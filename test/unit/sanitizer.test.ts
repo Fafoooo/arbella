@@ -608,17 +608,19 @@ describe("sanitizer: env/environment/headers containers (E2E leak regression)", 
     expect(res.content).not.toContain("opaque-header-cred-222333");
   });
 
-  it("keeps boolean and numeric flags under env (settings.json feature switches)", () => {
-    // `{{REDACTED}}` in place of "1" switches a feature off (or breaks a
-    // timeout) on every machine that pulls; a flag is never a credential.
-    const env = {
-      CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: "1",
-      DISABLE_TELEMETRY: "true",
-      BASH_MAX_TIMEOUT_MS: "3600000",
-      MCP_TIMEOUT: 60000,
-    };
+  it("keeps switches under env (settings.json feature flags)", () => {
+    // `{{REDACTED}}` in place of "1" switches a feature off on every machine
+    // that pulls; a switch is never a credential.
+    const env = { CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: "1", DISABLE_TELEMETRY: "true", DEBUG: false, LEVEL: 3 };
     const res = sanitizer.sanitizeFile(JSON.stringify({ env }, null, 2), "claude", "settings.json");
     expect(JSON.parse(res.content).env).toEqual(env);
+  });
+
+  it("still redacts multi-digit numbers under env: they may be one-time codes", () => {
+    // AUTH_CODE / OTP / MFA_CODE carry live codes under names no list knows.
+    const env = { AUTH_CODE: "123456", OTP: 4711, MCP_TIMEOUT: "60000" };
+    const res = sanitizer.sanitizeFile(JSON.stringify({ env }, null, 2), "claude", "settings.json");
+    expect(JSON.parse(res.content).env).toEqual({ AUTH_CODE: REDACTED, OTP: REDACTED, MCP_TIMEOUT: REDACTED });
   });
 
   it("still redacts flag-shaped values under a secret NAME, and long digit strings", () => {

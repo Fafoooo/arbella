@@ -282,8 +282,8 @@ export const SECRET_KEY_NAMES: readonly string[] = [
  * maps and request headers. Env vars are named arbitrarily (KEY, OPENAI_KEY,
  * GROQ_WHATEVER), so key-name matching alone cannot catch them — anything a user
  * puts under one of these maps is treated as a credential, except — under an
- * env map only — a plain flag or number under a non-secret name
- * (isPlainSettingValue). Shared by the JSON
+ * env map only — a switch under a non-secret name
+ * (isSwitchValue). Shared by the JSON
  * structural pass (sanitizeJson) and codex's TOML pass so both stay consistent.
  */
 export const SECRET_CONTAINER_KEYS: readonly string[] = ["env", "environment", "headers"];
@@ -295,36 +295,26 @@ export function isSecretContainerKey(key: string): boolean {
 
 /**
  * The containers that hold settings rather than request credentials: env maps.
- * Only below these does isPlainSettingValue spare a flag or a number; header
+ * Only below these does isSwitchValue spare a flag or a number; header
  * values stay redacted whatever they look like (a numeric OTP is a credential).
  */
 export function isSettingsContainerKey(key: string): boolean {
   return ["env", "environment"].includes(key.toLowerCase());
 }
 
-/**
- * A feature switch or a whole number of up to 7 digits (millisecond timeouts
- * reach an hour, 3600000). Longer digit runs — account ids, phone numbers,
- * numeric tokens — are not read as settings.
- */
-const PLAIN_SETTING = /^(?:true|false|yes|no|on|off|\d{1,7})$/i;
+/** true/false, yes/no, on/off or a single digit. */
+const SWITCH = /^(?:true|false|yes|no|on|off|\d)$/i;
 
 /**
- * Password and PIN names isSecretKey does not know (PGPASSWORD, MYSQL_PWD,
- * DB_PASS, PASSCODE, YUBIKEY_PIN): a short number under them is a credential.
+ * True for a feature switch ("1", "false", "on", true), which is never a
+ * credential. Exempts such leaves from the blanket env-container rule only; a
+ * secret KEY NAME still redacts them. Multi-digit numbers stay redacted: under
+ * names like AUTH_CODE, OTP or MFA_CODE they are live one-time codes.
  */
-const PASSWORD_LIKE_NAME = /(?:password|passwd|passcode)$|(?:^|[_-])(?:pass|pwd|pin)$/i;
-
-/**
- * True for configuration such as "1", "false", "on" or 30000 under `key`, which
- * is never a credential. Exempts such leaves from the blanket container rule
- * only; a secret KEY NAME still redacts them.
- */
-export function isPlainSettingValue(key: string, value: unknown): boolean {
-  if (PASSWORD_LIKE_NAME.test(key)) return false;
+export function isSwitchValue(value: unknown): boolean {
   return (
     typeof value === "boolean" ||
-    ((typeof value === "string" || typeof value === "number") && PLAIN_SETTING.test(String(value)))
+    ((typeof value === "string" || typeof value === "number") && SWITCH.test(String(value)))
   );
 }
 

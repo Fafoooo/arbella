@@ -41,7 +41,7 @@ import type {
 } from "../../types.js";
 import {
   applySecretPattern,
-  isPlainSettingValue,
+  isSwitchValue,
   isSecretKey,
   REDACTED,
   SECRET_PATTERNS,
@@ -72,7 +72,7 @@ function isTable(value: unknown): value is TomlTable {
  *
  * A leaf is redacted when its key name denotes a secret (isSecretKey), when it
  * sits under a credentials container (headers, secrets, ...), when it sits under
- * an env-style map and is not a plain flag or number (isPlainSettingValue), or
+ * an env-style map and is not a switch (isSwitchValue), or
  * when its string value matches a known secret pattern. Numbers and booleans
  * follow the same key/context rules as strings. Objects and arrays are walked
  * recursively; array elements are judged under the key that holds the array.
@@ -129,15 +129,15 @@ function shouldRedactLeaf(key: string, value: unknown, context: TomlContext): bo
   const scalar = typeof value === "string" || typeof value === "number" || typeof value === "boolean";
   if (!scalar) return false;
   if (context === "credentials") return true;
-  if (context === "settings" && !isPlainSettingValue(key, value)) return true;
+  if (context === "settings" && !isSwitchValue(value)) return true;
   return typeof value === "string" && valueLooksSecret(value);
 }
 
 /**
  * Keys whose entire SUBTREE of values should be treated as secret, regardless
  * of the inner variable names. These are the standard MCP/credential container
- * maps; the env-style ones among them (isSettingsContainerKey) spare plain flags
- * and numbers.
+ * maps; the env-style ones among them (isSettingsContainerKey) spare switches
+ * (isSwitchValue).
  */
 function isSecretContainerKey(key: string): boolean {
   const k = key.toLowerCase();
