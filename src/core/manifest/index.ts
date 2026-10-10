@@ -120,8 +120,10 @@ export function buildArbellaMeta(args: {
   config: ArbellaConfig;
   createdAt: string;
   sharedInstructions: boolean;
+  lastPushMachine?: string;
 }): ArbellaMeta {
-  const { arbellaVersion, tools, config, createdAt, sharedInstructions } = args;
+  const { arbellaVersion, tools, config, createdAt, sharedInstructions, lastPushMachine } =
+    args;
   return arbellaMetaSchema.parse({
     schemaVersion: MANIFEST_SCHEMA_VERSION,
     arbellaVersion,
@@ -133,6 +135,7 @@ export function buildArbellaMeta(args: {
     },
     createdAt,
     sharedInstructions,
+    ...(lastPushMachine ? { lastPushMachine } : {}),
   });
 }
 

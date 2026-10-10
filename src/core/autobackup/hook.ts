@@ -33,7 +33,9 @@ import path from "node:path";
 import { fs } from "../../utils/fs.js";
 import { detectOS, toolHomeDir } from "../../platform/os.js";
 
-import type { AutoBackupMode } from "../../types.js";
+import { detectJsonIndent, parseJsonOrJsonc } from "../sanitizer/index.js";
+
+import type { AutoBackupMode, CapturedFile, CaptureResult } from "../../types.js";
 
 /**
  * Marker embedded in the command so we can find/replace our own entries without
@@ -285,4 +287,52 @@ export async function installHook(mode: AutoBackupMode): Promise<void> {
 /** Remove any arbella-installed SessionStart hook from both tools. Idempotent. */
 export async function uninstallHook(): Promise<void> {
   await Promise.all([applyClaude(false), applyCodex(false)]);
+}
+
+/* -------------------------------------------------------------------------- */
+/* Capture-side stripping                                                       */
+/* -------------------------------------------------------------------------- */
+
+/** Repo paths of the two hook files arbella installs its SessionStart hook into. */
+const HOOK_FILE_REPO_PATHS = new Set([
+  "claude/files/settings.json",
+  "codex/files/hooks.json",
+]);
+
+/**
+ * Return `file` without arbella's own SessionStart hook, so a backup never
+ * carries the hook that would auto-push from another machine. Only the two hook
+ * files are looked at; every user hook stays. Anything else (other path, binary,
+ * unparseable, no hook of ours) comes back as the SAME object, byte for byte.
+ */
+export function withoutAutobackupHook<T extends CapturedFile>(file: T): T {
+  if (file.binary || !HOOK_FILE_REPO_PATHS.has(file.repoPath)) return file;
+  const parsed = parseJsonOrJsonc(file.content);
+  if (!parsed.ok) return file;
+  const root = parsed.value;
+  if (!root || typeof root !== "object" || Array.isArray(root)) return file;
+
+  const hooksField = (root as Record<string, unknown>).hooks;
+  if (!hooksField || typeof hooksField !== "object" || Array.isArray(hooksField)) {
+    return file;
+  }
+  const hooks = { ...(hooksField as Record<string, unknown>) };
+  const removed = withOurGroupRemoved(hooks[EVENT]);
+  if (removed === null) return file;
+  if (removed.length === 0) {
+    delete hooks[EVENT];
+  } else {
+    hooks[EVENT] = removed;
+  }
+
+  const tail = file.content.endsWith("\n") ? "\n" : "";
+  const content =
+    JSON.stringify({ ...(root as Record<string, unknown>), hooks }, null, detectJsonIndent(file.content)) +
+    tail;
+  return { ...file, content };
+}
+
+/** {@link withoutAutobackupHook} over every file of a capture result (new object). */
+export function withoutAutobackupHookInResult(result: CaptureResult): CaptureResult {
+  return { ...result, files: result.files.map((f) => withoutAutobackupHook(f)) };
 }

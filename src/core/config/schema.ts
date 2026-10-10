@@ -39,9 +39,20 @@ export const repoConfigSchema = z.object({
   localPath: z.string(),
 });
 
+/**
+ * What this machine does with the backup repo:
+ *  - "source":   pushes and pulls (the default; every pre-1.1 config).
+ *  - "follower": only pulls. Never pushes, not even via the autobackup hook.
+ */
+export const roleSchema = z.enum(["source", "follower"]);
+
 export const arbellaConfigSchema = z.object({
   /** Backup repo connection. */
   repo: repoConfigSchema,
+  /** This machine's role. LOCAL only: never written to the backup repo. */
+  role: roleSchema.default("source"),
+  /** Random id of this machine, generated lazily on first push. Never shared. */
+  machineId: z.string().min(1).optional(),
   /**
    * Source-of-truth direction (R12):
    *  - "local": this machine pushes; backup is authoritative from here.
@@ -71,6 +82,7 @@ export const arbellaConfigSchema = z.object({
   extraPaths: z.array(z.string()).default([]),
 });
 
+export type Role = z.infer<typeof roleSchema>;
 export type RepoConfig = z.infer<typeof repoConfigSchema>;
 export type ArbellaConfig = z.infer<typeof arbellaConfigSchema>;
 
@@ -81,6 +93,7 @@ export type ArbellaConfig = z.infer<typeof arbellaConfigSchema>;
  */
 export const DEFAULT_CONFIG: ArbellaConfig = {
   repo: { provider: "generic", url: "", localPath: "" },
+  role: "source",
   sourceOfTruth: "local",
   autoBackup: "off",
   includeSecrets: false,

@@ -10,6 +10,7 @@
  * and local clone path only. We still never log its contents from here.
  */
 
+import { randomUUID } from "node:crypto";
 import path from "node:path";
 
 import { z } from "zod";
@@ -21,6 +22,7 @@ import {
   type ArbellaConfig,
   arbellaConfigSchema,
   DEFAULT_CONFIG,
+  type RepoConfig,
 } from "./schema.js";
 
 /** Absolute path to the on-disk config file: `configDir()/config.json`. */
@@ -125,6 +127,43 @@ export async function updateConfig(
   const merged = arbellaConfigSchema.parse({ ...current, ...patch });
   await saveConfig(merged);
   return merged;
+}
+
+/**
+ * Return the config's machine id, generating + saving one on first use. An
+ * existing id is returned as-is and nothing is written.
+ */
+export async function ensureMachineId(
+  config: ArbellaConfig,
+): Promise<{ config: ArbellaConfig; machineId: string }> {
+  if (config.machineId) return { config, machineId: config.machineId };
+  const machineId = randomUUID();
+  const next = { ...config, machineId };
+  await saveConfig(next);
+  return { config: next, machineId };
+}
+
+/**
+ * Config for a machine that only pulls an existing backup: repo wins, no
+ * auto-backup, no secrets, no extra paths. Scope (`tools`, `includeMemories`)
+ * comes from the caller; the repo's own `includeSecrets` is deliberately ignored.
+ */
+export function followerConfig(
+  repo: RepoConfig,
+  scope: Pick<ArbellaConfig, "tools" | "includeMemories">,
+  machineId: string,
+): ArbellaConfig {
+  return arbellaConfigSchema.parse({
+    repo,
+    role: "follower",
+    machineId,
+    sourceOfTruth: "repo",
+    autoBackup: "off",
+    includeSecrets: false,
+    includeMemories: scope.includeMemories,
+    tools: scope.tools,
+    extraPaths: [],
+  });
 }
 
 /* -------------------------------------------------------------------------- */

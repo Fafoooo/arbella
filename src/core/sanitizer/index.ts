@@ -189,7 +189,7 @@ function looksLikeJsonSource(source: string): boolean {
   return /\.json$/i.test(base);
 }
 
-function parseJsonOrJsonc(content: string): { ok: true; value: unknown } | { ok: false } {
+export function parseJsonOrJsonc(content: string): { ok: true; value: unknown } | { ok: false } {
   try {
     return { ok: true, value: JSON.parse(content) };
   } catch {
@@ -302,7 +302,7 @@ function removeTrailingCommas(content: string): string {
  * is rewritten by the backup either way — but matching the common 2-space style
  * keeps diffs tidy.)
  */
-function detectJsonIndent(content: string): number | string {
+export function detectJsonIndent(content: string): number | string {
   const m = /\n([ \t]+)\S/.exec(content);
   if (!m) return 2;
   const ws = m[1]!;
