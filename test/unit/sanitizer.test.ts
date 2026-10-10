@@ -498,6 +498,29 @@ describe("sanitizer: env/environment/headers containers (E2E leak regression)", 
     expect(res.content).not.toContain("opaque-header-cred-222333");
   });
 
+  it("keeps boolean and numeric flags under env (settings.json feature switches)", () => {
+    // `{{REDACTED}}` in place of "1" switches a feature off (or breaks a
+    // timeout) on every machine that pulls; a flag is never a credential.
+    const env = {
+      CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: "1",
+      DISABLE_TELEMETRY: "true",
+      BASH_MAX_TIMEOUT_MS: "3600000",
+      MCP_TIMEOUT: 60000,
+    };
+    const res = sanitizer.sanitizeFile(JSON.stringify({ env }, null, 2), "claude", "settings.json");
+    expect(JSON.parse(res.content).env).toEqual(env);
+  });
+
+  it("still redacts flag-shaped values under a secret NAME, and long digit strings", () => {
+    const blob = JSON.stringify(
+      { env: { DB_PASSWORD: "123456", ACCOUNT_NUMBER: "123456789012", ENABLE_X: "1" } },
+      null,
+      2,
+    );
+    const env = JSON.parse(sanitizer.sanitizeFile(blob, "claude", "settings.json").content).env;
+    expect(env).toEqual({ DB_PASSWORD: REDACTED, ACCOUNT_NUMBER: REDACTED, ENABLE_X: "1" });
+  });
+
   it("isSecretKey catches separator-suffixed *_key / *-key names anywhere", () => {
     expect(isSecretKey("OPENAI_KEY")).toBe(true);
     expect(isSecretKey("deepl-key")).toBe(true);

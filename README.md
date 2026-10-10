@@ -61,7 +61,7 @@ Beyond the obvious config files, Arbella also carries:
 
 | It also carries | Where it comes from | Notes |
 | --- | --- | --- |
-| MCP servers | `~/.claude.json` → `mcpServers` | Never the whole file — only the server definitions, sanitized and templated; env values are redacted unless `includeSecrets` is on |
+| MCP servers | `~/.claude.json` → `mcpServers` | Never the whole file — only the server definitions, sanitized and templated; env values are redacted unless `includeSecrets` is on (plain flags and numbers such as `"1"` or `30000` are kept) |
 | The rest of `~/.claude` | `rules/`, `scripts/`, `output-styles/`, `keybindings.json`, `mcp-configs/`, `AGENTS.md` | The pieces your hooks and `CLAUDE.md` actually reference |
 | Shared home files | `shared/home/` | Scripts your hooks, statusLine, or MCP commands point at outside any tool's home — picked up automatically (one hop, files only, 1 MiB cap) — plus anything you list in `extraPaths`, and the claude-mem companion `~/.claude-mem/settings.json` |
 | Claude memories | `claude/memories/` | Per-project memory, only when `includeMemories` is on |

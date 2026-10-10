@@ -204,7 +204,8 @@ export const SECRET_KEY_NAMES: readonly string[] = [
  * Container key names whose ENTIRE subtree holds secret leaves: MCP server env
  * maps and request headers. Env vars are named arbitrarily (KEY, OPENAI_KEY,
  * GROQ_WHATEVER), so key-name matching alone cannot catch them — anything a user
- * puts under one of these maps is treated as a credential. Shared by the JSON
+ * puts under one of these maps is treated as a credential, except a plain flag
+ * or number (isPlainSettingValue) under a non-secret name. Shared by the JSON
  * structural pass (sanitizeJson) and codex's TOML pass so both stay consistent.
  */
 export const SECRET_CONTAINER_KEYS: readonly string[] = ["env", "environment", "headers"];
@@ -212,6 +213,25 @@ export const SECRET_CONTAINER_KEYS: readonly string[] = ["env", "environment", "
 /** True if a JSON/TOML key introduces a secret container (env/environment/headers). */
 export function isSecretContainerKey(key: string): boolean {
   return SECRET_CONTAINER_KEYS.includes(key.toLowerCase());
+}
+
+/**
+ * A feature switch or a whole number of up to 7 digits (millisecond timeouts
+ * reach an hour, 3600000). Longer digit runs — account ids, phone numbers,
+ * numeric tokens — are not read as settings.
+ */
+const PLAIN_SETTING = /^(?:true|false|yes|no|on|off|\d{1,7})$/i;
+
+/**
+ * True for configuration such as "1", "false", "on" or 30000, which is never a
+ * credential. Exempts such leaves from the blanket container rule only; a
+ * secret KEY NAME still redacts them.
+ */
+export function isPlainSettingValue(value: unknown): boolean {
+  return (
+    typeof value === "boolean" ||
+    ((typeof value === "string" || typeof value === "number") && PLAIN_SETTING.test(String(value)))
+  );
 }
 
 /* -------------------------------------------------------------------------- */

@@ -41,6 +41,7 @@ import type {
 } from "../../types.js";
 import {
   applySecretPattern,
+  isPlainSettingValue,
   isSecretKey,
   REDACTED,
   SECRET_PATTERNS,
@@ -74,9 +75,10 @@ function isTable(value: unknown): value is TomlTable {
  * recursively. Every redaction appends a SecretRef (kind:"value") whose `source`
  * pinpoints the dotted path inside config.toml.
  *
- * `keyIsSecretContext` forces redaction of *all* string leaves regardless of the
- * leaf key — used for env/headers maps where the table key (e.g. "env") is itself
- * a secret container and the inner keys are arbitrary variable names.
+ * `keyIsSecretContext` forces redaction of every string leaf but a plain flag or
+ * number (isPlainSettingValue), regardless of the leaf key — used for env/headers
+ * maps where the table key (e.g. "env") is itself a secret container and the
+ * inner keys are arbitrary variable names.
  */
 function redactSubtree(
   node: unknown,
@@ -107,13 +109,16 @@ function redactSubtree(
     const secretContext = keyIsSecretContext || isSecretKey(key) || isSecretContainerKey(key);
 
     if (typeof child === "string") {
-      if (secretContext || valueLooksSecret(child)) {
+      // A plain flag/number survives a container; a secret NAME still redacts it.
+      const redact =
+        isSecretKey(key) || valueLooksSecret(child) || (secretContext && !isPlainSettingValue(child));
+      if (redact) {
         node[key] = REDACTED;
         secrets.push(makeValueSecret(childPath));
       }
     } else if (isTable(child) || Array.isArray(child)) {
-      // For container keys ("env", "headers", "set", ...) every leaf below is
-      // treated as secret; otherwise recurse with normal per-key detection.
+      // For container keys ("env", "headers", "set", ...) every leaf below but
+      // a plain flag/number is secret; otherwise normal per-key detection.
       redactSubtree(child, childPath, secrets, secretContext);
     }
     // numbers / booleans are never secret values we can meaningfully redact.

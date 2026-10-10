@@ -15,7 +15,8 @@
  *
  * Both directions go through the injected services:
  *   capture  -> sanitizer.sanitizeJson (every leaf under env/environment/headers
- *               becomes {{REDACTED}}, unless includeSecrets) then templater
+ *               but a plain flag or number becomes {{REDACTED}}, unless
+ *               includeSecrets) then templater
  *               .toTemplate over every string leaf, so an absolute command path
  *               folds to {{HOME}}/....
  *   restore  -> templater.fromTemplate over the serialized def, then a KEY-WISE

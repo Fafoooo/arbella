@@ -45,6 +45,22 @@ env = { SERVICE_TOKEN = "opaque-private-token", bearer_token_env_var = "nested-p
   expect(result.sanitizedToml).not.toContain("opaque-private");
 });
 
+it("keeps boolean and numeric MCP env flags in config.toml, redacts the rest", () => {
+  const result = processConfigToml(`
+[mcp_servers.unifi.env]
+UNIFI_NETWORK_VERIFY_SSL = "false"
+NODE_REPL_NATIVE_PIPE_CONNECT_TIMEOUT_MS = "30000"
+UNIFI_NETWORK_PASSWORD = "1234567"
+UNIFI_NETWORK_HOST = "opaque-host-value"
+`, createTemplater(), makeVariables("/home/test", "test", "linux", "/home/test/.codex"));
+  expect(parseToml(result.sanitizedToml).mcp_servers).toEqual({ unifi: { env: {
+    UNIFI_NETWORK_VERIFY_SSL: "false",
+    NODE_REPL_NATIVE_PIPE_CONNECT_TIMEOUT_MS: "30000",
+    UNIFI_NETWORK_PASSWORD: "{{REDACTED}}",
+    UNIFI_NETWORK_HOST: "{{REDACTED}}",
+  } } });
+});
+
 /** Minimal no-op Logger fake shared by the restore-planning tests below. */
 function fakeLogger(): Logger {
   return {
