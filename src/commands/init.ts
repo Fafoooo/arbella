@@ -55,6 +55,7 @@ import {
   saveConfig,
 } from "../core/config/index.js";
 import { ensureLocalClone, ensureRemoteRepo } from "../core/repo/index.js";
+import { isGitRepo } from "../core/repo/git.js";
 import { homeExcludeRoots } from "../core/homefiles/capture.js";
 import { suggestExtraPaths } from "../core/homefiles/suggest.js";
 import { homeDir } from "../platform/os.js";
@@ -159,20 +160,22 @@ export async function run(opts: InitOptions): Promise<void> {
   intro("arbella — set up your AI dev-setup backup");
 
   // 0. If a config already exists, confirm we may overwrite it.
+  const current = await loadConfigOrDefault();
   if (await configExists()) {
+    const message =
+      current.role === "follower"
+        ? `This machine is a follower (it only pulls). Continuing makes it a source that ` +
+          `pushes to the backup repo, and can overwrite the repo with this machine's setup. ` +
+          `Reconfigure and promote it?`
+        : `A config already exists at ${configPath()}. Reconfigure it?`;
     const proceed = opts.yes
       ? true
-      : await confirm({
-          message: `A config already exists at ${configPath()}. Reconfigure it?`,
-          initialValue: false,
-        });
+      : await confirm({ message, initialValue: false });
     if (isCancel(proceed) || proceed === false) {
       cancel("Keeping the existing configuration.");
       return;
     }
   }
-
-  const current = await loadConfigOrDefault();
 
   // 1. Detect installed tools (tool-home presence + best-effort CLI probe) and
   //    the $HOME dirs their configs link into (shared/home suggestions, WP-B).
@@ -245,6 +248,11 @@ export async function run(opts: InitOptions): Promise<void> {
       name: repoInput,
       localPath,
     });
+    // A follower already cloned this repo when it pulled: keep using that clone.
+    repoConfig = {
+      ...repoConfig,
+      localPath: await resolveLocalPath(current.repo, repoConfig.url, localPath),
+    };
   } catch (err) {
     log.error(`Could not resolve or create the backup repo: ${errMessage(err)}`);
     cancel("Setup aborted before any config was written.");
@@ -254,6 +262,12 @@ export async function run(opts: InitOptions): Promise<void> {
   // 9. Assemble + persist the config (validated by the schema on save).
   const config: ArbellaConfig = arbellaConfigSchema.parse({
     repo: repoConfig,
+    // Running init is the one way to become a source (a follower never pushes).
+    role: "source",
+    machineId: current.machineId,
+    lastSyncedPush: sameRepoUrl(current.repo.url, repoConfig.url)
+      ? current.lastSyncedPush
+      : undefined,
     sourceOfTruth,
     autoBackup,
     includeSecrets,
@@ -793,6 +807,29 @@ async function ensureProviderSignedIn(
 /* -------------------------------------------------------------------------- */
 /* Small pure helpers                                                          */
 /* -------------------------------------------------------------------------- */
+
+/** Same repo? Compares urls ignoring a trailing `.git` and trailing slashes. */
+export function sameRepoUrl(a: string, b: string): boolean {
+  const norm = (u: string): string =>
+    u.trim().replace(/\/+$/, "").replace(/\.git$/, "").replace(/\/+$/, "");
+  return norm(a) !== "" && norm(a) === norm(b);
+}
+
+/**
+ * Where the new config's clone lives: the current config's clone when it points
+ * at the same repo and is still a repo checkout, else `fallback`.
+ */
+export async function resolveLocalPath(
+  current: ArbellaConfig["repo"],
+  newUrl: string,
+  fallback: string,
+): Promise<string> {
+  const reuse =
+    sameRepoUrl(current.url, newUrl) &&
+    current.localPath !== "" &&
+    (await isGitRepo(current.localPath));
+  return reuse ? current.localPath : fallback;
+}
 
 /** Default local clone path: dataDir()/repo (cross-OS, via os.ts). */
 function defaultLocalPath(): string {

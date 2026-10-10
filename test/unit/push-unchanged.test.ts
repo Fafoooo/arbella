@@ -176,3 +176,22 @@ describe("skipUnchangedPush: anything substantive still commits", () => {
     expect(skipped).toBe(false);
   });
 });
+
+describe("skipUnchangedPush: the pushing machine is not content", () => {
+  it("no-op ignores lastPushMachine", async () => {
+    const previous = await afterRewrite(meta({ createdAt: NEW_STAMP, lastPushMachine: "me" }));
+    const prevWithOther: PreviousGenerated = {
+      ...previous,
+      meta: meta({ lastPushMachine: "someone-else" }),
+    };
+
+    const skipped = await skipUnchangedPush({
+      repoRoot,
+      changedPaths: ["arbella.json", "README.md"],
+      meta: meta({ createdAt: NEW_STAMP, lastPushMachine: "me" }),
+      previous: prevWithOther,
+    });
+
+    expect(skipped).toBe(true);
+  });
+});
