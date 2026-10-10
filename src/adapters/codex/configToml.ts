@@ -111,7 +111,7 @@ function redactSubtree(
     if (typeof child === "string") {
       // A plain flag/number survives a container; a secret NAME still redacts it.
       const redact =
-        isSecretKey(key) || valueLooksSecret(child) || (secretContext && !isPlainSettingValue(child));
+        isSecretKey(key) || valueLooksSecret(child) || (secretContext && !isPlainSettingValue(key, child));
       if (redact) {
         node[key] = REDACTED;
         secrets.push(makeValueSecret(childPath));

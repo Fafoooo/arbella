@@ -52,12 +52,14 @@ UNIFI_NETWORK_VERIFY_SSL = "false"
 NODE_REPL_NATIVE_PIPE_CONNECT_TIMEOUT_MS = "30000"
 UNIFI_NETWORK_PASSWORD = "1234567"
 UNIFI_NETWORK_HOST = "opaque-host-value"
+PGPASSWORD = "123456"
 `, createTemplater(), makeVariables("/home/test", "test", "linux", "/home/test/.codex"));
   expect(parseToml(result.sanitizedToml).mcp_servers).toEqual({ unifi: { env: {
     UNIFI_NETWORK_VERIFY_SSL: "false",
     NODE_REPL_NATIVE_PIPE_CONNECT_TIMEOUT_MS: "30000",
     UNIFI_NETWORK_PASSWORD: "{{REDACTED}}",
     UNIFI_NETWORK_HOST: "{{REDACTED}}",
+    PGPASSWORD: "{{REDACTED}}",
   } } });
 });
 

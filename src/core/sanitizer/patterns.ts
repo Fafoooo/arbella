@@ -42,6 +42,8 @@ const LITERAL_SECRET_MIN_LENGTH = 8;
  * single quotes, where `$` is literal), already-redacted/templated text, plain
  * URLs, paths, words and numbers (a generated credential mixes letters and
  * digits), and unquoted expressions such as `process.env.X` or `os.environ[`.
+ * A run of 20+ letters/digits is a token even when it looks like a path or a
+ * dotted name (`/9xR4k…` base64, Vault `hvs.CAES…`).
  */
 function isLiteralSecret(written: string): boolean {
   const quote = /^["'`]/.test(written) ? written[0] : "";
@@ -51,14 +53,32 @@ function isLiteralSecret(written: string): boolean {
   if (/^[A-Za-z][A-Za-z0-9+.-]*:\/\//.test(value)) return isCredentialBearingUrl(value);
   if (value.length < LITERAL_SECRET_MIN_LENGTH || /\s/.test(value)) return false;
   if (!/[A-Za-z]/.test(value) || !/\d/.test(value)) return false;
-  if (/^(?:\/|~\/|\.{1,2}\/)/.test(value)) return false;
+  const tokenRun = /[A-Za-z0-9]{20,}/.test(value);
+  if (!tokenRun && /^(?:\/|~\/|\.{1,2}\/)/.test(value)) return false;
   if (quote) return true;
-  return /^[A-Za-z0-9._~+/=:-]+$/.test(value) && !/^[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+$/.test(value);
+  return !/[(\[{<>|\\]/.test(value) && (tokenRun || !/^[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+$/.test(value));
 }
 
-/** Replace only the literal VALUE of a secret-named assignment, quotes kept. */
-function redactAssignedLiteral(match: string, name: string, op: string, written: string): string {
-  if (!isLiteralSecret(written)) return match;
+/**
+ * NAME [:=] VALUE where NAME carries a secret stem not glued to more letters
+ * (TOKENS, tokenizer, secretary stay out; secretKey/SECRETKEY stay in). The
+ * operator never spans a line, and `:-`/`:=` cover shell defaults. An unquoted
+ * value stops at control characters so a NUL-separated binary view still trips
+ * the binary fail-safe. Captures: 1 name, 2 operator with spacing, 3 value as
+ * written.
+ */
+const ENV_ASSIGNMENT =
+  /\b([A-Za-z0-9_]*(?:API[_-]?KEY|SECRET|TOKEN|PASSWORD|PASSWD|PRIVATE[_-]?KEY|ACCESS[_-]?KEY|CLIENT[_-]?SECRET)(?![a-jl-z])[A-Za-z0-9_]*)([ \t]*(?::[-=]?(?![=>~:+?])|=(?![=>~:?]))[ \t]*)("[^"\n]*"|'[^'\n]*'|`[^`\n]*`|[^\s\0-\x1f�"'`;,)\]}#]+)/gi;
+
+/**
+ * Replace only the literal VALUE of a secret-named assignment, quotes kept. A
+ * value that is code is kept but still scanned, because it can carry a literal
+ * default: `"${DB_PASSWORD:-…}"` keeps its expansion and loses the literal.
+ */
+function redactAssignedLiteral(_match: string, name: string, op: string, written: string): string {
+  if (!isLiteralSecret(written)) {
+    return `${name}${op}${written.replace(new RegExp(ENV_ASSIGNMENT), redactAssignedLiteral)}`;
+  }
   const quote = /^["'`]/.test(written) ? written[0] : "";
   return `${name}${op}${quote}${REDACTED}${quote}`;
 }
@@ -151,17 +171,13 @@ export const SECRET_PATTERNS: readonly SecretPattern[] = [
   // Generic "<SECRETKEY>=<value>" / "<SECRETKEY>: <value>" assignments where the
   // key name itself screams secret (env-style), for the free-text fallback
   // (shell/python hook scripts, YAML, docs); JSON/TOML use SECRET_KEY_NAMES
-  // structurally. Case-INSENSITIVE so `export my_api_key=...` is caught too. A
-  // stem glued to more letters (TOKENS, tokenizer, secretary) is not a secret
-  // name, the operator never spans a line, and `:-`/`:=` cover shell defaults.
-  // Captures: 1 name, 2 operator with its spacing, 3 value as written. Only a
-  // LITERAL value is replaced: rewriting the whole assignment turned
-  // `TOTAL_INPUT_TOKENS=$(echo ...)` into `{{REDACTED}} "$input" ...` and broke
-  // every script it touched.
+  // structurally. Case-INSENSITIVE so `export my_api_key=...` is caught too.
+  // Only a LITERAL value is replaced (see ENV_ASSIGNMENT): rewriting the whole
+  // assignment turned `TOTAL_INPUT_TOKENS=$(echo ...)` into
+  // `{{REDACTED}} "$input" ...` and broke every script it touched.
   {
     name: "env-assignment-secret",
-    regex:
-      /\b([A-Za-z0-9_]*(?:API[_-]?KEY|SECRET|TOKEN|PASSWORD|PASSWD|PRIVATE[_-]?KEY|ACCESS[_-]?KEY|CLIENT[_-]?SECRET)(?![A-Za-z])[A-Za-z0-9_]*)([ \t]*(?::[-=]?|=)(?![=>~:+?])[ \t]*)("[^"\n]*"|'[^'\n]*'|`[^`\n]*`|[^\s"'`;,)\]}#]+)/gi,
+    regex: ENV_ASSIGNMENT,
     replace: redactAssignedLiteral,
   },
 ];
@@ -223,11 +239,18 @@ export function isSecretContainerKey(key: string): boolean {
 const PLAIN_SETTING = /^(?:true|false|yes|no|on|off|\d{1,7})$/i;
 
 /**
- * True for configuration such as "1", "false", "on" or 30000, which is never a
- * credential. Exempts such leaves from the blanket container rule only; a
- * secret KEY NAME still redacts them.
+ * Password and PIN names isSecretKey does not know (PGPASSWORD, MYSQL_PWD,
+ * DB_PASS, PASSCODE, YUBIKEY_PIN): a short number under them is a credential.
  */
-export function isPlainSettingValue(value: unknown): boolean {
+const PASSWORD_LIKE_NAME = /pass(?:word|wd|code)?$|pwd$|(?:^|[_-])pin$/i;
+
+/**
+ * True for configuration such as "1", "false", "on" or 30000 under `key`, which
+ * is never a credential. Exempts such leaves from the blanket container rule
+ * only; a secret KEY NAME still redacts them.
+ */
+export function isPlainSettingValue(key: string, value: unknown): boolean {
+  if (PASSWORD_LIKE_NAME.test(key)) return false;
   return (
     typeof value === "boolean" ||
     ((typeof value === "string" || typeof value === "number") && PLAIN_SETTING.test(String(value)))

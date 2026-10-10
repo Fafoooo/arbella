@@ -369,7 +369,7 @@ function cloneRedact(
   // a container a plain flag/number survives; a secret NAME still redacts it.
   const keyIsSecret =
     parentKey.length > 0 &&
-    (isSecretKey(parentKey) || (inSecretContainer && !isPlainSettingValue(node)));
+    (isSecretKey(parentKey) || (inSecretContainer && !isPlainSettingValue(parentKey, node)));
   const { value: redacted, matched } = redactValue(node, keyIsSecret);
   if (matched !== null && redacted !== node) {
     found.push({

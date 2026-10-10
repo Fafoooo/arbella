@@ -308,6 +308,45 @@ describe("sanitizer: secret-named assignments never break code", () => {
     const res = sanitizer.sanitizeFile(settings, "claude", "settings.json");
     expect(res.content).toBe(settings);
   });
+
+  // Leak paths an adversarial review proved against the first cut of this rule:
+  // each input below was redacted before the rewrite and must stay redacted.
+  it.each([
+    ["DB_PASSWORD=P@ssw0rd!2024", `DB_PASSWORD=${REDACTED}`],
+    [
+      'curl -s "https://api.example.com/v1/data?api_key=abc123def456ghi&limit=10"',
+      `curl -s "https://api.example.com/v1/data?api_key=${REDACTED}"`,
+    ],
+    [
+      'export DB_PASSWORD="${DB_PASSWORD:-Sup3rS3cretPw}"',
+      `export DB_PASSWORD="\${DB_PASSWORD:-${REDACTED}}"`,
+    ],
+    [
+      "export API_TOKEN=${API_TOKEN:-abc123def456ghi}",
+      `export API_TOKEN=\${API_TOKEN:-${REDACTED}}`,
+    ],
+    ["VAULT_TOKEN=hvs.CAESIFakeFakeFakeFakeFake1234567890abcd", `VAULT_TOKEN=${REDACTED}`],
+    ["AWS_SECRET_ACCESS_KEY=/9xR4kFakeFakeFakeFakeFakeFakeuP8o", `AWS_SECRET_ACCESS_KEY=${REDACTED}`],
+    ["AWS_SECRET_ACCESS_KEY=+9xR4kFakeFakeFakeFakeFakeFakeuP8o", `AWS_SECRET_ACCESS_KEY=${REDACTED}`],
+    ['secretKey: "abc123def456ghi"', `secretKey: "${REDACTED}"`],
+    ["SECRETKEY=abc123def456ghi", `SECRETKEY=${REDACTED}`],
+  ])("still redacts %s", (input, expected) => {
+    expect(sanitizer.sanitizeFile(input, "claude", "hooks/x.sh").content).toBe(expected);
+  });
+
+  it("redacts a literal inside an auto-approved Bash rule in settings.local.json", () => {
+    const rule = "Bash(PGPASSWORD=Pg!pass2024 psql -h db -U app:*)";
+    const settings = JSON.stringify({ permissions: { allow: [rule] } }, null, 2);
+    const res = sanitizer.sanitizeFile(settings, "claude", "settings.local.json");
+    expect(JSON.parse(res.content).permissions.allow).toEqual([
+      `Bash(PGPASSWORD=${REDACTED} psql -h db -U app:*)`,
+    ]);
+  });
+
+  it("still flags secret-shaped bytes inside a binary blob (binary fail-safe)", () => {
+    const view = "\x7fELF\0\0API_TOKEN=abc123def456ghi\0\0rest";
+    expect(sanitizer.sanitizeText(view, "claude", "bin/tool").changed).toBe(true);
+  });
 });
 
 describe("sanitizer: credential-bearing URLs", () => {
@@ -519,6 +558,18 @@ describe("sanitizer: env/environment/headers containers (E2E leak regression)", 
     );
     const env = JSON.parse(sanitizer.sanitizeFile(blob, "claude", "settings.json").content).env;
     expect(env).toEqual({ DB_PASSWORD: REDACTED, ACCOUNT_NUMBER: REDACTED, ENABLE_X: "1" });
+  });
+
+  it("still redacts numeric passwords and PINs under names isSecretKey does not know", () => {
+    const env = { PGPASSWORD: "123456", MYSQL_PWD: "4711", DB_PASS: "2024", YUBIKEY_PIN: 123456 };
+    const blob = JSON.stringify({ mcpServers: { db: { env } } }, null, 2);
+    const out = JSON.parse(sanitizer.sanitizeFile(blob, "claude", "mcp.json").content);
+    expect(out.mcpServers.db.env).toEqual({
+      PGPASSWORD: REDACTED,
+      MYSQL_PWD: REDACTED,
+      DB_PASS: REDACTED,
+      YUBIKEY_PIN: REDACTED,
+    });
   });
 
   it("isSecretKey catches separator-suffixed *_key / *-key names anywhere", () => {
