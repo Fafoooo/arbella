@@ -117,18 +117,22 @@ function redactSubtree(
 /** Where a TOML value sits: outside any container, under an env map, under credentials. */
 type TomlContext = "none" | "settings" | "credentials";
 
-/** The context below `key`: a secret name or a credentials container wins. */
+/**
+ * The context below `key`. A credentials container makes its subtree
+ * credentials, and so does a secret key name inside any container. Outside a
+ * container a table name such as `mcp_servers.github-token` is an identifier.
+ */
 function childContext(current: TomlContext, key: string): TomlContext {
-  if (current === "credentials" || isSecretKey(key)) return "credentials";
-  if (!isSecretContainerKey(key)) return current;
-  return isSettingsContainerKey(key) ? "settings" : "credentials";
+  if (current === "credentials") return "credentials";
+  if (isSecretContainerKey(key)) return isSettingsContainerKey(key) ? "settings" : "credentials";
+  return current !== "none" && isSecretKey(key) ? "credentials" : current;
 }
 
 /** Whether a scalar leaf under `key` in `context` is redacted. */
 function shouldRedactLeaf(key: string, value: unknown, context: TomlContext): boolean {
   const scalar = typeof value === "string" || typeof value === "number" || typeof value === "boolean";
   if (!scalar) return false;
-  if (context === "credentials") return true;
+  if (context === "credentials" || isSecretKey(key)) return true;
   if (context === "settings" && !isSwitchValue(value)) return true;
   return typeof value === "string" && valueLooksSecret(value);
 }

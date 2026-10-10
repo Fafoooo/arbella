@@ -392,10 +392,16 @@ function cloneRedact(
 /** Where a leaf sits: outside any container, under an env map, under headers. */
 type Container = "none" | "settings" | "credentials";
 
-/** The container a child of `key` sits in; credentials win over settings. */
+/**
+ * The container a child of `key` sits in. A credentials container (headers)
+ * makes its whole subtree credentials, and so does a secret key name inside
+ * any container (`env.DB_PASSWORD.value`). Outside a container a key such as an
+ * MCP server name ("token-optimizer") is an identifier, not a secret.
+ */
 function enterContainer(current: Container, key: string): Container {
-  if (current === "credentials" || !isSecretContainerKey(key)) return current;
-  return isSettingsContainerKey(key) ? "settings" : "credentials";
+  if (current === "credentials") return "credentials";
+  if (isSecretContainerKey(key)) return isSettingsContainerKey(key) ? "settings" : "credentials";
+  return current !== "none" && isSecretKey(key) ? "credentials" : current;
 }
 
 /** A SecretRef for a free-text pattern hit. */

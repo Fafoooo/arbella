@@ -260,6 +260,8 @@ describe("sanitizer: secret-named assignments never break code", () => {
     "  token: string;",
     "  password: z.string().min(8),",
     "const token = `${prefix}-${id}`;",
+    "API_TOKEN=`readtoken`",
+    "TOKEN=`get_key2`",
     "TOKEN_URL=https://oauth2.googleapis.com/token",
     "PASSWORD_FILE=/run/secrets/db_password_v2",
     "TOKEN_FILE=config/token2.json",
@@ -338,6 +340,13 @@ describe("sanitizer: secret-named assignments never break code", () => {
     ['tokenValue: "abc123def456ghi"', `tokenValue: "${REDACTED}"`],
     // Any letter case, as on main: only a same-case run-on (TOKENS) is excluded.
     ["secretkey=abc123def456ghi", `secretkey=${REDACTED}`],
+    // `\$` is a literal dollar in sh, not an expansion.
+    ['DB_PASSWORD="correct\\$horse123"', `DB_PASSWORD="${REDACTED}"`],
+    // The default of any ${VAR:-…} inside a secret-named value is classified itself.
+    [
+      'DB_PASSWORD="${FALLBACK_VALUE:-Sup3rS3cretPw}"',
+      `DB_PASSWORD="\${FALLBACK_VALUE:-"${REDACTED}"}"`,
+    ],
     // Quoted, a single word is a literal even without digits.
     ['DB_PASSWORD="correcthorse"', `DB_PASSWORD="${REDACTED}"`],
     ["password: 'P@ssword!'", `password: '${REDACTED}'`],
@@ -642,6 +651,18 @@ describe("sanitizer: env/environment/headers containers (E2E leak regression)", 
     const out = JSON.parse(sanitizer.sanitizeFile(blob, "claude", "mcp.json").content).mcpServers.s;
     expect(out.headers).toEqual({ "X-Custom-Auth": REDACTED, "X-Debug": REDACTED });
     expect(out.env).toEqual({ DEBUG: "1" });
+  });
+
+  it("treats everything below a secret-named key as a credential, as the TOML pass does", () => {
+    const blob = JSON.stringify({ env: { DB_PASSWORD: { value: "1" } } }, null, 2);
+    const out = JSON.parse(sanitizer.sanitizeFile(blob, "claude", "mcp.json").content);
+    expect(out.env.DB_PASSWORD).toEqual({ value: REDACTED });
+  });
+
+  it("keeps an MCP server whose NAME contains a secret stem (an identifier, not a secret)", () => {
+    const servers = { "token-optimizer": { command: "npx", args: ["-y", "token-optimizer-mcp"] } };
+    const blob = JSON.stringify({ mcpServers: servers }, null, 2);
+    expect(JSON.parse(sanitizer.sanitizeFile(blob, "claude", "mcp.json").content).mcpServers).toEqual(servers);
   });
 
   it("keeps flags whose name merely ends in BYPASS", () => {

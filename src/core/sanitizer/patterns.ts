@@ -39,7 +39,8 @@ const LITERAL_SECRET_MIN_LENGTH = 8;
  * included), is a LITERAL credential rather than code that produces one.
  *
  * Kept: shell expansions (`$(...)`, `${...}`, `$VAR`, backticks — except inside
- * single quotes; a `$` before anything else, as in `Pa$$w0rd`, is literal),
+ * single quotes or after a backslash; a `$` before anything else, as in
+ * `Pa$$w0rd`, is literal),
  * already-redacted/templated text, plain URLs, paths, environment variable
  * names, numbers, unquoted words (a generated credential mixes letters and
  * digits; a bare word is an identifier or a type) and unquoted expressions such
@@ -52,7 +53,11 @@ function isLiteralSecret(written: string): boolean {
   const value = quote ? written.slice(1, -1) : written;
   // Control characters only occur in a binary view: fail closed there.
   if (/[\0-\x08\x0e-\x1f\uFFFD]/.test(value)) return true;
-  if (quote !== "'" && /(?<!\$)\$[({A-Za-z_]|`/.test(value)) return false;
+  // Backticks run their content in sh, like $(…): code, not a value.
+  if (quote === "`") return false;
+  // A backslash escape (`\$`) is literal data; drop escapes before looking for expansions.
+  const unescaped = value.replace(/\\[\s\S]/g, "");
+  if (quote !== "'" && /(?<!\$)\$[({A-Za-z_]|`/.test(unescaped)) return false;
   if (value.includes("{{")) return false;
   const tokenRun = /[A-Za-z0-9]{20,}/.test(value);
   // A webhook URL carries its secret in the path: hooks.slack.com/services/T…/B…/<token>.
@@ -99,6 +104,13 @@ const ENV_ASSIGNMENT =
  */
 const MAX_ASSIGNMENT_DEPTH = 4;
 
+/**
+ * The default of a shell expansion, `${VAR:-default}` / `${VAR:=default}` (or
+ * without the colon), when it is a plain word. The closing brace may lie just
+ * past an unquoted value, which stops at `}`.
+ */
+const SHELL_DEFAULT = /(\$\{[A-Za-z_]\w*:?[-=])([^\s{}$`"'\\]+)(?=\}|$)/g;
+
 /** Secret stems inside a name, in any letter case. */
 const SECRET_NAME_STEM =
   /api[_-]?key|secret|token|passw(?:or)?d|private[_-]?key|access[_-]?key|client[_-]?secret/gi;
@@ -140,7 +152,13 @@ function literalRedactor(depth: number) {
       return `${name}${op}${quote}${REDACTED}${quote}`;
     }
     if (atLimit) return match;
-    return `${name}${op}${written.replace(new RegExp(ENV_ASSIGNMENT), literalRedactor(depth + 1))}`;
+    // A secret-named value's fallbacks are its value too: "${OTHER:-<literal>}".
+    const fallbacks = secretName
+      ? written.replace(SHELL_DEFAULT, (whole: string, head: string, fallback: string) =>
+          isLiteralSecret(fallback) ? `${head}"${REDACTED}"` : whole,
+        )
+      : written;
+    return `${name}${op}${fallbacks.replace(new RegExp(ENV_ASSIGNMENT), literalRedactor(depth + 1))}`;
   };
 }
 

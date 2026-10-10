@@ -81,6 +81,20 @@ RETRIES = [3]
   } } });
 });
 
+it("keeps a TOML MCP server whose NAME contains a secret stem, still redacting its secrets", () => {
+  const result = processConfigToml(`
+[mcp_servers.github-token]
+command = "npx"
+args = ["-y", "github-token-mcp"]
+api_token = "opaque-private-token"
+`, createTemplater(), makeVariables("/home/test", "test", "linux", "/home/test/.codex"));
+  expect(parseToml(result.sanitizedToml).mcp_servers).toEqual({ "github-token": {
+    command: "npx",
+    args: ["-y", "github-token-mcp"],
+    api_token: "{{REDACTED}}",
+  } });
+});
+
 it("keeps switch-valued MCP env flags in config.toml, redacts the rest", () => {
   const result = processConfigToml(`
 [mcp_servers.unifi.env]
