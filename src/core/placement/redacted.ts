@@ -3,6 +3,12 @@
  * REDACTED marker where a secret used to be; placing it verbatim would break the
  * local tool. These helpers merge the real local value back in, or report the
  * key as missing. Never logs or returns anything but key paths for omissions.
+ *
+ * A real local secret is reused only when its scope (see {@link scopeOf}) is
+ * otherwise unchanged; no list of endpoint key names is involved. Threat model:
+ * the backup repo is trusted (it ships hooks and MCP commands that run code).
+ * This guard keeps a secret from silently following a changed endpoint or
+ * block; it is not a sandbox against a malicious repo.
  */
 import { isDeepStrictEqual } from "node:util";
 import { parse as parseToml, stringify as stringifyToml } from "smol-toml";
@@ -22,42 +28,64 @@ export function hasMarker(v: unknown): boolean {
   return false;
 }
 
-/** Parent keys whose children are whole server/provider definitions (entries). */
-const ENTRY_PARENTS = new Set(["mcpServers", "mcp_servers", "servers", "mcp", "model_providers"]);
-
-/** Keys that say where an object sends a secret (command to run, endpoint to call). */
-const ENDPOINT_HINTS = [
-  "command", "args", "url", "cwd", "type", "transport",
-  "serverUrl", "httpUrl", "endpoint", "base_url", "baseUrl",
+/**
+ * Maps of whole server/provider definitions, anchored at the document root. A
+ * name matched at any depth would let a nested "servers" key pose as an entry.
+ */
+const ENTRY_MAPS: readonly (readonly string[])[] = [
+  ["mcpServers"], ["mcp_servers"], ["servers"], ["mcp"], ["mcp", "servers"],
+  ["model_providers"], ["profiles"],
 ];
-const hasHint = (o: unknown): boolean => isPlain(o) && ENDPOINT_HINTS.some((k) => k in o);
+
+const startsWith = (path: readonly string[], prefix: readonly string[]): boolean =>
+  prefix.length <= path.length && prefix.every((k, i) => path[i] === k);
 
 /**
- * Is `repo` equal to `local` once every repo marker path is dropped from both?
- * Key order does not matter; any repo-side addition or local-only key counts as
- * a change. An undefined or non-object `local` is never equal.
+ * The subtree that must be unchanged before the secret at `path` may be reused:
+ * the whole object when `rootIsEntry`; else the entry under the longest matching
+ * ENTRY_MAPS path; else the top-level subtree; else (a top-level leaf) the
+ * whole document.
+ *
+ * Safety never depends on ENTRY_MAPS being complete: a map we do not know falls
+ * back to its coarser top-level subtree, which contains every entry. The list
+ * only NARROWS the scope for usability, so an omission cannot open a hole.
  */
-const blindEqual = (repo: Plain, local: unknown): boolean =>
-  isPlain(local) &&
-  isDeepStrictEqual(
-    markerPaths(repo).reduce(withoutPath, repo as unknown),
-    markerPaths(repo).reduce(withoutPath, local as unknown),
-  );
+export function scopeOf(path: readonly string[], rootIsEntry = false): string[] {
+  if (rootIsEntry) return [];
+  const map = ENTRY_MAPS.filter((m) => path.length > m.length + 1 && startsWith(path, m)).reduce<
+    readonly string[] | undefined
+  >((best, m) => (best === undefined || m.length > best.length ? m : best), undefined);
+  if (map) return [...map, path[map.length]!];
+  return path.length > 1 ? [path[0]!] : [];
+}
+
+const getAt = (node: unknown, path: readonly string[]): unknown =>
+  path.reduce<unknown>((n, k) => (isPlain(n) ? n[k] : undefined), node);
+
+/**
+ * Is the repo scope equal to the local scope once the repo's marker paths inside
+ * it are dropped from both? Key order does not matter; any repo-side addition or
+ * local-only key counts as a change. A missing local scope is never equal.
+ */
+function scopeUnchanged(repo: Plain, local: Plain, scope: string[], markers: string[][]): boolean {
+  const repoScope = getAt(repo, scope);
+  const localScope = getAt(local, scope);
+  if (!isPlain(repoScope) || !isPlain(localScope)) return false;
+  const inside = markers.filter((m) => startsWith(m, scope)).map((m) => m.slice(scope.length));
+  return isDeepStrictEqual(inside.reduce(withoutPath, repoScope as unknown), inside.reduce(withoutPath, localScope as unknown));
+}
 
 /**
  * Merge a repo value (may contain markers) with the local one. A marker leaf (a
  * string, or an array containing a marker) takes the local value at the same key
  * path when that is real; otherwise only that key is omitted and its path
  * reported. A local marker counts as no value. A real local value is reused only
- * when ALL of these are unchanged (see {@link blindEqual}): the leaf's immediate
- * parent object; every enclosing server/provider entry (an object under
- * mcpServers, mcp_servers, servers, mcp or model_providers); and every enclosing
- * object that carries an endpoint hint (command, args, url, cwd, type, ... in
- * the repo or the local object), wherever it sits. The checks are ANDed down the
- * tree, so a nested object can never reset an outer one. Otherwise the leaf is
- * omitted and its path listed in `unsafe`, so a changed command, url, env or any
- * other key can never redirect a secret. `rootIsEntry` marks `repo` itself as
- * such an entry (a bare server definition).
+ * when the leaf's {@link scopeOf scope} (its server/provider entry, else its
+ * top-level subtree, else the whole document) is otherwise unchanged
+ * ({@link scopeUnchanged}). Otherwise the leaf is omitted and its path listed in
+ * `unsafe`, so a changed command, url, host, env or any other key in the block
+ * can never redirect a secret, whatever it is called. `rootIsEntry` marks `repo`
+ * itself as one entry (a bare server definition).
  */
 export function mergeRedacted(
   repo: unknown,
@@ -65,34 +93,36 @@ export function mergeRedacted(
   opts: { rootIsEntry?: boolean } = {},
 ): { value: unknown; missing: string[][]; unsafe: string[][] } {
   if (!isPlain(repo)) return { value: repo, missing: [], unsafe: [] };
-  return mergeObject(repo, isPlain(local) ? local : undefined, [], true, opts.rootIsEntry === true);
+  const localObj = isPlain(local) ? local : undefined;
+  const markers = markerPaths(repo);
+  const reusable = new Set(
+    markers
+      .filter((m) => localObj !== undefined && scopeUnchanged(repo, localObj, scopeOf(m, opts.rootIsEntry === true), markers))
+      .map((m) => JSON.stringify(m)),
+  );
+  return mergeObject(repo, localObj, [], reusable);
 }
 
-/** `inherited`: every enclosing level that needs a check passed it. */
 function mergeObject(
   repo: Plain,
   local: Plain | undefined,
   path: string[],
-  inherited: boolean,
-  rootIsEntry: boolean,
+  reusable: ReadonlySet<string>,
 ): { value: Plain; missing: string[][]; unsafe: string[][] } {
   const value: Plain = {};
   const missing: string[][] = [];
   const unsafe: string[][] = [];
-  const isEntry = path.length === 0 ? rootIsEntry : ENTRY_PARENTS.has(path[path.length - 2]!);
-  const needsCheck = isEntry || hasHint(repo) || hasHint(local);
-  const scopeOk = inherited && (!needsCheck || blindEqual(repo, local));
   for (const [key, rv] of Object.entries(repo)) {
     const lv = local?.[key];
     const here = [...path, key];
     if (isPlain(rv)) {
-      const sub = mergeObject(rv, isPlain(lv) ? lv : undefined, here, scopeOk, false);
+      const sub = mergeObject(rv, isPlain(lv) ? lv : undefined, here, reusable);
       value[key] = sub.value;
       missing.push(...sub.missing);
       unsafe.push(...sub.unsafe);
     } else if (hasMarker(rv)) {
       if (lv === undefined || hasMarker(lv)) missing.push(here);
-      else if (scopeOk && blindEqual(repo, local)) value[key] = lv;
+      else if (reusable.has(JSON.stringify(here))) value[key] = lv;
       else unsafe.push(here);
     } else {
       value[key] = rv;
