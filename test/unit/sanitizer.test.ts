@@ -330,6 +330,15 @@ describe("sanitizer: secret-named assignments never break code", () => {
     ["AWS_SECRET_ACCESS_KEY=+9xR4kFakeFakeFakeFakeFakeFakeuP8o", `AWS_SECRET_ACCESS_KEY=${REDACTED}`],
     ['secretKey: "abc123def456ghi"', `secretKey: "${REDACTED}"`],
     ["SECRETKEY=abc123def456ghi", `SECRETKEY=${REDACTED}`],
+    ['tokenValue: "abc123def456ghi"', `tokenValue: "${REDACTED}"`],
+    ['apiKeyValue = "abc123def456ghi"', `apiKeyValue = "${REDACTED}"`],
+    ["X-API-Key: abc123def456ghi", `X-API-Key: "${REDACTED}"`],
+    // A webhook carries its secret in the URL path (host kept generic so the
+    // fixture does not trip GitHub's secret scanning).
+    [
+      "WEBHOOK_TOKEN=https://hooks.example.com/services/T0000/B0000/FakeFakeFakeFakeFake1234",
+      `WEBHOOK_TOKEN=${REDACTED}`,
+    ],
   ])("still redacts %s", (input, expected) => {
     expect(sanitizer.sanitizeFile(input, "claude", "hooks/x.sh").content).toBe(expected);
   });
@@ -353,6 +362,24 @@ describe("sanitizer: secret-named assignments never break code", () => {
       expect(sanitizer.sanitizeFile(line, "claude", "hooks/x.sh").content).toBe(line);
     },
   );
+
+  it("fails closed past the nesting limit instead of shipping the literal", () => {
+    const line = 'X_TOKEN="${A_TOKEN:-${B_TOKEN:-${C_TOKEN:-${D_TOKEN:-${E_TOKEN:-abc123def456ghi}}}}}"';
+    expect(sanitizer.sanitizeText(line, "claude", "x.sh").content).not.toContain("abc123def456ghi");
+  });
+
+  it("redacts a shell single-quoted value that ends in a backslash", () => {
+    // In sh, `\'` closes a single-quoted string; the escape-aware form must
+    // not make the whole value unmatchable.
+    expect(sanitizer.sanitizeFile("TOKEN='abc123def456\\'", "claude", "x.sh").content).toBe(
+      `TOKEN='${REDACTED}'`,
+    );
+  });
+
+  it("flags a quoted secret followed by binary junk inside a binary view", () => {
+    const view = '\0API_TOKEN="abc123def456ghi\0\x01 junk"\0';
+    expect(sanitizer.sanitizeText(view, "claude", "bin/tool").changed).toBe(true);
+  });
 
   it("handles pathological lines without blowing the stack or the clock", () => {
     expect(() => sanitizer.sanitizeText("TOKEN=$".repeat(2000), "claude", "x.sh")).not.toThrow();

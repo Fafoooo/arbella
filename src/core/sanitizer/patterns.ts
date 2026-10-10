@@ -43,35 +43,45 @@ const LITERAL_SECRET_MIN_LENGTH = 8;
  * already-redacted/templated text, plain URLs, paths, words and numbers (a
  * generated credential mixes letters and digits), and unquoted expressions such
  * as `process.env.X` or `os.environ[`. A run of 20+ letters/digits is a token
- * even when it looks like a path or a dotted name (`/9xR4k…`, Vault `hvs.CAES…`).
+ * even when it looks like a URL, a path or a dotted name (a webhook path,
+ * `/9xR4k…`, Vault `hvs.CAES…`).
  */
 function isLiteralSecret(written: string): boolean {
   const quote = /^["'`]/.test(written) ? written[0] : "";
   const value = quote ? written.slice(1, -1) : written;
+  // Control characters only occur in a binary view: fail closed there.
+  if (/[\0-\x08\x0e-\x1f\uFFFD]/.test(value)) return true;
   if (quote !== "'" && /(?<!\$)\$[({A-Za-z_]|`/.test(value)) return false;
   if (value.includes("{{")) return false;
-  if (/^[A-Za-z][A-Za-z0-9+.-]*:\/\//.test(value)) return isCredentialBearingUrl(value);
+  const tokenRun = /[A-Za-z0-9]{20,}/.test(value);
+  // A webhook URL carries its secret in the path: hooks.slack.com/services/T…/B…/<token>.
+  if (/^[A-Za-z][A-Za-z0-9+.-]*:\/\//.test(value)) return tokenRun || isCredentialBearingUrl(value);
   if (value.length < LITERAL_SECRET_MIN_LENGTH || /\s/.test(value)) return false;
   if (!/[A-Za-z]/.test(value) || !/\d/.test(value)) return false;
-  const tokenRun = /[A-Za-z0-9]{20,}/.test(value);
   if (!tokenRun && /^(?:\/|~\/|\.{1,2}\/)/.test(value)) return false;
   if (quote) return true;
   return !/[(\[{<>|\\]/.test(value) && (tokenRun || !/^[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+$/.test(value));
 }
 
 /**
- * NAME [:=] VALUE where NAME carries a secret stem not glued to more letters
- * (TOKENS, tokenizer, secretary stay out; secretKey/SECRETKEY stay in). The
- * name parts are bounded so a megabyte-long identifier stays linear. The
+ * NAME [:=] VALUE where NAME carries a secret stem that ends a word: an UPPER
+ * stem may not run on into capitals (TOKENS) and a lower/camel stem not into
+ * lower case (tokens, tokenizer, secretary), so secretKey, tokenValue and
+ * SECRETKEY stay in. The name parts are bounded so a megabyte-long identifier
+ * stays linear. The
  * operator never spans a line, and `:-`/`:=` cover shell defaults. A quoted
- * value honours backslash escapes; an unquoted one stops at control characters
- * so a NUL-separated binary view still trips the binary fail-safe. Captures:
+ * value honours backslash escapes, falling back to the plain form (in sh, `\'`
+ * ends a single-quoted string); an unquoted one stops at control characters so
+ * a NUL-separated binary view still trips the binary fail-safe. Captures:
  * 1 name, 2 operator with spacing, 3 value as written.
  */
 const ENV_ASSIGNMENT =
-  /\b([A-Za-z0-9_]{0,64}(?:API[_-]?KEY|SECRET|TOKEN|PASSWORD|PASSWD|PRIVATE[_-]?KEY|ACCESS[_-]?KEY|CLIENT[_-]?SECRET)(?![a-jl-z])[A-Za-z0-9_]{0,64})([ \t]*(?::[-=]?(?![=>~:+?])|=(?![=>~:?]))[ \t]*)("(?:\\.|[^"\\\n])*"|'(?:\\.|[^'\\\n])*'|`[^`\n]*`|[^\s\0-\x1f\uFFFD"'`;,)\]}#]+)/gi;
+  /\b([A-Za-z0-9_]{0,64}(?:(?:API[_-]?KEY|SECRET|TOKEN|PASSWORD|PASSWD|PRIVATE[_-]?KEY|ACCESS[_-]?KEY|CLIENT[_-]?SECRET)(?![A-JL-Z])|(?:(?:API|[Aa]pi)[_-]?[Kk]ey|[Ss]ecret|[Tt]oken|[Pp]assw(?:or)?d|[Pp]rivate[_-]?[Kk]ey|[Aa]ccess[_-]?[Kk]ey|[Cc]lient[_-]?[Ss]ecret)(?![a-z]))[A-Za-z0-9_]{0,64})([ \t]*(?::[-=]?(?![=>~:+?])|=(?![=>~:?]))[ \t]*)("(?:\\.|[^"\\\n])*"|"[^"\n]*"|'(?:\\.|[^'\\\n])*'|'[^'\n]*'|`[^`\n]*`|[^\s\0-\x1f\uFFFD"'`;,)\]}#]+)/g;
 
-/** "…" > ${X:-…} > literal is as deep as real code nests; deeper is pathological. */
+/**
+ * "…" > ${X:-…} > literal is as deep as real code nests. Deeper is
+ * pathological; it is redacted whole rather than recursed into.
+ */
 const MAX_ASSIGNMENT_DEPTH = 4;
 
 /**
@@ -83,12 +93,12 @@ const MAX_ASSIGNMENT_DEPTH = 4;
  */
 function literalRedactor(depth: number) {
   return (_match: string, name: string, op: string, written: string): string => {
-    if (isLiteralSecret(written)) {
+    // Past the nesting limit the value is redacted whole: fail closed.
+    if (depth >= MAX_ASSIGNMENT_DEPTH || isLiteralSecret(written)) {
       const own = /^["'`]/.test(written) ? written[0] : "";
       const quote = own || (op.includes(":") ? '"' : "");
       return `${name}${op}${quote}${REDACTED}${quote}`;
     }
-    if (depth >= MAX_ASSIGNMENT_DEPTH) return `${name}${op}${written}`;
     return `${name}${op}${written.replace(new RegExp(ENV_ASSIGNMENT), literalRedactor(depth + 1))}`;
   };
 }
