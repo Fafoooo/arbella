@@ -693,6 +693,21 @@ describe("sanitizer: env/environment/headers containers (E2E leak regression)", 
     expect(JSON.parse(sanitizer.sanitizeFile(blob, "claude", "mcp.json").content).mcpServers).toEqual(servers);
   });
 
+  it("treats objects under secret names as credentials at every level, like the TOML pass", () => {
+    const blob = JSON.stringify({ credentials: { pass: "x1" }, auth: { value: "opaque" } }, null, 2);
+    const out = JSON.parse(sanitizer.sanitizeFile(blob, "claude", "x.json").content);
+    expect(out).toEqual({ credentials: { pass: REDACTED }, auth: { value: REDACTED } });
+  });
+
+  it("keeps entry names of plugin and marketplace maps (identifiers, not secrets)", () => {
+    const settings = {
+      enabledPlugins: { "token-optimizer@market": true },
+      extraKnownMarketplaces: { "secret-tools": { source: { source: "github", repo: "acme/secret-tools" } } },
+    };
+    const res = sanitizer.sanitizeFile(JSON.stringify(settings, null, 2), "claude", "settings.json");
+    expect(JSON.parse(res.content)).toEqual(settings);
+  });
+
   it("keeps flags whose name merely ends in BYPASS", () => {
     const env = { CLAUDE_BYPASS: "1", ENABLE_BYPASS: "true" };
     const res = sanitizer.sanitizeFile(JSON.stringify({ env }, null, 2), "claude", "settings.json");

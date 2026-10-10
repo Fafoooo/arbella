@@ -332,19 +332,23 @@ function cloneRedact(
   found: SecretRef[],
   parentKey = "",
   container: Container = "none",
+  parentIsEntryName = false,
 ): unknown {
   // Arrays: clone element-wise, preserving index in the path.
   if (Array.isArray(node)) {
     return node.map((el, i) =>
-      cloneRedact(el, tool, source, joinPath(keyPath, String(i)), found, parentKey, container),
+      cloneRedact(el, tool, source, joinPath(keyPath, String(i)), found, parentKey, container, parentIsEntryName),
     );
   }
 
-  // Plain objects: clone key-by-key.
+  // Plain objects: clone key-by-key. The keys of an entry map (mcpServers,
+  // enabledPlugins, ...) name entries: identifiers, never secret names.
   if (isPlainObject(node)) {
     const out: Record<string, unknown> = {};
+    const entryNames = ENTRY_MAPS.has(parentKey);
     for (const [k, v] of Object.entries(node)) {
-      out[k] = cloneRedact(v, tool, source, joinPath(keyPath, k), found, k, enterContainer(container, k));
+      const inner = entryNames ? container : enterContainer(container, k);
+      out[k] = cloneRedact(v, tool, source, joinPath(keyPath, k), found, k, inner, entryNames);
     }
     return out;
   }
@@ -369,7 +373,7 @@ function cloneRedact(
   // an env map a switch survives; a secret NAME still redacts it.
   const keyIsSecret =
     parentKey.length > 0 &&
-    (isSecretKey(parentKey) ||
+    ((!parentIsEntryName && isSecretKey(parentKey)) ||
       container === "credentials" ||
       (container === "settings" && !isSwitchValue(node)));
   const { value: redacted, matched } = redactValue(node, keyIsSecret);
@@ -393,15 +397,31 @@ function cloneRedact(
 type Container = "none" | "settings" | "credentials";
 
 /**
- * The container a child of `key` sits in. A credentials container (headers)
- * makes its whole subtree credentials, and so does a secret key name inside
- * any container (`env.DB_PASSWORD.value`). Outside a container a key such as an
- * MCP server name ("token-optimizer") is an identifier, not a secret.
+ * Maps whose keys name entries — an MCP server called "token-optimizer", a
+ * plugin "github-token@market" — rather than settings. Their keys are
+ * identifiers, as in codex's TOML pass.
+ */
+const ENTRY_MAPS: ReadonlySet<string> = new Set([
+  "mcpServers",
+  "servers",
+  "mcp",
+  "enabledPlugins",
+  "extraKnownMarketplaces",
+  "marketplaces",
+  "plugins",
+  "projects",
+  "profiles",
+]);
+
+/**
+ * The container a child of `key` sits in: a secret key name or a credentials
+ * container (headers) makes the whole subtree credentials, as in codex's TOML
+ * pass; credentials win over settings.
  */
 function enterContainer(current: Container, key: string): Container {
-  if (current === "credentials") return "credentials";
-  if (isSecretContainerKey(key)) return isSettingsContainerKey(key) ? "settings" : "credentials";
-  return current !== "none" && isSecretKey(key) ? "credentials" : current;
+  if (current === "credentials" || isSecretKey(key)) return "credentials";
+  if (!isSecretContainerKey(key)) return current;
+  return isSettingsContainerKey(key) ? "settings" : "credentials";
 }
 
 /** A SecretRef for a free-text pattern hit. */
